@@ -19,7 +19,7 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     defaultDownloadType: 'video',
     maxStorageLimit: 10, // GB
     showMediaIndicator: true,
-    enableMobileOverlay: true
+    enableMobileOverlay: false
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -192,6 +192,7 @@ export default class CrossPlayerPlugin extends Plugin {
     async saveData() {
         await super.saveData(this.data);
         if (this.listView) this.listView.refresh();
+        if (this.mainView) this.mainView.refreshMobileOverlay();
     }
 
     registerWatchers() {
@@ -1292,6 +1293,7 @@ class CrossPlayerListView extends ItemView {
 class CrossPlayerMainView extends ItemView {
     plugin: CrossPlayerPlugin;
     videoEl: HTMLVideoElement;
+    overlayEl: HTMLElement | null = null;
     currentItem: MediaItem | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: CrossPlayerPlugin) {
@@ -1329,13 +1331,7 @@ class CrossPlayerMainView extends ItemView {
         this.videoEl.style.width = "100%";
         this.videoEl.style.height = "100%";
 
-        // Mobile Overlay Controls
-        if (this.plugin.data.settings.enableMobileOverlay && Platform.isMobile) {
-            this.createMobileOverlay(container);
-        } else if (this.plugin.data.settings.enableMobileOverlay && !Platform.isMobile) {
-             // For testing on desktop if enabled
-             this.createMobileOverlay(container);
-        }
+        this.refreshMobileOverlay();
 
         this.videoEl.onended = async () => {
             if (this.currentItem) {
@@ -1357,9 +1353,32 @@ class CrossPlayerMainView extends ItemView {
         }
     }
 
+    refreshMobileOverlay() {
+        const container = this.contentEl;
+        const shouldShow = this.plugin.data.settings.enableMobileOverlay;
+
+        if (!shouldShow) {
+            if (this.overlayEl) {
+                this.overlayEl.remove();
+                this.overlayEl = null;
+            }
+            return;
+        }
+
+        // If enabled, check if we need to create it
+        if (!this.overlayEl || !container.contains(this.overlayEl)) {
+            // Remove existing if it's detached but not null (shouldn't happen with correct logic, but safe)
+            if (this.overlayEl) {
+                this.overlayEl.remove();
+            }
+            this.createMobileOverlay(container);
+        }
+    }
+
     createMobileOverlay(container: HTMLElement) {
         // Overlay Container
         const overlay = container.createDiv({ cls: 'cross-player-overlay' });
+        this.overlayEl = overlay;
         overlay.style.position = "absolute";
         overlay.style.top = "0";
         overlay.style.left = "0";
