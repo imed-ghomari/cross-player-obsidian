@@ -50,7 +50,12 @@ export default class CrossPlayerPlugin extends Plugin {
                 try {
                     const child = spawn(ytPath, ['--version']);
                     child.stdout.on('data', (data) => {
-                        new Notice(`yt-dlp version: ${data.toString().trim()}`);
+                        const version = data.toString().trim();
+                        new Notice(`yt-dlp version: ${version}`);
+                        // Simple check: if version starts with 2021, 2022, 2023, it's likely too old given it's 2025+
+                        if (version.startsWith('2021') || version.startsWith('2022') || version.startsWith('2023')) {
+                            new Notice("⚠️ Your yt-dlp is very old! Please update it.");
+                        }
                     });
                     child.stderr.on('data', (data) => {
                         new Notice(`yt-dlp error: ${data.toString()}`);
@@ -58,6 +63,21 @@ export default class CrossPlayerPlugin extends Plugin {
                     child.on('error', (err) => {
                          new Notice(`Failed to run yt-dlp: ${err.message}`);
                     });
+
+                    // Also check ffmpeg if configured
+                    const { ffmpegPath } = this.data.settings;
+                    if (ffmpegPath) {
+                        const ffmpegChild = spawn(ffmpegPath, ['-version']);
+                        ffmpegChild.on('error', () => {
+                             new Notice(`⚠️ FFmpeg not found at: ${ffmpegPath}`);
+                        });
+                        ffmpegChild.stdout.on('data', (data) => {
+                            if (data.toString().includes('ffmpeg version')) {
+                                // detected
+                            }
+                        });
+                    }
+
                 } catch (e) {
                     new Notice(`Exception: ${e.message}`);
                 }
@@ -814,7 +834,18 @@ export default class CrossPlayerPlugin extends Plugin {
             });
 
             child.stderr.on('data', (data) => {
-                console.error(`yt-dlp stderr: ${data}`);
+                const errorMsg = data.toString();
+                console.error(`yt-dlp stderr: ${errorMsg}`);
+                
+                // Detect specific errors
+                if (errorMsg.includes("HTTP Error 400") || errorMsg.includes("Precondition check failed") || errorMsg.includes("Unable to extract")) {
+                    downloadStatus.error = "Update yt-dlp!";
+                    downloadStatus.status = 'error';
+                    this.listView?.updateDownloadProgress();
+                } else if (errorMsg.includes("ffmpeg-location") && errorMsg.includes("does not exist")) {
+                     // This is a warning, but good to know
+                     console.warn("FFmpeg path invalid");
+                }
             });
 
             child.on('error', (err) => {
