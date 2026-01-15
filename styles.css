@@ -1,0 +1,66 @@
+/* Styles for Cross Player */
+
+.cross-player-list {
+    padding: 10px;
+}
+
+.cross-player-item {
+    display: flex;
+    align-items: center;
+    padding: 8px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    transition: background-color 0.1s ease;
+}
+
+.cross-player-item:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.cross-player-status-icon {
+    margin-right: 10px;
+    display: flex;
+    align-items: center;
+}
+
+.cross-player-name {
+    flex-grow: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+
+.cross-player-controls {
+    display: flex;
+    gap: 4px;
+    opacity: 0.5;
+    transition: opacity 0.2s;
+}
+
+.cross-player-item:hover .cross-player-controls {
+    opacity: 1;
+}
+
+.clickable-icon {
+    cursor: pointer;
+    padding: 2px;
+}
+
+.clickable-icon:hover {
+    color: var(--text-accent);
+}
+
+/* Drag and Drop Styles */
+.sortable-ghost {
+    background-color: var(--interactive-accent);
+    opacity: 0.4;
+}
+
+.sortable-handle {
+    cursor: grab;
+}
+
+.sortable-handle:active {
+    cursor: grabbing;
+}
