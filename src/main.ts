@@ -17,7 +17,8 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     downloadFolder: '',
     defaultDownloadQuality: 'best',
     defaultDownloadType: 'video',
-    maxStorageLimit: 10 // GB
+    maxStorageLimit: 10, // GB
+    showMediaIndicator: true
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -841,6 +842,8 @@ class CrossPlayerSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
+        containerEl.createEl('h3', { text: 'General Settings' });
+
         new Setting(containerEl)
             .setName('Watched Folder')
             .setDesc('Current watched folder path (relative to vault root).')
@@ -892,7 +895,17 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     }
                 }));
 
-        containerEl.createEl('h3', { text: 'YouTube Download Settings' });
+        new Setting(containerEl)
+            .setName('Show Media Indicator')
+            .setDesc('Show audio/video icon in the queue list.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.data.settings.showMediaIndicator)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.showMediaIndicator = value;
+                    await this.plugin.saveData();
+                }));
+
+        containerEl.createEl('h3', { text: 'Storage & Download Settings' });
 
         new Setting(containerEl)
             .setName('yt-dlp Binary Path')
@@ -1039,12 +1052,14 @@ class CrossPlayerListView extends ItemView {
             statusIcon.style.marginRight = "5px";
 
             // Type Icon
-            const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
-            const ext = item.path.split('.').pop()?.toLowerCase();
-            const isAudio = ['mp3', 'wav', 'ogg'].includes(ext || '');
-            setIcon(typeIcon, isAudio ? "headphones" : "film");
-            typeIcon.style.marginRight = "10px";
-            typeIcon.style.color = "var(--text-muted)";
+            if (this.plugin.data.settings.showMediaIndicator) {
+                const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
+                const ext = item.path.split('.').pop()?.toLowerCase();
+                const isAudio = ['mp3', 'wav', 'ogg'].includes(ext || '');
+                setIcon(typeIcon, isAudio ? "headphones" : "film");
+                typeIcon.style.marginRight = "10px";
+                typeIcon.style.color = "var(--text-muted)";
+            }
             // typeIcon.style.fontSize = "0.8em"; // Icon size is usually handled by setIcon/svg, might need scaling if too big, but default is usually fine for rows.
             // setIcon produces an svg. Obsidian icons are standard size.
             // Let's make it slightly smaller to be subtle? Or just normal.

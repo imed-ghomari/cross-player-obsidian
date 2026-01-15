@@ -19,6 +19,7 @@ export interface CrossPlayerSettings {
     defaultDownloadQuality: 'best' | '1080p' | '720p' | '480p' | 'audio';
     defaultDownloadType: 'video' | 'audio';
     maxStorageLimit: number; // in GB
+    showMediaIndicator: boolean;
 }
 
 export interface DownloadStatus {
