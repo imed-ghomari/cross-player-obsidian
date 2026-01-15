@@ -20,6 +20,7 @@ export interface CrossPlayerSettings {
     defaultDownloadType: 'video' | 'audio';
     maxStorageLimit: number; // in GB
     showMediaIndicator: boolean;
+    enableMobileOverlay: boolean;
 }
 
 export interface DownloadStatus {

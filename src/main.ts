@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform } from 'obsidian';
 import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus } from './types';
 import Sortable from 'sortablejs';
 import { spawn } from 'child_process';
@@ -18,7 +18,8 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     defaultDownloadQuality: 'best',
     defaultDownloadType: 'video',
     maxStorageLimit: 10, // GB
-    showMediaIndicator: true
+    showMediaIndicator: true,
+    enableMobileOverlay: true
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -983,6 +984,16 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveData();
                 }));
 
+        new Setting(containerEl)
+            .setName('Enable Mobile Overlay Controls')
+            .setDesc('Show large overlay controls (Play, Seek, Next) for easier interaction while driving/mobile.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.data.settings.enableMobileOverlay)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.enableMobileOverlay = value;
+                    await this.plugin.saveData();
+                }));
+
         containerEl.createEl('h3', { text: 'Storage & Download Settings' });
 
         new Setting(containerEl)
@@ -1309,6 +1320,7 @@ class CrossPlayerMainView extends ItemView {
         container.style.alignItems = "center";
         container.style.height = "100%";
         container.style.backgroundColor = "#000";
+        container.style.position = "relative"; // Needed for overlay
 
         this.videoEl = container.createEl("video");
         this.videoEl.controls = true;
@@ -1316,6 +1328,14 @@ class CrossPlayerMainView extends ItemView {
         this.videoEl.style.maxHeight = "100%";
         this.videoEl.style.width = "100%";
         this.videoEl.style.height = "100%";
+
+        // Mobile Overlay Controls
+        if (this.plugin.data.settings.enableMobileOverlay && Platform.isMobile) {
+            this.createMobileOverlay(container);
+        } else if (this.plugin.data.settings.enableMobileOverlay && !Platform.isMobile) {
+             // For testing on desktop if enabled
+             this.createMobileOverlay(container);
+        }
 
         this.videoEl.onended = async () => {
             if (this.currentItem) {
@@ -1334,6 +1354,138 @@ class CrossPlayerMainView extends ItemView {
             if (this.currentItem) {
                 await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime);
             }
+        }
+    }
+
+    createMobileOverlay(container: HTMLElement) {
+        // Overlay Container
+        const overlay = container.createDiv({ cls: 'cross-player-overlay' });
+        overlay.style.position = "absolute";
+        overlay.style.top = "0";
+        overlay.style.left = "0";
+        overlay.style.width = "100%";
+        overlay.style.height = "100%";
+        overlay.style.display = "flex";
+        overlay.style.flexDirection = "column";
+        overlay.style.justifyContent = "center";
+        overlay.style.alignItems = "center";
+        overlay.style.backgroundColor = "rgba(0, 0, 0, 0.4)";
+        overlay.style.zIndex = "10";
+        overlay.style.opacity = "0";
+        overlay.style.transition = "opacity 0.3s ease";
+        overlay.style.pointerEvents = "none"; // Let clicks pass through when hidden
+
+        // Visibility Logic
+        let hideTimeout: NodeJS.Timeout;
+        const showOverlay = () => {
+            overlay.style.opacity = "1";
+            overlay.style.pointerEvents = "auto";
+            if (hideTimeout) clearTimeout(hideTimeout);
+            hideTimeout = setTimeout(() => {
+                overlay.style.opacity = "0";
+                overlay.style.pointerEvents = "none";
+            }, 3000); // Hide after 3 seconds
+        };
+
+        // Toggle on tap
+        container.addEventListener('click', () => {
+             // If clicking on a button, don't toggle immediately (buttons handle their own clicks)
+             // But the overlay covers the video.
+             // If hidden, show it.
+             if (overlay.style.opacity === "0") {
+                 showOverlay();
+             } else {
+                 // If visible and clicking background, maybe hide? 
+                 // Or just let timeout handle it.
+                 // Let's reset timeout.
+                 showOverlay();
+             }
+        });
+
+        // Controls Row
+        const controlsRow = overlay.createDiv({ cls: 'cross-player-controls-row' });
+        controlsRow.style.display = "flex";
+        controlsRow.style.gap = "40px";
+        controlsRow.style.alignItems = "center";
+
+        // Previous Button
+        const prevBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
+        setIcon(prevBtn, "skip-back");
+        this.styleBigButton(prevBtn);
+        prevBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.plugin.playPreviousItem();
+            showOverlay();
+        };
+
+        // Seek Back
+        const seekBackBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
+        setIcon(seekBackBtn, "rewind");
+        this.styleBigButton(seekBackBtn);
+        seekBackBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.seek(-this.plugin.data.settings.seekSecondsBackward);
+            showOverlay();
+        };
+
+        // Play/Pause
+        const playPauseBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn play-btn' });
+        setIcon(playPauseBtn, "pause"); // Default to pause as we auto-play usually
+        this.styleBigButton(playPauseBtn);
+        playPauseBtn.style.transform = "scale(1.5)"; // Make it bigger
+        
+        playPauseBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (this.videoEl.paused) {
+                this.videoEl.play();
+                setIcon(playPauseBtn, "pause");
+            } else {
+                this.videoEl.pause();
+                setIcon(playPauseBtn, "play");
+            }
+            showOverlay();
+        };
+
+        // Update icon on state change
+        this.videoEl.onplay = () => setIcon(playPauseBtn, "pause");
+        this.videoEl.onpause = () => setIcon(playPauseBtn, "play");
+
+        // Seek Forward
+        const seekFwdBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
+        setIcon(seekFwdBtn, "fast-forward");
+        this.styleBigButton(seekFwdBtn);
+        seekFwdBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.seek(this.plugin.data.settings.seekSecondsForward);
+            showOverlay();
+        };
+
+        // Next Button
+        const nextBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
+        setIcon(nextBtn, "skip-forward");
+        this.styleBigButton(nextBtn);
+        nextBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.plugin.playNextItem();
+            showOverlay();
+        };
+    }
+
+    styleBigButton(btn: HTMLElement) {
+        btn.style.width = "50px";
+        btn.style.height = "50px";
+        btn.style.borderRadius = "50%";
+        btn.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
+        btn.style.display = "flex";
+        btn.style.justifyContent = "center";
+        btn.style.alignItems = "center";
+        btn.style.cursor = "pointer";
+        btn.style.color = "white";
+        // SVG size
+        const svg = btn.querySelector('svg');
+        if (svg) {
+            svg.style.width = "24px";
+            svg.style.height = "24px";
         }
     }
 

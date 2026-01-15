@@ -2450,7 +2450,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        this.handleFileChange(file);
+        this.handleRename(file, oldPath);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.handleDelete(file);
       })
     );
   }
@@ -2506,10 +2511,46 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     return { totalDuration, totalSize };
   }
+  async handleRename(file, oldPath) {
+    const queue = this.data.queue;
+    const itemsToUpdate = queue.filter((item) => item.path === oldPath || item.path.startsWith(oldPath + "/"));
+    if (itemsToUpdate.length > 0) {
+      for (const item of itemsToUpdate) {
+        const newPath = item.path.replace(oldPath, file.path);
+        item.path = newPath;
+        const watchedFolder2 = this.data.settings.watchedFolder;
+        if (watchedFolder2 && !newPath.startsWith(watchedFolder2 + "/") && newPath !== watchedFolder2) {
+          item.status = "completed";
+        }
+      }
+      const watchedFolder = this.data.settings.watchedFolder;
+      if (watchedFolder) {
+        this.data.queue = this.data.queue.filter((item) => {
+          return item.path.startsWith(watchedFolder + "/") || item.path === watchedFolder;
+        });
+      }
+      await this.saveData();
+    }
+    this.handleFileChange(file);
+  }
+  async handleDelete(file) {
+    const path2 = file.path;
+    const initialLength = this.data.queue.length;
+    this.data.queue = this.data.queue.filter((item) => item.path !== path2 && !item.path.startsWith(path2 + "/"));
+    if (this.data.queue.length !== initialLength) {
+      await this.saveData();
+    }
+  }
   async handleFileChange(file) {
     const folderPath = this.data.settings.watchedFolder;
     if (!folderPath)
       return;
+    if (file instanceof import_obsidian.TFolder) {
+      for (const child of file.children) {
+        await this.handleFileChange(child);
+      }
+      return;
+    }
     if (!(file instanceof import_obsidian.TFile))
       return;
     if (!file.path.startsWith(folderPath + "/"))
