@@ -30,8 +30,13 @@ export interface DownloadStatus {
     progress: string;
     speed: string;
     eta: string;
-    status: 'downloading' | 'completed' | 'error';
+    status: 'downloading' | 'paused' | 'completed' | 'error';
     error?: string;
+    params?: {
+        url: string;
+        quality: string;
+        type: 'video' | 'audio';
+    };
 }
 
 export interface CrossPlayerData {

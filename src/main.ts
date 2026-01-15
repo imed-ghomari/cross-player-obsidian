@@ -3,8 +3,12 @@ import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIco
 import ffmpegStatic from 'ffmpeg-static';
 import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus } from './types';
 import Sortable from 'sortablejs';
-import { spawn } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
+
+interface ActiveDownload extends DownloadStatus {
+    childProcess?: ChildProcess;
+}
 import * as fs from 'fs';
 
 const VIEW_TYPE_CROSS_PLAYER_LIST = "cross-player-list-view";
@@ -30,10 +34,35 @@ export default class CrossPlayerPlugin extends Plugin {
     // No more fs watcher, we use Obsidian events
     listView: CrossPlayerListView | null = null;
     mainView: CrossPlayerMainView | null = null;
-    activeDownloads: DownloadStatus[] = [];
+    activeDownloads: ActiveDownload[] = [];
 
     async onload() {
         await this.loadData();
+
+        this.addCommand({
+            id: 'test-yt-dlp',
+            name: 'Test yt-dlp Configuration',
+            callback: async () => {
+                const { youtubeDlpPath } = this.data.settings;
+                const ytPath = youtubeDlpPath.trim();
+                new Notice(`Testing yt-dlp at: ${ytPath}`);
+                
+                try {
+                    const child = spawn(ytPath, ['--version']);
+                    child.stdout.on('data', (data) => {
+                        new Notice(`yt-dlp version: ${data.toString().trim()}`);
+                    });
+                    child.stderr.on('data', (data) => {
+                        new Notice(`yt-dlp error: ${data.toString()}`);
+                    });
+                    child.on('error', (err) => {
+                         new Notice(`Failed to run yt-dlp: ${err.message}`);
+                    });
+                } catch (e) {
+                    new Notice(`Exception: ${e.message}`);
+                }
+            }
+        });
 
         this.addSettingTab(new CrossPlayerSettingTab(this.app, this));
 
@@ -678,119 +707,200 @@ export default class CrossPlayerPlugin extends Plugin {
             return;
         }
 
+        const ytPath = youtubeDlpPath.trim();
+        if (ytPath !== 'yt-dlp' && !fs.existsSync(ytPath)) {
+            new Notice(`yt-dlp binary not found at: ${ytPath}`);
+            return;
+        }
+
         new Notice(`Starting download of ${links.length} items...`);
 
         for (const link of links) {
             if (!link.trim()) continue;
+            this.startDownload(link.trim(), quality, type, absolutePath);
+        }
+    }
 
-            const downloadId = Math.random().toString(36).substring(7);
-            const downloadStatus: DownloadStatus = {
+    async startDownload(link: string, quality: string, type: 'video' | 'audio', cwd: string, existingId?: string) {
+        const { youtubeDlpPath, ffmpegPath } = this.data.settings;
+        const ytPath = youtubeDlpPath.trim();
+
+        const downloadId = existingId || Math.random().toString(36).substring(7);
+        
+        let downloadStatus: ActiveDownload;
+        
+        if (existingId) {
+            // Resume
+            const existing = this.activeDownloads.find(d => d.id === existingId);
+            if (existing) {
+                downloadStatus = existing;
+                downloadStatus.status = 'downloading';
+                downloadStatus.error = undefined;
+            } else {
+                 // Should not happen usually
+                 return;
+            }
+        } else {
+            downloadStatus = {
                 id: downloadId,
-                name: link, // Initial name, update later if possible
+                name: link, 
                 progress: '0%',
                 speed: '0',
                 eta: '?',
-                status: 'downloading'
+                status: 'downloading',
+                params: { url: link, quality, type }
             };
             this.activeDownloads.push(downloadStatus);
-            this.listView?.updateDownloadProgress();
-
-            let args = [
-                link.trim(),
-                '-o', '%(title)s.%(ext)s',
-                '--no-playlist',
-                '--newline' // Important for parsing output line by line
-            ];
-
-            if (ffmpegPath) {
-                args.push('--ffmpeg-location', ffmpegPath);
-            }
-
-            if (type === 'audio') {
-                args.push('-x', '--audio-format', 'mp3');
-            } else {
-                if (quality === 'best') {
-                    args.push('-f', 'bestvideo+bestaudio/best');
-                } else if (quality === '1080p') {
-                     args.push('-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]');
-                } else if (quality === '720p') {
-                     args.push('-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]');
-                } else if (quality === '480p') {
-                     args.push('-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]');
-                }
-                args.push('--merge-output-format', 'mp4');
-            }
-
-            try {
-                await new Promise<void>((resolve, reject) => {
-                    console.log(`Spawning: ${youtubeDlpPath} ${args.join(' ')}`);
-                    const child = spawn(youtubeDlpPath, args, { cwd: absolutePath });
-
-                    child.stdout.on('data', (data) => {
-                        const lines = data.toString().split('\n');
-                        for (const line of lines) {
-                            // [download]  23.5% of 10.00MiB at  2.00MiB/s ETA 00:05
-                            if (line.includes('[download]')) {
-                                const percentMatch = line.match(/(\d+\.\d+)%/);
-                                const speedMatch = line.match(/at\s+([^\s]+)/);
-                                const etaMatch = line.match(/ETA\s+([^\s]+)/);
-                                
-                                if (percentMatch) {
-                                    downloadStatus.progress = percentMatch[1] + '%';
-                                }
-                                if (speedMatch) {
-                                    downloadStatus.speed = speedMatch[1];
-                                }
-                                if (etaMatch) {
-                                    downloadStatus.eta = etaMatch[1];
-                                }
-                                this.listView?.updateDownloadProgress();
-                            }
-                            // [download] Destination: Video Title.mp4
-                            if (line.includes('[download] Destination:')) {
-                                const name = line.split('Destination:')[1].trim();
-                                downloadStatus.name = name;
-                                this.listView?.updateDownloadProgress();
-                            }
-                        }
-                    });
-
-                    child.stderr.on('data', (data) => {
-                        console.error(`yt-dlp stderr: ${data}`);
-                    });
-
-                    child.on('close', (code) => {
-                        if (code === 0) {
-                            downloadStatus.status = 'completed';
-                            downloadStatus.progress = '100%';
-                            resolve();
-                        } else {
-                            downloadStatus.status = 'error';
-                            downloadStatus.error = `Exit code ${code}`;
-                            reject(new Error(`yt-dlp exited with code ${code}`));
-                        }
-                        this.listView?.updateDownloadProgress();
-                    });
-                });
-                
-                // Remove from active downloads after a short delay
-                setTimeout(() => {
-                    this.activeDownloads = this.activeDownloads.filter(d => d.id !== downloadId);
-                    this.listView?.updateDownloadProgress();
-                }, 5000);
-
-            } catch (e) {
-                console.error("Download failed", e);
-                new Notice(`Failed to download: ${link}`);
-                downloadStatus.status = 'error';
-                downloadStatus.error = 'Failed';
-                this.listView?.updateDownloadProgress();
-            }
         }
         
-        // Refresh watched folder
-        if (targetFolder === watchedFolder) {
-            this.scanFolder(watchedFolder);
+        this.listView?.updateDownloadProgress();
+
+        let args = [
+            link,
+            '-o', '%(title)s.%(ext)s',
+            '--no-playlist',
+            '--newline' 
+        ];
+
+        if (ffmpegPath) {
+            args.push('--ffmpeg-location', ffmpegPath);
+        }
+
+        if (type === 'audio') {
+            args.push('-x', '--audio-format', 'mp3');
+        } else {
+            if (quality === 'best') {
+                args.push('-f', 'bestvideo+bestaudio/best');
+            } else if (quality === '1080p') {
+                 args.push('-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]');
+            } else if (quality === '720p') {
+                 args.push('-f', 'bestvideo[height<=720]+bestaudio/best[height<=720]');
+            } else if (quality === '480p') {
+                 args.push('-f', 'bestvideo[height<=480]+bestaudio/best[height<=480]');
+            }
+            args.push('--merge-output-format', 'mp4');
+        }
+
+        try {
+            console.log(`Spawning: ${ytPath} ${args.join(' ')}`);
+            const child = spawn(ytPath, args, { cwd: cwd });
+            downloadStatus.childProcess = child;
+
+            child.stdout.on('data', (data) => {
+                const lines = data.toString().split('\n');
+                for (const line of lines) {
+                    if (line.includes('[download]')) {
+                        const percentMatch = line.match(/(\d+\.\d+)%/);
+                        const speedMatch = line.match(/at\s+([^\s]+)/);
+                        const etaMatch = line.match(/ETA\s+([^\s]+)/);
+                        
+                        if (percentMatch) {
+                            downloadStatus.progress = percentMatch[1] + '%';
+                        }
+                        if (speedMatch) {
+                            downloadStatus.speed = speedMatch[1];
+                        }
+                        if (etaMatch) {
+                            downloadStatus.eta = etaMatch[1];
+                        }
+                        this.listView?.updateDownloadProgress();
+                    }
+                    if (line.includes('[download] Destination:')) {
+                        const name = line.split('Destination:')[1].trim();
+                        downloadStatus.name = name;
+                        this.listView?.updateDownloadProgress();
+                    }
+                }
+            });
+
+            child.stderr.on('data', (data) => {
+                console.error(`yt-dlp stderr: ${data}`);
+            });
+
+            child.on('error', (err) => {
+                console.error("Failed to start process", err);
+                downloadStatus.status = 'error';
+                downloadStatus.error = err.message;
+                this.listView?.updateDownloadProgress();
+            });
+
+            child.on('close', (code) => {
+                // If code is null/signal, it might be killed manually
+                if (code === 0) {
+                    downloadStatus.status = 'completed';
+                    downloadStatus.progress = '100%';
+                    // Refresh watched folder
+                    const { watchedFolder, downloadFolder } = this.data.settings;
+                    const targetFolder = downloadFolder || watchedFolder;
+                    if (targetFolder === watchedFolder) {
+                        this.scanFolder(watchedFolder);
+                    }
+                } else if (downloadStatus.status !== 'paused' && code !== null) {
+                    // Only mark error if not paused and not manually killed (though killed usually gives null code or signal)
+                    // If we killed it for pause, we set status to 'paused' BEFORE calling kill, so we check that.
+                    downloadStatus.status = 'error';
+                    downloadStatus.error = `Exit code ${code}`;
+                }
+                
+                downloadStatus.childProcess = undefined;
+                this.listView?.updateDownloadProgress();
+
+                if (downloadStatus.status === 'completed') {
+                    setTimeout(() => {
+                        this.activeDownloads = this.activeDownloads.filter(d => d.id !== downloadId);
+                        this.listView?.updateDownloadProgress();
+                    }, 5000);
+                }
+            });
+
+        } catch (e) {
+            console.error("Download failed", e);
+            new Notice(`Failed to download: ${link}`);
+            downloadStatus.status = 'error';
+            downloadStatus.error = 'Failed to start';
+            this.listView?.updateDownloadProgress();
+        }
+    }
+
+    cancelDownload(id: string) {
+        const dl = this.activeDownloads.find(d => d.id === id);
+        if (dl) {
+            if (dl.childProcess) {
+                dl.childProcess.kill();
+            }
+            this.activeDownloads = this.activeDownloads.filter(d => d.id !== id);
+            this.listView?.updateDownloadProgress();
+            new Notice("Download cancelled");
+        }
+    }
+
+    pauseDownload(id: string) {
+        const dl = this.activeDownloads.find(d => d.id === id);
+        if (dl && dl.childProcess) {
+            dl.status = 'paused';
+            dl.childProcess.kill(); // Kill process to stop download
+            this.listView?.updateDownloadProgress();
+        }
+    }
+
+    resumeDownload(id: string) {
+        const dl = this.activeDownloads.find(d => d.id === id);
+        if (dl && dl.params) {
+            const { downloadFolder, watchedFolder } = this.data.settings;
+            const targetFolder = downloadFolder || watchedFolder;
+            
+            // Re-resolve path
+            // @ts-ignore
+            const adapter = this.app.vault.adapter;
+            let absolutePath: string = "";
+            if (adapter instanceof Object && 'getBasePath' in adapter) {
+                 // @ts-ignore
+                 absolutePath = path.join(adapter.getBasePath(), targetFolder);
+            }
+
+            if (absolutePath) {
+                this.startDownload(dl.params.url, dl.params.quality, dl.params.type, absolutePath, id);
+            }
         }
     }
 }
@@ -1102,11 +1212,15 @@ class CrossPlayerListView extends ItemView {
     refresh() {
         const container = this.contentEl;
         container.empty();
+        container.style.display = "flex";
+        container.style.flexDirection = "column";
+        container.style.height = "100%";
         
-        // Header with Speed and Stats
+        // --- Header (Speed and Stats) ---
         const headerContainer = container.createDiv({ cls: "cross-player-header" });
         headerContainer.style.textAlign = "center";
         headerContainer.style.marginBottom = "10px";
+        headerContainer.style.flexShrink = "0"; // Don't shrink
 
         headerContainer.createEl("h4", { text: "Media Queue", cls: "cross-player-title" });
         
@@ -1138,7 +1252,12 @@ class CrossPlayerListView extends ItemView {
             sizeSpan.style.fontWeight = "bold";
         }
 
+        // --- List (Scrollable) ---
         const list = container.createDiv({ cls: "cross-player-list" });
+        list.style.flexGrow = "1";
+        list.style.overflowY = "auto";
+        list.style.overflowX = "hidden";
+        // list.style.minHeight = "0"; // Firefox fix for flex overflow
 
         this.plugin.data.queue.forEach((item, index) => {
             const itemEl = list.createDiv({ cls: "cross-player-item" });
@@ -1244,47 +1363,158 @@ class CrossPlayerListView extends ItemView {
             }
         });
 
-        this.updateDownloadProgress();
+        // --- Download Area (Collapsible, Bottom) ---
+        // Create container for download area
+        const downloadContainer = container.createDiv({ cls: 'cross-player-download-container' });
+        downloadContainer.style.flexShrink = "0";
+        downloadContainer.style.borderTop = "1px solid var(--background-modifier-border)";
+        downloadContainer.style.backgroundColor = "var(--background-secondary)";
+
+        this.updateDownloadProgress(downloadContainer);
     }
-    updateDownloadProgress() {
-        const container = this.contentEl;
-        let progressArea = container.querySelector('.cross-player-download-area') as HTMLElement;
+
+    updateDownloadProgress(parentContainer?: HTMLElement) {
+        // If parentContainer is provided, we are in initial render. 
+        // If not, we need to find existing container.
         
+        let container = parentContainer;
+        if (!container) {
+            container = this.contentEl.querySelector('.cross-player-download-container') as HTMLElement;
+        }
+
+        if (!container) return; // Should exist if view is open
+
+        container.empty();
+
         const activeDownloads = this.plugin.activeDownloads;
-
         if (activeDownloads.length === 0) {
-            if (progressArea) progressArea.remove();
+            // Collapsed or hidden state? 
+            // If empty, maybe just hide content but keep header? 
+            // Or hide completely? User said "collapsible towards the bottom". 
+            // If no downloads, usually hidden.
+            container.style.display = 'none';
             return;
-        }
-
-        if (!progressArea) {
-            progressArea = container.createDiv({ cls: 'cross-player-download-area' });
-            progressArea.style.borderTop = "1px solid var(--background-modifier-border)";
-            progressArea.style.padding = "10px";
-            progressArea.style.marginTop = "auto"; // Push to bottom if flex container
-            progressArea.style.backgroundColor = "var(--background-secondary)";
         } else {
-            progressArea.empty();
+            container.style.display = 'block';
         }
 
-        const title = progressArea.createEl("h5", { text: "Active Downloads" });
-        title.style.margin = "0 0 5px 0";
+        // Header / Toggle
+        const header = container.createDiv({ cls: 'download-header' });
+        header.style.padding = "5px 10px";
+        header.style.cursor = "pointer";
+        header.style.display = "flex";
+        header.style.justifyContent = "space-between";
+        header.style.alignItems = "center";
+        header.style.backgroundColor = "var(--background-secondary-alt)";
+
+        header.createSpan({ text: `Downloads (${activeDownloads.length})`, attr: { style: "font-weight: bold; font-size: 0.9em;" } });
+        const toggleIcon = header.createDiv();
+        // We can use state to track collapsed. For now, let's default to expanded if active.
+        // Actually user wants it collapsible.
+        // Let's store collapsed state in class property (not persistent).
+        // But refreshing wipes class property if not careful. 
+        // Let's check dataset or assume expanded.
+        
+        const isCollapsed = container.dataset.collapsed === 'true';
+        setIcon(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
+
+        const content = container.createDiv({ cls: 'download-content' });
+        content.style.padding = "10px";
+        if (isCollapsed) content.style.display = "none";
+
+        header.onclick = () => {
+            const collapsed = container!.dataset.collapsed === 'true';
+            container!.dataset.collapsed = String(!collapsed);
+            if (!collapsed) {
+                content.style.display = "none";
+                setIcon(toggleIcon, "chevron-up");
+            } else {
+                content.style.display = "block";
+                setIcon(toggleIcon, "chevron-down");
+            }
+        };
+
+        // Global Progress Bar
+        if (activeDownloads.length > 0) {
+            let totalProgress = 0;
+            let count = 0;
+            activeDownloads.forEach(d => {
+                if (d.status === 'completed') {
+                    totalProgress += 100;
+                    count++;
+                } else if (d.progress.includes('%')) {
+                    totalProgress += parseFloat(d.progress) || 0;
+                    count++;
+                } else if (d.status === 'downloading' || d.status === 'paused') {
+                    // if progress not yet parsed, assume 0
+                    count++;
+                }
+            });
+            const avgProgress = count > 0 ? totalProgress / count : 0;
+            
+            const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
+            globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
+            const globalBar = globalProgressContainer.createEl("progress");
+            globalBar.style.width = "100%";
+            globalBar.style.height = "8px";
+            globalBar.value = avgProgress;
+            globalBar.max = 100;
+        }
 
         activeDownloads.forEach(dl => {
-            const dlItem = progressArea!.createDiv({ cls: 'download-item' });
-            dlItem.style.marginBottom = "5px";
+            const dlItem = content.createDiv({ cls: 'download-item' });
+            dlItem.style.marginBottom = "8px";
             dlItem.style.fontSize = "0.8em";
+            dlItem.style.borderBottom = "1px solid var(--background-modifier-border)";
+            dlItem.style.paddingBottom = "5px";
             
-            const titleRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between;" } });
-            titleRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;" } });
-            titleRow.createSpan({ text: dl.status === 'error' ? 'Error' : dl.progress });
+            // 1. Name
+            const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
+            nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
+            nameRow.createSpan({ text: dl.status === 'error' ? 'Error' : (dl.status === 'paused' ? 'Paused' : dl.progress) });
 
-            if (dl.status === 'downloading') {
-                const detailsRow = dlItem.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
-                detailsRow.setText(`${dl.speed} - ETA: ${dl.eta}`);
-            } else if (dl.status === 'error') {
-                 dlItem.createDiv({ text: dl.error, attr: { style: "color: var(--text-error);" } });
+            // 2. Progress Bar
+            const progressBar = dlItem.createEl("progress");
+            progressBar.style.width = "100%";
+            progressBar.style.height = "6px";
+            if (dl.progress.includes('%')) {
+                progressBar.value = parseFloat(dl.progress) || 0;
+            } else {
+                progressBar.value = 0;
             }
+            progressBar.max = 100;
+
+            // 3. Info & Controls
+            const controlsRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; align-items: center; margin-top: 2px;" } });
+            
+            const info = controlsRow.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
+            if (dl.status === 'downloading') {
+                info.setText(`${dl.speed} - ETA: ${dl.eta}`);
+            } else if (dl.status === 'error') {
+                 info.setText(dl.error || "Unknown Error");
+                 info.style.color = "var(--text-error)";
+            }
+
+            const btnGroup = controlsRow.createDiv({ attr: { style: "display: flex; gap: 5px;" } });
+            
+            // Pause/Resume Button
+            if (dl.status === 'downloading') {
+                const pauseBtn = btnGroup.createEl("button", { text: "Pause" });
+                pauseBtn.style.fontSize = "0.8em";
+                pauseBtn.style.padding = "2px 5px";
+                pauseBtn.onclick = () => this.plugin.pauseDownload(dl.id);
+            } else if (dl.status === 'paused') {
+                const resumeBtn = btnGroup.createEl("button", { text: "Resume" });
+                resumeBtn.style.fontSize = "0.8em";
+                resumeBtn.style.padding = "2px 5px";
+                resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
+            }
+
+            // Cancel Button
+            const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
+            cancelBtn.style.fontSize = "0.8em";
+            cancelBtn.style.padding = "2px 5px";
+            cancelBtn.onclick = () => this.plugin.cancelDownload(dl.id);
         });
     }
 

@@ -9,6 +9,9 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __commonJS = (cb, mod) => function __require() {
+  return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -31,6 +34,118 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
+// node_modules/ffmpeg-static/package.json
+var require_package = __commonJS({
+  "node_modules/ffmpeg-static/package.json"(exports, module2) {
+    module2.exports = {
+      name: "ffmpeg-static",
+      version: "5.3.0",
+      description: "ffmpeg binaries for macOS, Linux and Windows",
+      scripts: {
+        install: "node install.js",
+        prepublishOnly: "npm run install"
+      },
+      "ffmpeg-static": {
+        "binary-path-env-var": "FFMPEG_BIN",
+        "binary-release-tag-env-var": "FFMPEG_BINARY_RELEASE",
+        "binary-release-tag": "b6.1.1",
+        "binaries-url-env-var": "FFMPEG_BINARIES_URL",
+        "executable-base-name": "ffmpeg"
+      },
+      repository: {
+        type: "git",
+        url: "https://github.com/eugeneware/ffmpeg-static"
+      },
+      keywords: [
+        "ffmpeg",
+        "static",
+        "binary",
+        "binaries",
+        "mac",
+        "linux",
+        "windows"
+      ],
+      authors: [
+        "Eugene Ware <eugene@noblesamurai.com>",
+        "Jannis R <mail@jannisr.de>"
+      ],
+      contributors: [
+        "Thefrank (https://github.com/Thefrank)",
+        "Emil Sivervik <emil@sivervik.com>"
+      ],
+      license: "GPL-3.0-or-later",
+      bugs: {
+        url: "https://github.com/eugeneware/ffmpeg-static/issues"
+      },
+      engines: {
+        node: ">=16"
+      },
+      dependencies: {
+        "@derhuerst/http-basic": "^8.2.0",
+        "env-paths": "^2.2.0",
+        "https-proxy-agent": "^5.0.0",
+        progress: "^2.0.3"
+      },
+      devDependencies: {
+        "any-shell-escape": "^0.1.1"
+      },
+      main: "index.js",
+      files: [
+        "index.js",
+        "install.js",
+        "example.js",
+        "types"
+      ],
+      types: "types/index.d.ts"
+    };
+  }
+});
+
+// node_modules/ffmpeg-static/index.js
+var require_ffmpeg_static = __commonJS({
+  "node_modules/ffmpeg-static/index.js"(exports, module2) {
+    "use strict";
+    var pkg = require_package();
+    var {
+      "binary-path-env-var": BINARY_PATH_ENV_VAR,
+      "executable-base-name": executableBaseName
+    } = pkg[pkg.name];
+    if ("string" !== typeof BINARY_PATH_ENV_VAR) {
+      throw new Error(`package.json: invalid/missing ${pkg.name}.binary-path-env-var entry`);
+    }
+    if ("string" !== typeof executableBaseName) {
+      throw new Error(`package.json: invalid/missing ${pkg.name}.executable-base-name entry`);
+    }
+    if (process.env[BINARY_PATH_ENV_VAR]) {
+      module2.exports = process.env[BINARY_PATH_ENV_VAR];
+    } else {
+      os = require("os");
+      path2 = require("path");
+      binaries = Object.assign(/* @__PURE__ */ Object.create(null), {
+        darwin: ["x64", "arm64"],
+        freebsd: ["x64"],
+        linux: ["x64", "ia32", "arm64", "arm"],
+        win32: ["x64", "ia32"]
+      });
+      platform = process.env.npm_config_platform || os.platform();
+      arch = process.env.npm_config_arch || os.arch();
+      let binaryPath = path2.join(
+        __dirname,
+        executableBaseName + (platform === "win32" ? ".exe" : "")
+      );
+      if (!binaries[platform] || binaries[platform].indexOf(arch) === -1) {
+        binaryPath = null;
+      }
+      module2.exports = binaryPath;
+    }
+    var os;
+    var path2;
+    var binaries;
+    var platform;
+    var arch;
+  }
+});
+
 // src/main.ts
 var main_exports = {};
 __export(main_exports, {
@@ -38,6 +153,7 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
+var import_ffmpeg_static = __toESM(require_ffmpeg_static());
 
 // node_modules/sortablejs/modular/sortable.esm.js
 function ownKeys(object, enumerableOnly) {
@@ -2298,12 +2414,14 @@ var DEFAULT_SETTINGS = {
   seekSecondsForward: 10,
   seekSecondsBackward: 10,
   youtubeDlpPath: "yt-dlp",
+  ffmpegPath: import_ffmpeg_static.default || "",
   downloadFolder: "",
   defaultDownloadQuality: "best",
   defaultDownloadType: "video",
   maxStorageLimit: 10,
   // GB
-  showMediaIndicator: true
+  showMediaIndicator: true,
+  enableMobileOverlay: false
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -2315,6 +2433,29 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async onload() {
     await this.loadData();
+    this.addCommand({
+      id: "test-yt-dlp",
+      name: "Test yt-dlp Configuration",
+      callback: async () => {
+        const { youtubeDlpPath } = this.data.settings;
+        const ytPath = youtubeDlpPath.trim();
+        new import_obsidian.Notice(`Testing yt-dlp at: ${ytPath}`);
+        try {
+          const child = (0, import_child_process.spawn)(ytPath, ["--version"]);
+          child.stdout.on("data", (data) => {
+            new import_obsidian.Notice(`yt-dlp version: ${data.toString().trim()}`);
+          });
+          child.stderr.on("data", (data) => {
+            new import_obsidian.Notice(`yt-dlp error: ${data.toString()}`);
+          });
+          child.on("error", (err) => {
+            new import_obsidian.Notice(`Failed to run yt-dlp: ${err.message}`);
+          });
+        } catch (e) {
+          new import_obsidian.Notice(`Exception: ${e.message}`);
+        }
+      }
+    });
     this.addSettingTab(new CrossPlayerSettingTab(this.app, this));
     this.registerView(
       VIEW_TYPE_CROSS_PLAYER_LIST,
@@ -2441,6 +2582,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await super.saveData(this.data);
     if (this.listView)
       this.listView.refresh();
+    if (this.mainView)
+      this.mainView.refreshMobileOverlay();
   }
   registerWatchers() {
     this.registerEvent(
@@ -2779,8 +2922,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.setMediaItemAsUnread(this.mainView.currentItem);
   }
   async downloadVideos(links, quality, type) {
-    var _a, _b;
-    const { youtubeDlpPath, downloadFolder, watchedFolder } = this.data.settings;
+    const { youtubeDlpPath, downloadFolder, watchedFolder, ffmpegPath } = this.data.settings;
     const targetFolder = downloadFolder || watchedFolder;
     if (!targetFolder) {
       new import_obsidian.Notice("Please set a download folder or watched folder first.");
@@ -2798,106 +2940,176 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(`Target folder does not exist: ${targetFolder}`);
       return;
     }
+    const ytPath = youtubeDlpPath.trim();
+    if (ytPath !== "yt-dlp" && !fs.existsSync(ytPath)) {
+      new import_obsidian.Notice(`yt-dlp binary not found at: ${ytPath}`);
+      return;
+    }
     new import_obsidian.Notice(`Starting download of ${links.length} items...`);
     for (const link of links) {
       if (!link.trim())
         continue;
-      const downloadId = Math.random().toString(36).substring(7);
-      const downloadStatus = {
+      this.startDownload(link.trim(), quality, type, absolutePath);
+    }
+  }
+  async startDownload(link, quality, type, cwd, existingId) {
+    var _a, _b;
+    const { youtubeDlpPath, ffmpegPath } = this.data.settings;
+    const ytPath = youtubeDlpPath.trim();
+    const downloadId = existingId || Math.random().toString(36).substring(7);
+    let downloadStatus;
+    if (existingId) {
+      const existing = this.activeDownloads.find((d) => d.id === existingId);
+      if (existing) {
+        downloadStatus = existing;
+        downloadStatus.status = "downloading";
+        downloadStatus.error = void 0;
+      } else {
+        return;
+      }
+    } else {
+      downloadStatus = {
         id: downloadId,
         name: link,
-        // Initial name, update later if possible
         progress: "0%",
         speed: "0",
         eta: "?",
-        status: "downloading"
+        status: "downloading",
+        params: { url: link, quality, type }
       };
       this.activeDownloads.push(downloadStatus);
-      (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
-      let args = [
-        link.trim(),
-        "-o",
-        "%(title)s.%(ext)s",
-        "--no-playlist",
-        "--newline"
-        // Important for parsing output line by line
-      ];
-      if (type === "audio") {
-        args.push("-x", "--audio-format", "mp3");
-      } else {
-        if (quality === "best") {
-          args.push("-f", "bestvideo+bestaudio/best");
-        } else if (quality === "1080p") {
-          args.push("-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]");
-        } else if (quality === "720p") {
-          args.push("-f", "bestvideo[height<=720]+bestaudio/best[height<=720]");
-        } else if (quality === "480p") {
-          args.push("-f", "bestvideo[height<=480]+bestaudio/best[height<=480]");
-        }
-        args.push("--merge-output-format", "mp4");
+    }
+    (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
+    let args = [
+      link,
+      "-o",
+      "%(title)s.%(ext)s",
+      "--no-playlist",
+      "--newline"
+    ];
+    if (ffmpegPath) {
+      args.push("--ffmpeg-location", ffmpegPath);
+    }
+    if (type === "audio") {
+      args.push("-x", "--audio-format", "mp3");
+    } else {
+      if (quality === "best") {
+        args.push("-f", "bestvideo+bestaudio/best");
+      } else if (quality === "1080p") {
+        args.push("-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]");
+      } else if (quality === "720p") {
+        args.push("-f", "bestvideo[height<=720]+bestaudio/best[height<=720]");
+      } else if (quality === "480p") {
+        args.push("-f", "bestvideo[height<=480]+bestaudio/best[height<=480]");
       }
-      try {
-        await new Promise((resolve, reject) => {
-          console.log(`Spawning: ${youtubeDlpPath} ${args.join(" ")}`);
-          const child = (0, import_child_process.spawn)(youtubeDlpPath, args, { cwd: absolutePath });
-          child.stdout.on("data", (data) => {
-            var _a2, _b2;
-            const lines = data.toString().split("\n");
-            for (const line of lines) {
-              if (line.includes("[download]")) {
-                const percentMatch = line.match(/(\d+\.\d+)%/);
-                const speedMatch = line.match(/at\s+([^\s]+)/);
-                const etaMatch = line.match(/ETA\s+([^\s]+)/);
-                if (percentMatch) {
-                  downloadStatus.progress = percentMatch[1] + "%";
-                }
-                if (speedMatch) {
-                  downloadStatus.speed = speedMatch[1];
-                }
-                if (etaMatch) {
-                  downloadStatus.eta = etaMatch[1];
-                }
-                (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
-              }
-              if (line.includes("[download] Destination:")) {
-                const name = line.split("Destination:")[1].trim();
-                downloadStatus.name = name;
-                (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
-              }
+      args.push("--merge-output-format", "mp4");
+    }
+    try {
+      console.log(`Spawning: ${ytPath} ${args.join(" ")}`);
+      const child = (0, import_child_process.spawn)(ytPath, args, { cwd });
+      downloadStatus.childProcess = child;
+      child.stdout.on("data", (data) => {
+        var _a2, _b2;
+        const lines = data.toString().split("\n");
+        for (const line of lines) {
+          if (line.includes("[download]")) {
+            const percentMatch = line.match(/(\d+\.\d+)%/);
+            const speedMatch = line.match(/at\s+([^\s]+)/);
+            const etaMatch = line.match(/ETA\s+([^\s]+)/);
+            if (percentMatch) {
+              downloadStatus.progress = percentMatch[1] + "%";
             }
-          });
-          child.stderr.on("data", (data) => {
-            console.error(`yt-dlp stderr: ${data}`);
-          });
-          child.on("close", (code) => {
-            var _a2;
-            if (code === 0) {
-              downloadStatus.status = "completed";
-              downloadStatus.progress = "100%";
-              resolve();
-            } else {
-              downloadStatus.status = "error";
-              downloadStatus.error = `Exit code ${code}`;
-              reject(new Error(`yt-dlp exited with code ${code}`));
+            if (speedMatch) {
+              downloadStatus.speed = speedMatch[1];
+            }
+            if (etaMatch) {
+              downloadStatus.eta = etaMatch[1];
             }
             (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
-          });
-        });
-        setTimeout(() => {
-          var _a2;
-          this.activeDownloads = this.activeDownloads.filter((d) => d.id !== downloadId);
-          (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
-        }, 5e3);
-      } catch (e) {
-        console.error("Download failed", e);
-        new import_obsidian.Notice(`Failed to download: ${link}`);
+          }
+          if (line.includes("[download] Destination:")) {
+            const name = line.split("Destination:")[1].trim();
+            downloadStatus.name = name;
+            (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
+          }
+        }
+      });
+      child.stderr.on("data", (data) => {
+        console.error(`yt-dlp stderr: ${data}`);
+      });
+      child.on("error", (err) => {
+        var _a2;
+        console.error("Failed to start process", err);
         downloadStatus.status = "error";
-        downloadStatus.error = "Failed";
-        (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
-      }
+        downloadStatus.error = err.message;
+        (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
+      });
+      child.on("close", (code) => {
+        var _a2;
+        if (code === 0) {
+          downloadStatus.status = "completed";
+          downloadStatus.progress = "100%";
+          const { watchedFolder, downloadFolder } = this.data.settings;
+          const targetFolder = downloadFolder || watchedFolder;
+          if (targetFolder === watchedFolder) {
+            this.scanFolder(watchedFolder);
+          }
+        } else if (downloadStatus.status !== "paused" && code !== null) {
+          downloadStatus.status = "error";
+          downloadStatus.error = `Exit code ${code}`;
+        }
+        downloadStatus.childProcess = void 0;
+        (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
+        if (downloadStatus.status === "completed") {
+          setTimeout(() => {
+            var _a3;
+            this.activeDownloads = this.activeDownloads.filter((d) => d.id !== downloadId);
+            (_a3 = this.listView) == null ? void 0 : _a3.updateDownloadProgress();
+          }, 5e3);
+        }
+      });
+    } catch (e) {
+      console.error("Download failed", e);
+      new import_obsidian.Notice(`Failed to download: ${link}`);
+      downloadStatus.status = "error";
+      downloadStatus.error = "Failed to start";
+      (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
     }
-    if (targetFolder === watchedFolder) {
-      this.scanFolder(watchedFolder);
+  }
+  cancelDownload(id) {
+    var _a;
+    const dl = this.activeDownloads.find((d) => d.id === id);
+    if (dl) {
+      if (dl.childProcess) {
+        dl.childProcess.kill();
+      }
+      this.activeDownloads = this.activeDownloads.filter((d) => d.id !== id);
+      (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
+      new import_obsidian.Notice("Download cancelled");
+    }
+  }
+  pauseDownload(id) {
+    var _a;
+    const dl = this.activeDownloads.find((d) => d.id === id);
+    if (dl && dl.childProcess) {
+      dl.status = "paused";
+      dl.childProcess.kill();
+      (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
+    }
+  }
+  resumeDownload(id) {
+    const dl = this.activeDownloads.find((d) => d.id === id);
+    if (dl && dl.params) {
+      const { downloadFolder, watchedFolder } = this.data.settings;
+      const targetFolder = downloadFolder || watchedFolder;
+      const adapter = this.app.vault.adapter;
+      let absolutePath = "";
+      if (adapter instanceof Object && "getBasePath" in adapter) {
+        absolutePath = path.join(adapter.getBasePath(), targetFolder);
+      }
+      if (absolutePath) {
+        this.startDownload(dl.params.url, dl.params.quality, dl.params.type, absolutePath, id);
+      }
     }
   }
 };
@@ -3004,9 +3216,17 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.data.settings.showMediaIndicator = value;
       await this.plugin.saveData();
     }));
+    new import_obsidian.Setting(containerEl).setName("Enable Mobile Overlay Controls").setDesc("Show large overlay controls (Play, Seek, Next) for easier interaction while driving/mobile.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.enableMobileOverlay).onChange(async (value) => {
+      this.plugin.data.settings.enableMobileOverlay = value;
+      await this.plugin.saveData();
+    }));
     containerEl.createEl("h3", { text: "Storage & Download Settings" });
     new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
       this.plugin.data.settings.youtubeDlpPath = value;
+      await this.plugin.saveData();
+    }));
+    new import_obsidian.Setting(containerEl).setName("FFmpeg Binary Path").setDesc("Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.").addText((text) => text.setValue(this.plugin.data.settings.ffmpegPath).onChange(async (value) => {
+      this.plugin.data.settings.ffmpegPath = value;
       await this.plugin.saveData();
     }));
     new import_obsidian.Setting(containerEl).setName("Download Folder").setDesc("Folder to save downloads (relative to vault). Leave empty to use Watched Folder.").addText((text) => text.setValue(this.plugin.data.settings.downloadFolder).onChange(async (value) => {
@@ -3050,9 +3270,13 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
   refresh() {
     const container = this.contentEl;
     container.empty();
+    container.style.display = "flex";
+    container.style.flexDirection = "column";
+    container.style.height = "100%";
     const headerContainer = container.createDiv({ cls: "cross-player-header" });
     headerContainer.style.textAlign = "center";
     headerContainer.style.marginBottom = "10px";
+    headerContainer.style.flexShrink = "0";
     headerContainer.createEl("h4", { text: "Media Queue", cls: "cross-player-title" });
     const speed = this.plugin.data.playbackSpeed || 1;
     const speedEl = headerContainer.createDiv({ cls: "cross-player-speed-display" });
@@ -3076,6 +3300,9 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       sizeSpan.style.fontWeight = "bold";
     }
     const list = container.createDiv({ cls: "cross-player-list" });
+    list.style.flexGrow = "1";
+    list.style.overflowY = "auto";
+    list.style.overflowX = "hidden";
     this.plugin.data.queue.forEach((item, index2) => {
       var _a;
       const itemEl = list.createDiv({ cls: "cross-player-item" });
@@ -3145,41 +3372,118 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         }
       }
     });
-    this.updateDownloadProgress();
+    const downloadContainer = container.createDiv({ cls: "cross-player-download-container" });
+    downloadContainer.style.flexShrink = "0";
+    downloadContainer.style.borderTop = "1px solid var(--background-modifier-border)";
+    downloadContainer.style.backgroundColor = "var(--background-secondary)";
+    this.updateDownloadProgress(downloadContainer);
   }
-  updateDownloadProgress() {
-    const container = this.contentEl;
-    let progressArea = container.querySelector(".cross-player-download-area");
+  updateDownloadProgress(parentContainer) {
+    let container = parentContainer;
+    if (!container) {
+      container = this.contentEl.querySelector(".cross-player-download-container");
+    }
+    if (!container)
+      return;
+    container.empty();
     const activeDownloads = this.plugin.activeDownloads;
     if (activeDownloads.length === 0) {
-      if (progressArea)
-        progressArea.remove();
+      container.style.display = "none";
       return;
-    }
-    if (!progressArea) {
-      progressArea = container.createDiv({ cls: "cross-player-download-area" });
-      progressArea.style.borderTop = "1px solid var(--background-modifier-border)";
-      progressArea.style.padding = "10px";
-      progressArea.style.marginTop = "auto";
-      progressArea.style.backgroundColor = "var(--background-secondary)";
     } else {
-      progressArea.empty();
+      container.style.display = "block";
     }
-    const title = progressArea.createEl("h5", { text: "Active Downloads" });
-    title.style.margin = "0 0 5px 0";
-    activeDownloads.forEach((dl) => {
-      const dlItem = progressArea.createDiv({ cls: "download-item" });
-      dlItem.style.marginBottom = "5px";
-      dlItem.style.fontSize = "0.8em";
-      const titleRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between;" } });
-      titleRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;" } });
-      titleRow.createSpan({ text: dl.status === "error" ? "Error" : dl.progress });
-      if (dl.status === "downloading") {
-        const detailsRow = dlItem.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
-        detailsRow.setText(`${dl.speed} - ETA: ${dl.eta}`);
-      } else if (dl.status === "error") {
-        dlItem.createDiv({ text: dl.error, attr: { style: "color: var(--text-error);" } });
+    const header = container.createDiv({ cls: "download-header" });
+    header.style.padding = "5px 10px";
+    header.style.cursor = "pointer";
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.backgroundColor = "var(--background-secondary-alt)";
+    header.createSpan({ text: `Downloads (${activeDownloads.length})`, attr: { style: "font-weight: bold; font-size: 0.9em;" } });
+    const toggleIcon = header.createDiv();
+    const isCollapsed = container.dataset.collapsed === "true";
+    (0, import_obsidian.setIcon)(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
+    const content = container.createDiv({ cls: "download-content" });
+    content.style.padding = "10px";
+    if (isCollapsed)
+      content.style.display = "none";
+    header.onclick = () => {
+      const collapsed = container.dataset.collapsed === "true";
+      container.dataset.collapsed = String(!collapsed);
+      if (!collapsed) {
+        content.style.display = "none";
+        (0, import_obsidian.setIcon)(toggleIcon, "chevron-up");
+      } else {
+        content.style.display = "block";
+        (0, import_obsidian.setIcon)(toggleIcon, "chevron-down");
       }
+    };
+    if (activeDownloads.length > 0) {
+      let totalProgress = 0;
+      let count = 0;
+      activeDownloads.forEach((d) => {
+        if (d.status === "completed") {
+          totalProgress += 100;
+          count++;
+        } else if (d.progress.includes("%")) {
+          totalProgress += parseFloat(d.progress) || 0;
+          count++;
+        } else if (d.status === "downloading" || d.status === "paused") {
+          count++;
+        }
+      });
+      const avgProgress = count > 0 ? totalProgress / count : 0;
+      const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
+      globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
+      const globalBar = globalProgressContainer.createEl("progress");
+      globalBar.style.width = "100%";
+      globalBar.style.height = "8px";
+      globalBar.value = avgProgress;
+      globalBar.max = 100;
+    }
+    activeDownloads.forEach((dl) => {
+      const dlItem = content.createDiv({ cls: "download-item" });
+      dlItem.style.marginBottom = "8px";
+      dlItem.style.fontSize = "0.8em";
+      dlItem.style.borderBottom = "1px solid var(--background-modifier-border)";
+      dlItem.style.paddingBottom = "5px";
+      const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
+      nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
+      nameRow.createSpan({ text: dl.status === "error" ? "Error" : dl.status === "paused" ? "Paused" : dl.progress });
+      const progressBar = dlItem.createEl("progress");
+      progressBar.style.width = "100%";
+      progressBar.style.height = "6px";
+      if (dl.progress.includes("%")) {
+        progressBar.value = parseFloat(dl.progress) || 0;
+      } else {
+        progressBar.value = 0;
+      }
+      progressBar.max = 100;
+      const controlsRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; align-items: center; margin-top: 2px;" } });
+      const info = controlsRow.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
+      if (dl.status === "downloading") {
+        info.setText(`${dl.speed} - ETA: ${dl.eta}`);
+      } else if (dl.status === "error") {
+        info.setText(dl.error || "Unknown Error");
+        info.style.color = "var(--text-error)";
+      }
+      const btnGroup = controlsRow.createDiv({ attr: { style: "display: flex; gap: 5px;" } });
+      if (dl.status === "downloading") {
+        const pauseBtn = btnGroup.createEl("button", { text: "Pause" });
+        pauseBtn.style.fontSize = "0.8em";
+        pauseBtn.style.padding = "2px 5px";
+        pauseBtn.onclick = () => this.plugin.pauseDownload(dl.id);
+      } else if (dl.status === "paused") {
+        const resumeBtn = btnGroup.createEl("button", { text: "Resume" });
+        resumeBtn.style.fontSize = "0.8em";
+        resumeBtn.style.padding = "2px 5px";
+        resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
+      }
+      const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
+      cancelBtn.style.fontSize = "0.8em";
+      cancelBtn.style.padding = "2px 5px";
+      cancelBtn.onclick = () => this.plugin.cancelDownload(dl.id);
     });
   }
   updateSpeedDisplay() {
@@ -3204,6 +3508,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
 var CrossPlayerMainView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
+    this.overlayEl = null;
     this.currentItem = null;
     this.plugin = plugin;
   }
@@ -3225,12 +3530,14 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     container.style.alignItems = "center";
     container.style.height = "100%";
     container.style.backgroundColor = "#000";
+    container.style.position = "relative";
     this.videoEl = container.createEl("video");
     this.videoEl.controls = true;
     this.videoEl.style.maxWidth = "100%";
     this.videoEl.style.maxHeight = "100%";
     this.videoEl.style.width = "100%";
     this.videoEl.style.height = "100%";
+    this.refreshMobileOverlay();
     this.videoEl.onended = async () => {
       if (this.currentItem) {
         await this.plugin.updateStatus(this.currentItem.id, "completed");
@@ -3247,6 +3554,128 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime);
       }
     };
+  }
+  refreshMobileOverlay() {
+    const container = this.contentEl;
+    const shouldShow = this.plugin.data.settings.enableMobileOverlay;
+    if (!shouldShow) {
+      if (this.overlayEl) {
+        this.overlayEl.remove();
+        this.overlayEl = null;
+      }
+      return;
+    }
+    if (!this.overlayEl || !container.contains(this.overlayEl)) {
+      if (this.overlayEl) {
+        this.overlayEl.remove();
+      }
+      this.createMobileOverlay(container);
+    }
+  }
+  createMobileOverlay(container) {
+    const overlay = container.createDiv({ cls: "cross-player-overlay" });
+    this.overlayEl = overlay;
+    overlay.style.position = "absolute";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = "100%";
+    overlay.style.height = "100%";
+    overlay.style.display = "flex";
+    overlay.style.flexDirection = "column";
+    overlay.style.justifyContent = "center";
+    overlay.style.alignItems = "center";
+    overlay.style.backgroundColor = "rgba(0, 0, 0, 0.4)";
+    overlay.style.zIndex = "10";
+    overlay.style.opacity = "0";
+    overlay.style.transition = "opacity 0.3s ease";
+    overlay.style.pointerEvents = "none";
+    let hideTimeout;
+    const showOverlay = () => {
+      overlay.style.opacity = "1";
+      overlay.style.pointerEvents = "auto";
+      if (hideTimeout)
+        clearTimeout(hideTimeout);
+      hideTimeout = setTimeout(() => {
+        overlay.style.opacity = "0";
+        overlay.style.pointerEvents = "none";
+      }, 3e3);
+    };
+    container.addEventListener("click", () => {
+      if (overlay.style.opacity === "0") {
+        showOverlay();
+      } else {
+        showOverlay();
+      }
+    });
+    const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
+    controlsRow.style.display = "flex";
+    controlsRow.style.gap = "40px";
+    controlsRow.style.alignItems = "center";
+    const prevBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
+    (0, import_obsidian.setIcon)(prevBtn, "skip-back");
+    this.styleBigButton(prevBtn);
+    prevBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.plugin.playPreviousItem();
+      showOverlay();
+    };
+    const seekBackBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
+    (0, import_obsidian.setIcon)(seekBackBtn, "rewind");
+    this.styleBigButton(seekBackBtn);
+    seekBackBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.seek(-this.plugin.data.settings.seekSecondsBackward);
+      showOverlay();
+    };
+    const playPauseBtn = controlsRow.createDiv({ cls: "cross-player-big-btn play-btn" });
+    (0, import_obsidian.setIcon)(playPauseBtn, "pause");
+    this.styleBigButton(playPauseBtn);
+    playPauseBtn.style.transform = "scale(1.5)";
+    playPauseBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (this.videoEl.paused) {
+        this.videoEl.play();
+        (0, import_obsidian.setIcon)(playPauseBtn, "pause");
+      } else {
+        this.videoEl.pause();
+        (0, import_obsidian.setIcon)(playPauseBtn, "play");
+      }
+      showOverlay();
+    };
+    this.videoEl.onplay = () => (0, import_obsidian.setIcon)(playPauseBtn, "pause");
+    this.videoEl.onpause = () => (0, import_obsidian.setIcon)(playPauseBtn, "play");
+    const seekFwdBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
+    (0, import_obsidian.setIcon)(seekFwdBtn, "fast-forward");
+    this.styleBigButton(seekFwdBtn);
+    seekFwdBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.seek(this.plugin.data.settings.seekSecondsForward);
+      showOverlay();
+    };
+    const nextBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
+    (0, import_obsidian.setIcon)(nextBtn, "skip-forward");
+    this.styleBigButton(nextBtn);
+    nextBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.plugin.playNextItem();
+      showOverlay();
+    };
+  }
+  styleBigButton(btn) {
+    btn.style.width = "50px";
+    btn.style.height = "50px";
+    btn.style.borderRadius = "50%";
+    btn.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
+    btn.style.display = "flex";
+    btn.style.justifyContent = "center";
+    btn.style.alignItems = "center";
+    btn.style.cursor = "pointer";
+    btn.style.color = "white";
+    const svg = btn.querySelector("svg");
+    if (svg) {
+      svg.style.width = "24px";
+      svg.style.height = "24px";
+    }
   }
   async play(item, autoPlay = false) {
     this.currentItem = item;
