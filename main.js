@@ -2301,8 +2301,9 @@ var DEFAULT_SETTINGS = {
   downloadFolder: "",
   defaultDownloadQuality: "best",
   defaultDownloadType: "video",
-  maxStorageLimit: 10
+  maxStorageLimit: 10,
   // GB
+  showMediaIndicator: true
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -2936,6 +2937,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    containerEl.createEl("h3", { text: "General Settings" });
     new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
     }));
@@ -2957,7 +2959,11 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
         await this.plugin.saveData();
       }
     }));
-    containerEl.createEl("h3", { text: "YouTube Download Settings" });
+    new import_obsidian.Setting(containerEl).setName("Show Media Indicator").setDesc("Show audio/video icon in the queue list.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.showMediaIndicator).onChange(async (value) => {
+      this.plugin.data.settings.showMediaIndicator = value;
+      await this.plugin.saveData();
+    }));
+    containerEl.createEl("h3", { text: "Storage & Download Settings" });
     new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
       this.plugin.data.settings.youtubeDlpPath = value;
       await this.plugin.saveData();
@@ -3047,12 +3053,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       else
         (0, import_obsidian.setIcon)(statusIcon, "circle");
       statusIcon.style.marginRight = "5px";
-      const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
-      const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
-      const isAudio = ["mp3", "wav", "ogg"].includes(ext || "");
-      (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
-      typeIcon.style.marginRight = "10px";
-      typeIcon.style.color = "var(--text-muted)";
+      if (this.plugin.data.settings.showMediaIndicator) {
+        const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
+        const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
+        const isAudio = ["mp3", "wav", "ogg"].includes(ext || "");
+        (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
+        typeIcon.style.marginRight = "10px";
+        typeIcon.style.color = "var(--text-muted)";
+      }
       const nameEl = itemEl.createDiv({ text: item.name, cls: "cross-player-name" });
       nameEl.style.flexGrow = "1";
       nameEl.style.overflow = "hidden";

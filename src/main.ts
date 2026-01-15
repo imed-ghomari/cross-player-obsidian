@@ -203,9 +203,14 @@ export default class CrossPlayerPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('rename', (file, oldPath) => {
-                 // Check if it was moved INTO the folder
-                 this.handleFileChange(file);
-                 // TODO: handle move OUT (delete from queue)
+                 // Handle rename/move
+                 this.handleRename(file, oldPath);
+            })
+        );
+
+        this.registerEvent(
+            this.app.vault.on('delete', (file) => {
+                this.handleDelete(file);
             })
         );
     }
@@ -287,9 +292,82 @@ export default class CrossPlayerPlugin extends Plugin {
         return { totalDuration, totalSize };
     }
 
+    async handleRename(file: TAbstractFile, oldPath: string) {
+        // 1. If file was in queue (by oldPath), update its path
+        // We need to check if oldPath was in queue. 
+        // But wait, if it's a folder rename, oldPath is the folder path.
+        
+        // Find items in queue that start with oldPath
+        // Case 1: Exact match (file rename)
+        // Case 2: Prefix match (folder rename)
+        
+        const queue = this.data.queue;
+        
+        const itemsToUpdate = queue.filter((item: MediaItem) => item.path === oldPath || item.path.startsWith(oldPath + "/"));
+        
+        if (itemsToUpdate.length > 0) {
+            for (const item of itemsToUpdate) {
+                // Calculate new path
+                // If oldPath = "A/Old.mp4", newPath = "A/New.mp4" (file.path)
+                // If oldPath = "A/OldFolder", newPath = "A/NewFolder" (file.path)
+                // item.path = "A/OldFolder/File.mp4"
+                // new item path = "A/NewFolder/File.mp4"
+                
+                const newPath = item.path.replace(oldPath, file.path);
+                item.path = newPath;
+                
+                // Check if new path is still inside watched folder
+                const watchedFolder = this.data.settings.watchedFolder;
+                if (watchedFolder && !newPath.startsWith(watchedFolder + "/") && newPath !== watchedFolder) {
+                     // Moved OUT of watched folder -> Delete
+                     item.status = 'completed'; // Mark for cleanup or delete immediately
+                     // Let's delete immediately from queue to be clean
+                     // We can't mutate array while iterating easily if we filter. 
+                     // But we are iterating a filtered list.
+                     // Better to just mark them or filter queue later.
+                }
+            }
+            
+            // Remove items that moved out
+            const watchedFolder = this.data.settings.watchedFolder;
+            if (watchedFolder) {
+                 this.data.queue = this.data.queue.filter(item => {
+                     // Keep if inside watched folder
+                     return item.path.startsWith(watchedFolder + "/") || item.path === watchedFolder;
+                 });
+            }
+            
+            await this.saveData();
+        }
+
+        // 2. Check if the new location is inside watched folder (Move In)
+        // Even if we updated paths, we might have moved a NEW folder IN.
+        // If we just renamed inside, handleFileChange will check if it's already in queue.
+        this.handleFileChange(file);
+    }
+
+    async handleDelete(file: TAbstractFile) {
+        // If file or folder deleted, remove from queue
+        const path = file.path;
+        const initialLength = this.data.queue.length;
+        this.data.queue = this.data.queue.filter(item => item.path !== path && !item.path.startsWith(path + "/"));
+        
+        if (this.data.queue.length !== initialLength) {
+            await this.saveData();
+        }
+    }
+
     async handleFileChange(file: TAbstractFile) {
         const folderPath = this.data.settings.watchedFolder;
         if (!folderPath) return;
+
+        // Recursively handle folders
+        if (file instanceof TFolder) {
+            for (const child of file.children) {
+                await this.handleFileChange(child);
+            }
+            return;
+        }
 
         if (!(file instanceof TFile)) return;
         
