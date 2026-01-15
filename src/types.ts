@@ -15,6 +15,7 @@ export interface CrossPlayerSettings {
     seekSecondsBackward: number;
     // YouTube Download Settings
     youtubeDlpPath: string;
+    ffmpegPath: string;
     downloadFolder: string;
     defaultDownloadQuality: 'best' | '1080p' | '720p' | '480p' | 'audio';
     defaultDownloadType: 'video' | 'audio';

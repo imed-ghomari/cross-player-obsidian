@@ -1,4 +1,6 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform } from 'obsidian';
+// @ts-ignore
+import ffmpegStatic from 'ffmpeg-static';
 import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus } from './types';
 import Sortable from 'sortablejs';
 import { spawn } from 'child_process';
@@ -14,6 +16,7 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     seekSecondsForward: 10,
     seekSecondsBackward: 10,
     youtubeDlpPath: 'yt-dlp',
+    ffmpegPath: ffmpegStatic || '',
     downloadFolder: '',
     defaultDownloadQuality: 'best',
     defaultDownloadType: 'video',
@@ -650,7 +653,7 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async downloadVideos(links: string[], quality: string, type: 'video' | 'audio') {
-        const { youtubeDlpPath, downloadFolder, watchedFolder } = this.data.settings;
+        const { youtubeDlpPath, downloadFolder, watchedFolder, ffmpegPath } = this.data.settings;
         const targetFolder = downloadFolder || watchedFolder;
 
         if (!targetFolder) {
@@ -698,6 +701,10 @@ export default class CrossPlayerPlugin extends Plugin {
                 '--no-playlist',
                 '--newline' // Important for parsing output line by line
             ];
+
+            if (ffmpegPath) {
+                args.push('--ffmpeg-location', ffmpegPath);
+            }
 
             if (type === 'audio') {
                 args.push('-x', '--audio-format', 'mp3');
@@ -1004,6 +1011,16 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.data.settings.youtubeDlpPath)
                 .onChange(async (value) => {
                     this.plugin.data.settings.youtubeDlpPath = value;
+                    await this.plugin.saveData();
+                }));
+
+        new Setting(containerEl)
+            .setName('FFmpeg Binary Path')
+            .setDesc('Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.')
+            .addText(text => text
+                .setValue(this.plugin.data.settings.ffmpegPath)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.ffmpegPath = value;
                     await this.plugin.saveData();
                 }));
 
