@@ -18,7 +18,6 @@ export interface CrossPlayerSettings {
     youtubeDlpPath: string;
     ffmpegPath: string;
     downloadFolder: string;
-    defaultDownloadQuality: 'best' | '1080p' | '720p' | '480p' | 'audio';
     showMediaIndicator: boolean;
     storageLimitGB: number;
 }

@@ -29,7 +29,6 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     youtubeDlpPath: 'yt-dlp',
     ffmpegPath: '',
     downloadFolder: '',
-    defaultDownloadQuality: 'best',
     showMediaIndicator: true,
     storageLimitGB: 10
 }
@@ -1208,7 +1207,7 @@ class YouTubeDownloadModal extends Modal {
     constructor(app: App, plugin: CrossPlayerPlugin) {
         super(app);
         this.plugin = plugin;
-        this.quality = this.plugin.data.settings.defaultDownloadQuality;
+        this.quality = 'best';
     }
 
     onOpen() {
@@ -1349,21 +1348,6 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Storage Limit (GB)')
-            .setDesc('Manual storage limit in Gigabytes.')
-            .addText(text => text
-                .setPlaceholder('10')
-                .setValue(String(this.plugin.data.settings.storageLimitGB || 10))
-                .onChange(async (value) => {
-                    const limit = parseFloat(value);
-                    if (!isNaN(limit) && limit > 0) {
-                        this.plugin.data.settings.storageLimitGB = limit;
-                        await this.plugin.saveData();
-                        this.plugin.calculateDynamicLimit();
-                    }
-                }));
-
-        new Setting(containerEl)
             .setName('Default Playback Speed')
             .setDesc('The default speed when the player starts or resets.')
             .addSlider(slider => slider
@@ -1444,17 +1428,18 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Default Quality')
-            .setDesc('Default quality selection.')
-            .addDropdown(drop => drop
-                .addOption('best', 'Best')
-                .addOption('1080p', '1080p')
-                .addOption('720p', '720p')
-                .addOption('480p', '480p')
-                .setValue(this.plugin.data.settings.defaultDownloadQuality)
+            .setName('Storage Limit (GB)')
+            .setDesc('Manual storage limit in Gigabytes.')
+            .addText(text => text
+                .setPlaceholder('10')
+                .setValue(String(this.plugin.data.settings.storageLimitGB || 10))
                 .onChange(async (value) => {
-                    this.plugin.data.settings.defaultDownloadQuality = value as any;
-                    await this.plugin.saveData();
+                    const limit = parseFloat(value);
+                    if (!isNaN(limit) && limit > 0) {
+                        this.plugin.data.settings.storageLimitGB = limit;
+                        await this.plugin.saveData();
+                        this.plugin.calculateDynamicLimit();
+                    }
                 }));
     }
 }
@@ -1583,12 +1568,7 @@ class CrossPlayerListView extends ItemView {
         
         statsContainer.createSpan({ text: " • " });
         
-        let limitText = `${limitGB.toFixed(1)} GB`;
-        if (this.plugin.limitingDevice) {
-            limitText += ` (${this.plugin.limitingDevice})`;
-        }
-        
-        const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitText}` });
+        const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
         if (sizeInGB > limitGB) {
             sizeSpan.style.color = "var(--text-error)";
             sizeSpan.style.fontWeight = "bold";
@@ -1646,11 +1626,8 @@ class CrossPlayerListView extends ItemView {
             nameEl.style.cursor = "pointer";
             nameEl.title = item.path;
 
-            nameEl.onClickEvent(() => {
-                // Prevent click if right-click (context menu) might have triggered this somehow, 
-                // though usually contextmenu event is separate.
-                // But specifically "does focus on the center player pane".
-                
+            nameEl.addEventListener("click", (e) => {
+                e.stopPropagation();
                 // Always auto-play when user clicks
                 this.plugin.playMedia(item, true);
             });

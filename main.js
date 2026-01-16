@@ -2287,7 +2287,6 @@ var DEFAULT_SETTINGS = {
   youtubeDlpPath: "yt-dlp",
   ffmpegPath: "",
   downloadFolder: "",
-  defaultDownloadQuality: "best",
   showMediaIndicator: true,
   storageLimitGB: 10
 };
@@ -3219,7 +3218,7 @@ var YouTubeDownloadModal = class extends import_obsidian.Modal {
     this.videoLinks = "";
     this.audioLinks = "";
     this.plugin = plugin;
-    this.quality = this.plugin.data.settings.defaultDownloadQuality;
+    this.quality = "best";
   }
   onOpen() {
     const { contentEl } = this;
@@ -3294,14 +3293,6 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Storage Limit (GB)").setDesc("Manual storage limit in Gigabytes.").addText((text) => text.setPlaceholder("10").setValue(String(this.plugin.data.settings.storageLimitGB || 10)).onChange(async (value) => {
-      const limit = parseFloat(value);
-      if (!isNaN(limit) && limit > 0) {
-        this.plugin.data.settings.storageLimitGB = limit;
-        await this.plugin.saveData();
-        this.plugin.calculateDynamicLimit();
-      }
-    }));
     new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets.").addSlider((slider) => slider.setLimits(0.5, 5, 0.1).setValue(this.plugin.data.settings.defaultPlaybackSpeed).setDynamicTooltip().onChange(async (value) => {
       this.plugin.data.settings.defaultPlaybackSpeed = value;
       await this.plugin.saveData();
@@ -3337,9 +3328,13 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.data.settings.downloadFolder = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Default Quality").setDesc("Default quality selection.").addDropdown((drop3) => drop3.addOption("best", "Best").addOption("1080p", "1080p").addOption("720p", "720p").addOption("480p", "480p").setValue(this.plugin.data.settings.defaultDownloadQuality).onChange(async (value) => {
-      this.plugin.data.settings.defaultDownloadQuality = value;
-      await this.plugin.saveData();
+    new import_obsidian.Setting(containerEl).setName("Storage Limit (GB)").setDesc("Manual storage limit in Gigabytes.").addText((text) => text.setPlaceholder("10").setValue(String(this.plugin.data.settings.storageLimitGB || 10)).onChange(async (value) => {
+      const limit = parseFloat(value);
+      if (!isNaN(limit) && limit > 0) {
+        this.plugin.data.settings.storageLimitGB = limit;
+        await this.plugin.saveData();
+        this.plugin.calculateDynamicLimit();
+      }
     }));
   }
 };
@@ -3417,11 +3412,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
     statsContainer.createSpan({ text: etcText });
     statsContainer.createSpan({ text: " \u2022 " });
-    let limitText = `${limitGB.toFixed(1)} GB`;
-    if (this.plugin.limitingDevice) {
-      limitText += ` (${this.plugin.limitingDevice})`;
-    }
-    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitText}` });
+    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
     if (sizeInGB > limitGB) {
       sizeSpan.style.color = "var(--text-error)";
       sizeSpan.style.fontWeight = "bold";
@@ -3463,7 +3454,8 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       nameEl.style.whiteSpace = "nowrap";
       nameEl.style.cursor = "pointer";
       nameEl.title = item.path;
-      nameEl.onClickEvent(() => {
+      nameEl.addEventListener("click", (e) => {
+        e.stopPropagation();
         this.plugin.playMedia(item, true);
       });
       itemEl.addEventListener("contextmenu", (event) => {
