@@ -2539,11 +2539,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const folder = this.app.vault.getAbstractFileByPath(folderPath);
     if (folder instanceof import_obsidian.TFolder) {
       const files = this.app.vault.getFiles();
-      files.forEach((file) => {
-        if (file.path.startsWith(folderPath + "/")) {
-          this.handleFileChange(file);
-        }
-      });
+      const filesInFolder = files.filter((file) => file.path.startsWith(folderPath + "/"));
+      const promises = filesInFolder.map((file) => this.handleFileChange(file, false));
+      await Promise.all(promises);
+      await this.saveData();
     } else {
       console.warn("Watched path is not a folder:", folderPath);
     }
@@ -2611,13 +2610,13 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       await this.saveData();
     }
   }
-  async handleFileChange(file) {
+  async handleFileChange(file, shouldSave = true) {
     const folderPath = this.data.settings.watchedFolder;
     if (!folderPath)
       return;
     if (file instanceof import_obsidian.TFolder) {
       for (const child of file.children) {
-        await this.handleFileChange(child);
+        await this.handleFileChange(child, shouldSave);
       }
       return;
     }
@@ -2643,8 +2642,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         size: file.stat.size
       };
       this.data.queue.push(newItem);
-      await this.saveData();
-      new import_obsidian.Notice(`Added ${file.name} to queue`);
+      if (shouldSave) {
+        await this.saveData();
+        new import_obsidian.Notice(`Added ${file.name} to queue`);
+      }
     } else {
       let changed = false;
       if (!existing.duration) {
@@ -2655,7 +2656,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         existing.size = file.stat.size;
         changed = true;
       }
-      if (changed)
+      if (changed && shouldSave)
         await this.saveData();
     }
   }

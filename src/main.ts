@@ -330,15 +330,15 @@ export default class CrossPlayerPlugin extends Plugin {
     async scanFolder(folderPath: string) {
         const folder = this.app.vault.getAbstractFileByPath(folderPath);
         if (folder instanceof TFolder) {
-            // We can iterate children directly
-            // Or use getFiles() and filter
             const files = this.app.vault.getFiles();
-            files.forEach(file => {
-                // Check if file is inside the watched folder
-                if (file.path.startsWith(folderPath + "/")) {
-                     this.handleFileChange(file);
-                }
-            });
+            const filesInFolder = files.filter(file => file.path.startsWith(folderPath + "/"));
+            
+            // Process all files without saving individually
+            const promises = filesInFolder.map(file => this.handleFileChange(file, false));
+            await Promise.all(promises);
+            
+            // Save once at the end
+            await this.saveData();
         } else {
             console.warn("Watched path is not a folder:", folderPath);
         }
@@ -460,14 +460,14 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async handleFileChange(file: TAbstractFile) {
+    async handleFileChange(file: TAbstractFile, shouldSave: boolean = true) {
         const folderPath = this.data.settings.watchedFolder;
         if (!folderPath) return;
 
         // Recursively handle folders
         if (file instanceof TFolder) {
             for (const child of file.children) {
-                await this.handleFileChange(child);
+                await this.handleFileChange(child, shouldSave);
             }
             return;
         }
@@ -496,8 +496,10 @@ export default class CrossPlayerPlugin extends Plugin {
                 size: file.stat.size
             };
             this.data.queue.push(newItem);
-            await this.saveData();
-            new Notice(`Added ${file.name} to queue`);
+            if (shouldSave) {
+                await this.saveData();
+                new Notice(`Added ${file.name} to queue`);
+            }
         } else {
              // Update duration/size if missing (migration)
              let changed = false;
@@ -509,7 +511,7 @@ export default class CrossPlayerPlugin extends Plugin {
                  existing.size = file.stat.size;
                  changed = true;
              }
-             if (changed) await this.saveData();
+             if (changed && shouldSave) await this.saveData();
         }
     }
 
