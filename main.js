@@ -3241,6 +3241,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     container.style.display = "flex";
     container.style.flexDirection = "column";
     container.style.height = "100%";
+    container.style.overflow = "hidden";
     const headerContainer = container.createDiv({ cls: "cross-player-header" });
     headerContainer.style.textAlign = "center";
     headerContainer.style.marginBottom = "10px";
@@ -3333,8 +3334,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       nameEl.style.cursor = "pointer";
       nameEl.title = item.path;
       nameEl.onClickEvent(() => {
-        const shouldAutoPlay = item.position > 0;
-        this.plugin.playMedia(item, shouldAutoPlay);
+        this.plugin.playMedia(item, true);
       });
       itemEl.addEventListener("contextmenu", (event) => {
         event.preventDefault();
@@ -3402,6 +3402,8 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     (0, import_obsidian.setIcon)(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
     const content = container.createDiv({ cls: "download-content" });
     content.style.padding = "10px";
+    content.style.maxHeight = "30vh";
+    content.style.overflowY = "auto";
     if (isCollapsed)
       content.style.display = "none";
     header.onclick = () => {

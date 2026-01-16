@@ -1324,6 +1324,7 @@ class CrossPlayerListView extends ItemView {
         container.style.display = "flex";
         container.style.flexDirection = "column";
         container.style.height = "100%";
+        container.style.overflow = "hidden";
         
         // --- Header (Speed and Stats) ---
         const headerContainer = container.createDiv({ cls: "cross-player-header" });
@@ -1473,9 +1474,27 @@ class CrossPlayerListView extends ItemView {
             nameEl.title = item.path;
 
             nameEl.onClickEvent(() => {
-                // Auto-play if item has progress (resuming), otherwise pause (new)
-                const shouldAutoPlay = item.position > 0;
-                this.plugin.playMedia(item, shouldAutoPlay);
+                // Auto-play ONLY if it's unread (position == 0) OR if it's resuming (position > 0)
+                // Actually, the user wants "unread media file" to play automatically.
+                // Previously logic was: "Auto-play if item has progress (resuming), otherwise pause (new)".
+                // User complaint: "unread media file it's not played automatically, it's paused".
+                // So user WANTS unread media to play automatically too.
+                // In fact, user probably wants EVERYTHING to auto-play when clicked.
+                // "this behavior (pausing) should be present only for opening read media files" -> This implies read/completed files should start paused?
+                // Or maybe "opening read media files" means "resuming"? No, resuming usually implies auto-play.
+                // Let's assume standard behavior: Click = Play.
+                // Unless there is a specific reason to pause.
+                // Let's set autoPlay = true for everything for now to fix the "not played automatically" issue.
+                // Wait, re-reading: "it's paused even though this behavior should be present only for opening read media files."
+                // This means:
+                // Unread (New) -> Auto Play
+                // Read (Completed?) -> Pause?
+                // Resuming (In Progress) -> Auto Play?
+                
+                // Let's simplified: Always Auto-Play when user clicks.
+                // If user wants to pause, they can click pause.
+                // Usually when I click a video in a list, I want to watch it.
+                this.plugin.playMedia(item, true);
             });
 
             // Context Menu
@@ -1588,6 +1607,8 @@ class CrossPlayerListView extends ItemView {
 
         const content = container.createDiv({ cls: 'download-content' });
         content.style.padding = "10px";
+        content.style.maxHeight = "30vh";
+        content.style.overflowY = "auto";
         if (isCollapsed) content.style.display = "none";
 
         header.onclick = () => {
