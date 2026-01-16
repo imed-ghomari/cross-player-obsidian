@@ -2288,7 +2288,8 @@ var DEFAULT_SETTINGS = {
   ffmpegPath: "",
   downloadFolder: "",
   defaultDownloadQuality: "best",
-  showMediaIndicator: true
+  showMediaIndicator: true,
+  storageLimitGB: 10
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -2306,6 +2307,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async onload() {
     await this.loadData();
+    this.calculateDynamicLimit();
     this.debouncedUpdateDeviceStatus = (0, import_obsidian.debounce)(async () => {
       await this.updateDeviceStatus();
     }, 2e3, true);
@@ -2575,39 +2577,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async calculateDynamicLimit() {
-    const watchedFolder = this.data.settings.watchedFolder;
-    if (!watchedFolder)
-      return;
-    const devicesDir = watchedFolder + "/.cross-player-devices";
-    if (!await this.app.vault.adapter.exists(devicesDir))
-      return;
-    try {
-      const result = await this.app.vault.adapter.list(devicesDir);
-      const files = result.files;
-      let minFreeSpace = Number.MAX_VALUE;
-      let limitingDevice = "";
-      for (const file of files) {
-        if (file.endsWith(".json")) {
-          const content = await this.app.vault.adapter.read(file);
-          try {
-            const status = JSON.parse(content);
-            if (status.freeSpace < minFreeSpace) {
-              minFreeSpace = status.freeSpace;
-              limitingDevice = status.name;
-            }
-          } catch (e) {
-          }
-        }
-      }
-      if (minFreeSpace !== Number.MAX_VALUE) {
-        this.dynamicStorageLimit = minFreeSpace * 0.7;
-        this.limitingDevice = limitingDevice;
-        if (this.listView)
-          this.listView.refresh();
-      }
-    } catch (e) {
-      console.error("Failed to calculate dynamic limit", e);
-    }
+    const limitGB = this.data.settings.storageLimitGB || 10;
+    this.dynamicStorageLimit = limitGB * 1024 * 1024 * 1024;
+    this.limitingDevice = "Manual Setting";
+    if (this.listView)
+      this.listView.refresh();
   }
   async loadData() {
     const loaded = await super.loadData();
@@ -2811,6 +2785,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     workspace.setActiveLeaf(leaf, { focus: true });
     if (leaf.view instanceof CrossPlayerMainView) {
       this.mainView = leaf.view;
+      setTimeout(() => {
+        if (this.mainView) {
+          this.mainView.contentEl.focus();
+          if (this.mainView.videoEl) {
+            this.mainView.videoEl.focus();
+          }
+        }
+      }, 100);
     }
   }
   async playMedia(item, autoPlay = false) {
@@ -3311,6 +3293,14 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h3", { text: "General Settings" });
     new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Storage Limit (GB)").setDesc("Manual storage limit in Gigabytes.").addText((text) => text.setPlaceholder("10").setValue(String(this.plugin.data.settings.storageLimitGB || 10)).onChange(async (value) => {
+      const limit = parseFloat(value);
+      if (!isNaN(limit) && limit > 0) {
+        this.plugin.data.settings.storageLimitGB = limit;
+        await this.plugin.saveData();
+        this.plugin.calculateDynamicLimit();
+      }
     }));
     new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets.").addSlider((slider) => slider.setLimits(0.5, 5, 0.1).setValue(this.plugin.data.settings.defaultPlaybackSpeed).setDynamicTooltip().onChange(async (value) => {
       this.plugin.data.settings.defaultPlaybackSpeed = value;

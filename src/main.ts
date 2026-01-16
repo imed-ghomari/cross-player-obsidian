@@ -30,7 +30,8 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     ffmpegPath: '',
     downloadFolder: '',
     defaultDownloadQuality: 'best',
-    showMediaIndicator: true
+    showMediaIndicator: true,
+    storageLimitGB: 10
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -51,6 +52,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async onload() {
         await this.loadData();
+        this.calculateDynamicLimit();
 
         // ffmpeg-static is removed because it causes issues on mobile (bundling Node-only code).
         // Users should install ffmpeg systematically.
@@ -377,45 +379,13 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async calculateDynamicLimit() {
-        const watchedFolder = this.data.settings.watchedFolder;
-        if (!watchedFolder) return;
+        // Use manual setting
+        const limitGB = this.data.settings.storageLimitGB || 10;
+        this.dynamicStorageLimit = limitGB * 1024 * 1024 * 1024;
+        this.limitingDevice = "Manual Setting";
         
-        const devicesDir = watchedFolder + "/.cross-player-devices";
-        if (!(await this.app.vault.adapter.exists(devicesDir))) return;
-        
-        try {
-            const result = await this.app.vault.adapter.list(devicesDir);
-            const files = result.files;
-            
-            let minFreeSpace = Number.MAX_VALUE;
-            let limitingDevice = "";
-            
-            for (const file of files) {
-                if (file.endsWith(".json")) {
-                    const content = await this.app.vault.adapter.read(file);
-                    try {
-                        const status = JSON.parse(content) as DeviceStatus;
-                        if (status.freeSpace < minFreeSpace) {
-                            minFreeSpace = status.freeSpace;
-                            limitingDevice = status.name;
-                        }
-                    } catch (e) {
-                        // ignore bad json
-                    }
-                }
-            }
-            
-            if (minFreeSpace !== Number.MAX_VALUE) {
-                this.dynamicStorageLimit = minFreeSpace * 0.7; // 70%
-                this.limitingDevice = limitingDevice;
-                
-                // Update stats in queue view
-                if (this.listView) this.listView.refresh();
-            }
-            
-        } catch (e) {
-            console.error("Failed to calculate dynamic limit", e);
-        }
+        // Update stats in queue view
+        if (this.listView) this.listView.refresh();
     }
 
     async loadData() {
@@ -717,6 +687,16 @@ export default class CrossPlayerPlugin extends Plugin {
         // Ensure we get the view instance
         if (leaf.view instanceof CrossPlayerMainView) {
             this.mainView = leaf.view;
+            // Force focus on the container element
+            // We need a slight delay to ensure the view is fully active and DOM is ready
+            setTimeout(() => {
+                if (this.mainView) {
+                    this.mainView.contentEl.focus();
+                    if (this.mainView.videoEl) {
+                         this.mainView.videoEl.focus();
+                    }
+                }
+            }, 100);
         }
     }
 
@@ -1369,6 +1349,21 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
+            .setName('Storage Limit (GB)')
+            .setDesc('Manual storage limit in Gigabytes.')
+            .addText(text => text
+                .setPlaceholder('10')
+                .setValue(String(this.plugin.data.settings.storageLimitGB || 10))
+                .onChange(async (value) => {
+                    const limit = parseFloat(value);
+                    if (!isNaN(limit) && limit > 0) {
+                        this.plugin.data.settings.storageLimitGB = limit;
+                        await this.plugin.saveData();
+                        this.plugin.calculateDynamicLimit();
+                    }
+                }));
+
+        new Setting(containerEl)
             .setName('Default Playback Speed')
             .setDesc('The default speed when the player starts or resets.')
             .addSlider(slider => slider
@@ -1662,8 +1657,10 @@ class CrossPlayerListView extends ItemView {
 
             // Context Menu
             itemEl.addEventListener("contextmenu", (event) => {
-                event.preventDefault(); // This stops the browser context menu, and usually click events too
-                event.stopPropagation(); // Stop propagation to prevent triggering parent click handlers if any
+                // Prevent default context menu
+                event.preventDefault(); 
+                // Stop propagation so it doesn't trigger the click handler (which plays the media)
+                event.stopPropagation();
 
                 const menu = new Menu();
                 
