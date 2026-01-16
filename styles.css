@@ -118,3 +118,13 @@ video::-webkit-media-controls-start-playback-button {
     display: none !important;
     -webkit-appearance: none;
 }
+
+/* Mobile padding for main view to avoid overlap with Obsidian toolbar */
+.is-mobile .cross-player-main-view {
+    padding-bottom: 60px;
+}
+
+/* Reset for tablet if not needed (user said tablet is fine) */
+.is-tablet .cross-player-main-view {
+    padding-bottom: 0;
+}

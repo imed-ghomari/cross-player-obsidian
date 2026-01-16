@@ -3662,6 +3662,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   async onOpen() {
     const container = this.contentEl;
     container.empty();
+    container.addClass("cross-player-main-view");
     container.style.display = "flex";
     container.style.flexDirection = "column";
     container.style.justifyContent = "center";
