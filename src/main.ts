@@ -1,15 +1,15 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform } from 'obsidian';
 // @ts-ignore
-import ffmpegStatic from 'ffmpeg-static';
+// import ffmpegStatic from 'ffmpeg-static';
 import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus } from './types';
 import Sortable from 'sortablejs';
-import { spawn, ChildProcess } from 'child_process';
-import * as path from 'path';
+import type { ChildProcess } from 'child_process';
+// import * as path from 'path';
+// import * as fs from 'fs';
 
 interface ActiveDownload extends DownloadStatus {
     childProcess?: ChildProcess;
 }
-import * as fs from 'fs';
 
 const VIEW_TYPE_CROSS_PLAYER_LIST = "cross-player-list-view";
 const VIEW_TYPE_CROSS_PLAYER_MAIN = "cross-player-main-view";
@@ -20,13 +20,12 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     seekSecondsForward: 10,
     seekSecondsBackward: 10,
     youtubeDlpPath: 'yt-dlp',
-    ffmpegPath: ffmpegStatic || '',
+    ffmpegPath: '',
     downloadFolder: '',
     defaultDownloadQuality: 'best',
     defaultDownloadType: 'video',
     maxStorageLimit: 10, // GB
-    showMediaIndicator: true,
-    enableMobileOverlay: false
+    showMediaIndicator: true
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -39,17 +38,26 @@ export default class CrossPlayerPlugin extends Plugin {
     async onload() {
         await this.loadData();
 
+        // ffmpeg-static is removed because it causes issues on mobile (bundling Node-only code).
+        // Users should install ffmpeg systematically.
+        
         this.addCommand({
             id: 'test-yt-dlp',
             name: 'Test yt-dlp Configuration',
             callback: async () => {
+                if (!Platform.isDesktop) {
+                    new Notice("This command is only available on Desktop.");
+                    return;
+                }
+                
                 const { youtubeDlpPath } = this.data.settings;
                 const ytPath = youtubeDlpPath.trim();
                 new Notice(`Testing yt-dlp at: ${ytPath}`);
                 
                 try {
+                    const { spawn } = require('child_process');
                     const child = spawn(ytPath, ['--version']);
-                    child.stdout.on('data', (data) => {
+                    child.stdout.on('data', (data: Buffer) => {
                         const version = data.toString().trim();
                         new Notice(`yt-dlp version: ${version}`);
                         // Simple check: if version starts with 2021, 2022, 2023, it's likely too old given it's 2025+
@@ -57,10 +65,10 @@ export default class CrossPlayerPlugin extends Plugin {
                             new Notice("⚠️ Your yt-dlp is very old! Please update it.");
                         }
                     });
-                    child.stderr.on('data', (data) => {
+                    child.stderr.on('data', (data: Buffer) => {
                         new Notice(`yt-dlp error: ${data.toString()}`);
                     });
-                    child.on('error', (err) => {
+                    child.on('error', (err: Error) => {
                          new Notice(`Failed to run yt-dlp: ${err.message}`);
                     });
 
@@ -71,7 +79,7 @@ export default class CrossPlayerPlugin extends Plugin {
                         ffmpegChild.on('error', () => {
                              new Notice(`⚠️ FFmpeg not found at: ${ffmpegPath}`);
                         });
-                        ffmpegChild.stdout.on('data', (data) => {
+                        ffmpegChild.stdout.on('data', (data: Buffer) => {
                             if (data.toString().includes('ffmpeg version')) {
                                 // detected
                             }
@@ -244,7 +252,6 @@ export default class CrossPlayerPlugin extends Plugin {
     async saveData() {
         await super.saveData(this.data);
         if (this.listView) this.listView.refresh();
-        if (this.mainView) this.mainView.refreshMobileOverlay();
     }
 
     registerWatchers() {
@@ -438,7 +445,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (!existing) {
             const duration = await this.getMediaDuration(file);
             const newItem: MediaItem = {
-                id: Math.random().toString(36).substr(2, 9),
+                id: Math.random().toString(36).substring(2, 11),
                 path: file.path, // Store vault relative path
                 name: file.name,
                 status: 'pending',
@@ -597,6 +604,30 @@ export default class CrossPlayerPlugin extends Plugin {
         await this.saveData();
     }
 
+    async sortQueue(by: 'name' | 'type' | 'size', order: 'asc' | 'desc') {
+        this.data.queue.sort((a, b) => {
+            let valA: any = a.name;
+            let valB: any = b.name;
+
+            if (by === 'type') {
+                valA = a.path.split('.').pop()?.toLowerCase() || '';
+                valB = b.path.split('.').pop()?.toLowerCase() || '';
+            } else if (by === 'size') {
+                valA = a.size || 0;
+                valB = b.size || 0;
+            } else {
+                 // name
+                 valA = a.name.toLowerCase();
+                 valB = b.name.toLowerCase();
+            }
+
+            if (valA < valB) return order === 'asc' ? -1 : 1;
+            if (valA > valB) return order === 'asc' ? 1 : -1;
+            return 0;
+        });
+        await this.saveData();
+    }
+
     async cleanConsumedMedia() {
         const toRemove = this.data.queue.filter(item => item.status === 'completed');
         if (toRemove.length === 0) {
@@ -702,7 +733,11 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async downloadVideos(links: string[], quality: string, type: 'video' | 'audio') {
-        const { youtubeDlpPath, downloadFolder, watchedFolder, ffmpegPath } = this.data.settings;
+        if (!Platform.isDesktop) {
+            new Notice("Downloading is only supported on Desktop.");
+            return;
+        }
+        const { youtubeDlpPath, downloadFolder, watchedFolder } = this.data.settings;
         const targetFolder = downloadFolder || watchedFolder;
 
         if (!targetFolder) {
@@ -711,6 +746,9 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         // Resolve absolute path for the target folder
+        const path = require('path');
+        const fs = require('fs');
+        
         // @ts-ignore
         const adapter = this.app.vault.adapter;
         let absolutePath: string;
@@ -742,6 +780,8 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async startDownload(link: string, quality: string, type: 'video' | 'audio', cwd: string, existingId?: string) {
+        if (!Platform.isDesktop) return;
+        
         const { youtubeDlpPath, ffmpegPath } = this.data.settings;
         const ytPath = youtubeDlpPath.trim();
 
@@ -802,11 +842,12 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         try {
+            const { spawn } = require('child_process');
             console.log(`Spawning: ${ytPath} ${args.join(' ')}`);
             const child = spawn(ytPath, args, { cwd: cwd });
             downloadStatus.childProcess = child;
 
-            child.stdout.on('data', (data) => {
+            child.stdout.on('data', (data: Buffer) => {
                 const lines = data.toString().split('\n');
                 for (const line of lines) {
                     if (line.includes('[download]')) {
@@ -833,7 +874,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 }
             });
 
-            child.stderr.on('data', (data) => {
+            child.stderr.on('data', (data: Buffer) => {
                 const errorMsg = data.toString();
                 console.error(`yt-dlp stderr: ${errorMsg}`);
                 
@@ -848,14 +889,14 @@ export default class CrossPlayerPlugin extends Plugin {
                 }
             });
 
-            child.on('error', (err) => {
+            child.on('error', (err: Error) => {
                 console.error("Failed to start process", err);
                 downloadStatus.status = 'error';
                 downloadStatus.error = err.message;
                 this.listView?.updateDownloadProgress();
             });
 
-            child.on('close', (code) => {
+            child.on('close', (code: number | null) => {
                 // If code is null/signal, it might be killed manually
                 if (code === 0) {
                     downloadStatus.status = 'completed';
@@ -915,6 +956,9 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     resumeDownload(id: string) {
+        if (!Platform.isDesktop) return;
+        const path = require('path');
+
         const dl = this.activeDownloads.find(d => d.id === id);
         if (dl && dl.params) {
             const { downloadFolder, watchedFolder } = this.data.settings;
@@ -1053,7 +1097,7 @@ class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
         return item.path;
     }
 
-    onChooseItem(item: TFolder, evt: MouseEvent | KeyboardEvent): void {
+    onChooseItem(item: TFolder): void {
         this.plugin.setWatchedFolder(item.path);
     }
 }
@@ -1130,16 +1174,6 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.data.settings.showMediaIndicator)
                 .onChange(async (value) => {
                     this.plugin.data.settings.showMediaIndicator = value;
-                    await this.plugin.saveData();
-                }));
-
-        new Setting(containerEl)
-            .setName('Enable Mobile Overlay Controls')
-            .setDesc('Show large overlay controls (Play, Seek, Next) for easier interaction while driving/mobile.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.data.settings.enableMobileOverlay)
-                .onChange(async (value) => {
-                    this.plugin.data.settings.enableMobileOverlay = value;
                     await this.plugin.saveData();
                 }));
 
@@ -1253,7 +1287,57 @@ class CrossPlayerListView extends ItemView {
         headerContainer.style.marginBottom = "10px";
         headerContainer.style.flexShrink = "0"; // Don't shrink
 
-        headerContainer.createEl("h4", { text: "Media Queue", cls: "cross-player-title" });
+        // Title Row with Sort Button
+        const titleRow = headerContainer.createDiv({ cls: "cross-player-title-row" });
+        titleRow.style.display = "flex";
+        titleRow.style.justifyContent = "center";
+        titleRow.style.alignItems = "center";
+        titleRow.style.gap = "8px";
+
+        titleRow.createEl("h4", { text: "Media Queue", cls: "cross-player-title", attr: { style: "margin: 0;" } });
+
+        const sortBtn = titleRow.createDiv({ cls: "clickable-icon" });
+        setIcon(sortBtn, "arrow-up-down");
+        sortBtn.ariaLabel = "Sort Queue";
+        sortBtn.onclick = (evt) => {
+             const menu = new Menu();
+             
+             menu.addItem(item => item
+                 .setTitle("Name (A to Z)")
+                 .setIcon("sort-asc")
+                 .onClick(() => this.plugin.sortQueue('name', 'asc')));
+             
+             menu.addItem(item => item
+                 .setTitle("Name (Z to A)")
+                 .setIcon("sort-desc")
+                 .onClick(() => this.plugin.sortQueue('name', 'desc')));
+             
+             menu.addSeparator();
+             
+             menu.addItem(item => item
+                 .setTitle("Type (A to Z)")
+                 .setIcon("file")
+                 .onClick(() => this.plugin.sortQueue('type', 'asc')));
+             
+             menu.addItem(item => item
+                 .setTitle("Type (Z to A)")
+                 .setIcon("file")
+                 .onClick(() => this.plugin.sortQueue('type', 'desc')));
+             
+             menu.addSeparator();
+             
+             menu.addItem(item => item
+                 .setTitle("Size (Smallest)")
+                 .setIcon("chevrons-down")
+                 .onClick(() => this.plugin.sortQueue('size', 'asc')));
+             
+             menu.addItem(item => item
+                 .setTitle("Size (Largest)")
+                 .setIcon("chevrons-up")
+                 .onClick(() => this.plugin.sortQueue('size', 'desc')));
+             
+             menu.showAtMouseEvent(evt);
+        };
         
         const speed = this.plugin.data.playbackSpeed || 1.0;
         const speedEl = headerContainer.createDiv({ cls: "cross-player-speed-display" });
@@ -1290,7 +1374,7 @@ class CrossPlayerListView extends ItemView {
         list.style.overflowX = "hidden";
         // list.style.minHeight = "0"; // Firefox fix for flex overflow
 
-        this.plugin.data.queue.forEach((item, index) => {
+        this.plugin.data.queue.forEach((item) => {
             const itemEl = list.createDiv({ cls: "cross-player-item" });
             itemEl.style.display = "flex";
             itemEl.style.alignItems = "center";
@@ -1633,7 +1717,7 @@ class CrossPlayerMainView extends ItemView {
 
     refreshMobileOverlay() {
         const container = this.contentEl;
-        const shouldShow = this.plugin.data.settings.enableMobileOverlay;
+        const shouldShow = Platform.isMobile;
 
         if (!shouldShow) {
             if (this.overlayEl) {
