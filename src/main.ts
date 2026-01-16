@@ -1946,6 +1946,18 @@ class CrossPlayerMainView extends ItemView {
 
     async play(item: MediaItem, autoPlay: boolean = false) {
         this.currentItem = item;
+        
+        // Update view title
+        // @ts-ignore
+        if (this.leaf.view.headerTitleEl) {
+             // @ts-ignore
+             this.leaf.view.headerTitleEl.setText(item.name);
+        } else {
+             // Fallback or if titleEl is the one used in older/newer API
+             // @ts-ignore
+             if (this.leaf.view.titleEl) this.leaf.view.titleEl.setText(item.name);
+        }
+        
         if (!this.videoEl) {
              // Re-create if missing (unlikely if view is open)
              const container = this.contentEl;

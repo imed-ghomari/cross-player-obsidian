@@ -3677,6 +3677,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   }
   async play(item, autoPlay = false) {
     this.currentItem = item;
+    if (this.leaf.view.headerTitleEl) {
+      this.leaf.view.headerTitleEl.setText(item.name);
+    } else {
+      if (this.leaf.view.titleEl)
+        this.leaf.view.titleEl.setText(item.name);
+    }
     if (!this.videoEl) {
       const container = this.contentEl;
       this.videoEl = container.createEl("video");
