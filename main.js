@@ -3549,13 +3549,21 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.refreshMobileOverlay();
     this.videoEl.onended = async () => {
       if (this.currentItem) {
-        await this.plugin.updateStatus(this.currentItem.id, "completed");
-        this.plugin.playNextUnread();
+        if (this.currentItem.status !== "completed") {
+          await this.plugin.updateStatus(this.currentItem.id, "completed");
+          this.plugin.playNextUnread();
+        }
       }
     };
-    this.videoEl.ontimeupdate = () => {
+    this.videoEl.ontimeupdate = async () => {
       if (this.currentItem) {
         this.currentItem.position = this.videoEl.currentTime;
+        if (this.currentItem.status !== "completed" && this.videoEl.duration > 0) {
+          const progress = this.videoEl.currentTime / this.videoEl.duration;
+          if (progress > 0.95) {
+            await this.plugin.updateStatus(this.currentItem.id, "completed");
+          }
+        }
       }
     };
     this.videoEl.onpause = async () => {

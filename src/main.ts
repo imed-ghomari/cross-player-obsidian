@@ -1783,14 +1783,32 @@ class CrossPlayerMainView extends ItemView {
 
         this.videoEl.onended = async () => {
             if (this.currentItem) {
-                await this.plugin.updateStatus(this.currentItem.id, 'completed');
-                this.plugin.playNextUnread();
+                // If onended fires, it's definitely completed
+                if (this.currentItem.status !== 'completed') {
+                    await this.plugin.updateStatus(this.currentItem.id, 'completed');
+                    this.plugin.playNextUnread();
+                }
             }
         };
 
-        this.videoEl.ontimeupdate = () => {
+        this.videoEl.ontimeupdate = async () => {
              if (this.currentItem) {
                  this.currentItem.position = this.videoEl.currentTime;
+                 
+                 // Mark as completed if > 95% watched
+                 // We don't want to auto-skip yet, just mark as completed so if user exits it's done.
+                 // But wait, if we mark as completed, does it affect playback? No.
+                 // But we should only do this once to avoid spamming save.
+                 if (this.currentItem.status !== 'completed' && this.videoEl.duration > 0) {
+                     const progress = this.videoEl.currentTime / this.videoEl.duration;
+                     if (progress > 0.95) {
+                         // Mark as completed silently?
+                         // If we update status, it saves data.
+                         await this.plugin.updateStatus(this.currentItem.id, 'completed');
+                         // We do NOT trigger playNextUnread() here, we let the video finish naturally.
+                         // Or user can skip.
+                     }
+                 }
              }
         };
         
