@@ -1677,6 +1677,8 @@ class CrossPlayerListView extends ItemView {
             animation: 150,
             handle: '.sortable-handle',
             ghostClass: 'sortable-ghost',
+            forceFallback: true, // Fixes mobile drag offset/invisibility issues
+            fallbackOnBody: true, // Appends the drag mirror to body to avoid overflow/clipping
             onSort: async (evt) => {
                 if (evt.oldIndex !== undefined && evt.newIndex !== undefined) {
                     // We don't want to trigger a full refresh immediately because Sortable has already moved the DOM element.

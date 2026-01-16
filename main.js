@@ -3485,6 +3485,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       animation: 150,
       handle: ".sortable-handle",
       ghostClass: "sortable-ghost",
+      forceFallback: true,
+      // Fixes mobile drag offset/invisibility issues
+      fallbackOnBody: true,
+      // Appends the drag mirror to body to avoid overflow/clipping
       onSort: async (evt) => {
         if (evt.oldIndex !== void 0 && evt.newIndex !== void 0) {
           await this.plugin.reorderItem(evt.oldIndex, evt.newIndex);
