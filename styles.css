@@ -113,3 +113,8 @@ video::-webkit-media-controls-start-playback-button {
     -webkit-appearance: none;
 }
 
+/* Hide native play button in the bottom control bar on mobile (for both audio/video) */
+.is-mobile video::-webkit-media-controls-play-button {
+    display: none !important;
+    -webkit-appearance: none;
+}

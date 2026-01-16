@@ -1677,8 +1677,11 @@ class CrossPlayerListView extends ItemView {
             animation: 150,
             handle: '.sortable-handle',
             ghostClass: 'sortable-ghost',
-            forceFallback: true, // Fixes mobile drag offset/invisibility issues
-            fallbackOnBody: true, // Appends the drag mirror to body to avoid overflow/clipping
+            // Disable forceFallback to use native DnD (fixes mobile offset issues)
+            forceFallback: false,
+            delay: 100, // Short delay to prevent accidental scrolling interference
+            delayOnTouchOnly: true,
+            touchStartThreshold: 5,
             onSort: async (evt) => {
                 if (evt.oldIndex !== undefined && evt.newIndex !== undefined) {
                     // We don't want to trigger a full refresh immediately because Sortable has already moved the DOM element.
@@ -1878,6 +1881,7 @@ class CrossPlayerListView extends ItemView {
 class CrossPlayerMainView extends ItemView {
     plugin: CrossPlayerPlugin;
     videoEl: HTMLVideoElement;
+    videoWrapperEl: HTMLDivElement; // Added wrapper property
     overlayEl: HTMLElement | null = null;
     audioPlaceholderEl: HTMLElement | null = null;
     currentItem: MediaItem | null = null;
@@ -1910,7 +1914,16 @@ class CrossPlayerMainView extends ItemView {
         container.style.backgroundColor = "#000";
         container.style.position = "relative"; // Needed for overlay
 
-        this.videoEl = container.createEl("video");
+        // Wrapper for video and overlay to manage events cleanly
+        this.videoWrapperEl = container.createDiv({ cls: 'cross-player-video-wrapper' });
+        this.videoWrapperEl.style.position = "relative";
+        this.videoWrapperEl.style.width = "100%";
+        this.videoWrapperEl.style.height = "100%";
+        this.videoWrapperEl.style.display = "flex";
+        this.videoWrapperEl.style.justifyContent = "center";
+        this.videoWrapperEl.style.alignItems = "center";
+
+        this.videoEl = this.videoWrapperEl.createEl("video");
         this.videoEl.controls = true;
         this.videoEl.style.maxWidth = "100%";
         this.videoEl.style.maxHeight = "100%";
@@ -2016,47 +2029,86 @@ class CrossPlayerMainView extends ItemView {
             if (hideTimeout) clearTimeout(hideTimeout);
         };
 
-        const handleTap = (e: Event) => {
-             // Stop propagation to prevent double firing if attached to both video and container
-             // or if bubbling happens unexpectedly.
-             // But we need to be careful if e.target is not what we expect.
-             
-             // If clicking on a button, don't toggle (buttons handle their own clicks and stopPropagation)
-             // But just in case.
-             
-             // If overlay is hidden
-             if (overlay.style.opacity === "0") {
-                 if (!this.videoEl.paused) {
-                     this.videoEl.pause();
-                     // Update play button icon immediately
-                     const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
-                     if (playBtn) setIcon(playBtn, "play");
-                 }
-                 showOverlay();
-             } else {
-                 // If visible and clicking background, hide immediately
-                 hideOverlay();
-             }
+        // Touch handling variables
+        let touchStartTime = 0;
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let isScrolling = false;
+
+        const onTouchStart = (e: TouchEvent) => {
+            touchStartTime = Date.now();
+            touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
+            isScrolling = false;
         };
 
-        // Toggle on tap - Attach to container (for audio placeholder/background)
-        container.onclick = (e) => {
-            // Check if target is not the video element (to avoid double handling if video bubbles)
-            if (e.target !== this.videoEl) {
-                handleTap(e);
+        const onTouchMove = (e: TouchEvent) => {
+            if (Math.abs(e.touches[0].clientX - touchStartX) > 10 || 
+                Math.abs(e.touches[0].clientY - touchStartY) > 10) {
+                isScrolling = true;
             }
         };
 
-        // Attach to video element specifically for video files
+        const onTouchEnd = (e: TouchEvent) => {
+            if (isScrolling) return;
+            // Short tap check
+            if (Date.now() - touchStartTime > 500) return;
+
+            // Handle Tap
+            const target = e.target as HTMLElement;
+            // Use changedTouches for touchend
+            const touchY = e.changedTouches[0].clientY;
+            const rect = this.videoEl.getBoundingClientRect();
+            
+            // Logic:
+            if (overlay.style.opacity === "0") {
+                // Overlay Hidden
+                
+                // 1. Check native controls area (approx 50px from bottom of video)
+                const relativeY = touchY - rect.top;
+                if (relativeY > rect.height - 50) {
+                    // Tapped bottom bar - let native controls handle it
+                    return; 
+                }
+
+                // 2. Prevent native toggle
+                e.preventDefault(); 
+                e.stopPropagation();
+
+                // 3. Pause and Show Overlay
+                if (!this.videoEl.paused) {
+                    this.videoEl.pause();
+                    const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
+                    if (playBtn) setIcon(playBtn, "play");
+                }
+                showOverlay();
+
+            } else {
+                // Overlay Visible
+                
+                // 1. Check if tapped on a button
+                if (target.closest('.cross-player-big-btn')) {
+                    // Let button click happen
+                    return;
+                }
+                
+                // 2. Tapped on background -> Hide
+                e.preventDefault(); // Prevent click passthrough to video
+                e.stopPropagation();
+                hideOverlay();
+            }
+        };
+
+        // Add listeners to container (which is wrapper)
+        // Use capture to catch before video
+        container.addEventListener('touchstart', onTouchStart, { capture: true });
+        container.addEventListener('touchmove', onTouchMove, { capture: true });
+        container.addEventListener('touchend', onTouchEnd, { capture: true });
+
+        // Remove previous listeners if any (though we are creating fresh)
+        // We don't need videoEl.onclick anymore as capture on container covers it.
         if (this.videoEl) {
-            // We use onclick to ensure we capture it even if native controls are enabled (though they might consume it)
-            // On mobile, native controls often swallow clicks, but let's try.
-            this.videoEl.onclick = (e) => {
-                // If the user clicks native controls, we might want to avoid this?
-                // But we can't easily detect that.
-                // Assuming tapping the video area.
-                handleTap(e);
-            };
+             this.videoEl.onclick = null;
         }
 
         // Controls Row
@@ -2188,21 +2240,13 @@ class CrossPlayerMainView extends ItemView {
                 this.audioPlaceholderEl.style.alignItems = "center";
                 this.audioPlaceholderEl.style.zIndex = "1"; // Behind overlay (10) but above video background (0)
                 this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e"; // Dark background to hide video player default
-                
-                const iconContainer = this.audioPlaceholderEl.createDiv();
-                // Removed the big icon as requested
-                // setIcon(iconContainer, "music");
-                
-                // const svg = iconContainer.querySelector('svg');
-                // if (svg) {
-                //    svg.style.width = "100px";
-                //    svg.style.height = "100px";
-                //    svg.style.color = "var(--text-muted)";
-                //    svg.style.opacity = "0.5";
-                // }
             } else {
                 this.audioPlaceholderEl.style.display = "flex";
+                this.audioPlaceholderEl.empty(); // Ensure no leftover icons
             }
+            
+            // Set transparent poster to prevent browser from showing default audio icon
+            this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
             
             // Adjust video element to be minimal (just controls)
             // But we can't easily make it "just controls". 
@@ -2219,6 +2263,9 @@ class CrossPlayerMainView extends ItemView {
             if (this.audioPlaceholderEl) {
                 this.audioPlaceholderEl.style.display = "none";
             }
+            // Reset video properties
+            this.videoEl.poster = "";
+            this.videoEl.style.background = "";
             this.videoEl.style.height = "100%";
             this.videoEl.style.position = "static"; // Default
             this.videoEl.style.zIndex = "auto";
