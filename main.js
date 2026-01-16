@@ -2288,9 +2288,6 @@ var DEFAULT_SETTINGS = {
   ffmpegPath: "",
   downloadFolder: "",
   defaultDownloadQuality: "best",
-  defaultDownloadType: "video",
-  maxStorageLimit: 10,
-  // GB
   showMediaIndicator: true
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
@@ -2301,9 +2298,17 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.mainView = null;
     this.activeDownloads = [];
     this.fsWatcher = null;
+    this.deviceId = "";
+    this.deviceName = "";
+    this.dynamicStorageLimit = 0;
+    // bytes
+    this.limitingDevice = "";
   }
   async onload() {
     await this.loadData();
+    this.debouncedUpdateDeviceStatus = (0, import_obsidian.debounce)(async () => {
+      await this.updateDeviceStatus();
+    }, 2e3, true);
     this.addCommand({
       id: "test-yt-dlp",
       name: "Test yt-dlp Configuration",
@@ -2485,7 +2490,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           const basePath = this.app.vault.adapter.getBasePath();
           const dataPath = path.join(basePath, this.manifest.dir, "data.json");
           if (fs.existsSync(dataPath)) {
-            this.fsWatcher = fs.watch(dataPath, (eventType, filename) => {
+            this.fsWatcher = fs.watch(dataPath, (eventType) => {
               if (eventType === "change") {
                 this.debouncedReload();
               }
@@ -2500,11 +2505,108 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     if (this.data.settings.watchedFolder) {
       this.scanFolder(this.data.settings.watchedFolder);
     }
+    await this.loadDeviceId();
+    this.updateDeviceStatus();
   }
   onunload() {
     if (this.fsWatcher) {
       this.fsWatcher.close();
       this.fsWatcher = null;
+    }
+  }
+  async loadDeviceId() {
+    let id = localStorage.getItem("cross-player-device-id");
+    if (!id) {
+      id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      localStorage.setItem("cross-player-device-id", id);
+    }
+    this.deviceId = id;
+    let name = import_obsidian.Platform.isMobile ? "Mobile" : "Desktop";
+    if (import_obsidian.Platform.isDesktop) {
+      try {
+        const os = require("os");
+        name = os.hostname();
+      } catch (e) {
+      }
+    } else {
+      if (import_obsidian.Platform.isIosApp)
+        name = "iPad/iPhone";
+      if (import_obsidian.Platform.isAndroidApp)
+        name = "Android";
+    }
+    this.deviceName = name;
+  }
+  async getFreeSpace() {
+    if (navigator.storage && navigator.storage.estimate) {
+      try {
+        const estimate = await navigator.storage.estimate();
+        if (estimate.quota && estimate.usage !== void 0) {
+          return estimate.quota - estimate.usage;
+        }
+      } catch (e) {
+        console.error("Storage estimate failed", e);
+      }
+    }
+    return 10 * 1024 * 1024 * 1024;
+  }
+  async updateDeviceStatus() {
+    if (!this.deviceId)
+      await this.loadDeviceId();
+    const freeSpace = await this.getFreeSpace();
+    const status = {
+      id: this.deviceId,
+      name: this.deviceName,
+      freeSpace,
+      timestamp: Date.now()
+    };
+    const watchedFolder = this.data.settings.watchedFolder;
+    if (!watchedFolder)
+      return;
+    const devicesDir = watchedFolder + "/.cross-player-devices";
+    try {
+      if (!await this.app.vault.adapter.exists(devicesDir)) {
+        await this.app.vault.createFolder(devicesDir);
+      }
+      const filePath = `${devicesDir}/${this.deviceId}.json`;
+      await this.app.vault.adapter.write(filePath, JSON.stringify(status, null, 2));
+      await this.calculateDynamicLimit();
+    } catch (e) {
+      console.error("Failed to update device status", e);
+    }
+  }
+  async calculateDynamicLimit() {
+    const watchedFolder = this.data.settings.watchedFolder;
+    if (!watchedFolder)
+      return;
+    const devicesDir = watchedFolder + "/.cross-player-devices";
+    if (!await this.app.vault.adapter.exists(devicesDir))
+      return;
+    try {
+      const result = await this.app.vault.adapter.list(devicesDir);
+      const files = result.files;
+      let minFreeSpace = Number.MAX_VALUE;
+      let limitingDevice = "";
+      for (const file of files) {
+        if (file.endsWith(".json")) {
+          const content = await this.app.vault.adapter.read(file);
+          try {
+            const status = JSON.parse(content);
+            if (status.freeSpace < minFreeSpace) {
+              minFreeSpace = status.freeSpace;
+              limitingDevice = status.name;
+            }
+          } catch (e) {
+          }
+        }
+      }
+      if (minFreeSpace !== Number.MAX_VALUE) {
+        this.dynamicStorageLimit = minFreeSpace * 0.7;
+        this.limitingDevice = limitingDevice;
+        if (this.listView)
+          this.listView.refresh();
+      }
+    } catch (e) {
+      console.error("Failed to calculate dynamic limit", e);
     }
   }
   async loadData() {
@@ -2527,6 +2629,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         this.handleFileChange(file);
+        this.debouncedUpdateDeviceStatus();
       })
     );
     this.registerEvent(
@@ -2537,6 +2640,15 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         this.handleDelete(file);
+        this.debouncedUpdateDeviceStatus();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        const watchedFolder = this.data.settings.watchedFolder;
+        if (watchedFolder && file.path.startsWith(watchedFolder + "/.cross-player-devices/")) {
+          this.calculateDynamicLimit();
+        }
       })
     );
   }
@@ -2625,6 +2737,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const folderPath = this.data.settings.watchedFolder;
     if (!folderPath)
       return;
+    if (file.name.startsWith(".") || file.path.includes("/."))
+      return;
     if (file instanceof import_obsidian.TFolder) {
       for (const child of file.children) {
         await this.handleFileChange(child, shouldSave);
@@ -2694,6 +2808,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       await leaf.setViewState({ type: VIEW_TYPE_CROSS_PLAYER_MAIN, active: true });
     }
     workspace.revealLeaf(leaf);
+    workspace.setActiveLeaf(leaf, { focus: true });
     if (leaf.view instanceof CrossPlayerMainView) {
       this.mainView = leaf.view;
     }
@@ -2702,7 +2817,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.activateMainView();
     const currentPlaying = this.data.queue.find((i) => i.status === "playing");
     if (currentPlaying && currentPlaying.id !== item.id) {
-      currentPlaying.status = "pending";
+      if (currentPlaying.finished) {
+        currentPlaying.status = "completed";
+      } else {
+        currentPlaying.status = "pending";
+      }
+    }
+    if (item.status === "completed") {
+      item.finished = true;
     }
     item.status = "playing";
     await this.saveData();
@@ -2750,6 +2872,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const item = this.data.queue.find((i) => i.id === id);
     if (item) {
       item.status = status;
+      if (status === "completed") {
+        item.finished = true;
+      }
       await this.saveData();
     }
   }
@@ -2866,6 +2991,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async setMediaItemAsUnread(item) {
     const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
     item.status = "pending";
+    item.finished = false;
     item.position = 0;
     await this.saveData();
     if (isCurrent && this.mainView) {
@@ -2980,7 +3106,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const child = spawn(ytPath, args, { cwd });
       downloadStatus.childProcess = child;
       child.stdout.on("data", (data) => {
-        var _a2, _b2;
+        var _a2, _b2, _c;
         const lines = data.toString().split("\n");
         for (const line of lines) {
           if (line.includes("[download]")) {
@@ -2988,7 +3114,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             const speedMatch = line.match(/at\s+([^\s]+)/);
             const etaMatch = line.match(/ETA\s+([^\s]+)/);
             if (percentMatch) {
-              downloadStatus.progress = percentMatch[1] + "%";
+              let percent = parseFloat(percentMatch[1]);
+              if (type === "audio") {
+                percent = percent * 0.9;
+              }
+              downloadStatus.progress = percent.toFixed(1) + "%";
             }
             if (speedMatch) {
               downloadStatus.speed = speedMatch[1];
@@ -3002,6 +3132,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             const name = line.split("Destination:")[1].trim();
             downloadStatus.name = name;
             (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
+          }
+          if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
+            downloadStatus.status = "converting";
+            downloadStatus.progress = "95%";
+            (_c = this.listView) == null ? void 0 : _c.updateDownloadProgress();
           }
         }
       });
@@ -3216,17 +3351,6 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.data.settings.defaultDownloadQuality = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Default Type").setDesc("Default download type.").addDropdown((drop3) => drop3.addOption("video", "Video").addOption("audio", "Audio").setValue(this.plugin.data.settings.defaultDownloadType).onChange(async (value) => {
-      this.plugin.data.settings.defaultDownloadType = value;
-      await this.plugin.saveData();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Max Storage Limit (GB)").setDesc("Maximum storage size for watched folder before warning.").addText((text) => text.setValue(String(this.plugin.data.settings.maxStorageLimit || 10)).onChange(async (value) => {
-      const parsed = parseFloat(value);
-      if (!isNaN(parsed) && parsed > 0) {
-        this.plugin.data.settings.maxStorageLimit = parsed;
-        await this.plugin.saveData();
-      }
-    }));
   }
 };
 var CrossPlayerListView = class extends import_obsidian.ItemView {
@@ -3293,7 +3417,8 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     speedEl.style.color = "var(--text-muted)";
     const stats = this.plugin.getQueueStats();
     const adjustedDuration = stats.totalDuration / speed;
-    const maxStorage = this.plugin.data.settings.maxStorageLimit || 10;
+    const limitBytes = this.plugin.dynamicStorageLimit;
+    const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
     const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
     const statsContainer = headerContainer.createDiv({ cls: "cross-player-stats" });
     statsContainer.style.fontSize = "0.8em";
@@ -3302,8 +3427,12 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
     statsContainer.createSpan({ text: etcText });
     statsContainer.createSpan({ text: " \u2022 " });
-    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${maxStorage} GB` });
-    if (sizeInGB > maxStorage) {
+    let limitText = `${limitGB.toFixed(1)} GB`;
+    if (this.plugin.limitingDevice) {
+      limitText += ` (${this.plugin.limitingDevice})`;
+    }
+    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitText}` });
+    if (sizeInGB > limitGB) {
       sizeSpan.style.color = "var(--text-error)";
       sizeSpan.style.fontWeight = "bold";
     }
@@ -3349,6 +3478,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       });
       itemEl.addEventListener("contextmenu", (event) => {
         event.preventDefault();
+        event.stopPropagation();
         const menu = new import_obsidian.Menu();
         menu.addItem(
           (menuItem) => menuItem.setTitle("Delete Media").setIcon("trash").onClick(() => {
@@ -3459,7 +3589,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       dlItem.style.paddingBottom = "5px";
       const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
       nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
-      nameRow.createSpan({ text: dl.status === "error" ? "Error" : dl.status === "paused" ? "Paused" : dl.progress });
+      let statusText = dl.progress;
+      if (dl.status === "error")
+        statusText = "Error";
+      else if (dl.status === "paused")
+        statusText = "Paused";
+      else if (dl.status === "converting")
+        statusText = "Converting...";
+      nameRow.createSpan({ text: statusText });
       const progressBar = dlItem.createEl("progress");
       progressBar.style.width = "100%";
       progressBar.style.height = "6px";
@@ -3473,6 +3610,8 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       const info = controlsRow.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
       if (dl.status === "downloading") {
         info.setText(`${dl.speed} - ETA: ${dl.eta}`);
+      } else if (dl.status === "converting") {
+        info.setText("Processing media...");
       } else if (dl.status === "error") {
         info.setText(dl.error || "Unknown Error");
         info.style.color = "var(--text-error)";

@@ -11,6 +11,13 @@ interface ActiveDownload extends DownloadStatus {
     childProcess?: ChildProcess;
 }
 
+interface DeviceStatus {
+    id: string;
+    name: string;
+    freeSpace: number; // in bytes
+    timestamp: number;
+}
+
 const VIEW_TYPE_CROSS_PLAYER_LIST = "cross-player-list-view";
 const VIEW_TYPE_CROSS_PLAYER_MAIN = "cross-player-main-view";
 
@@ -23,8 +30,6 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     ffmpegPath: '',
     downloadFolder: '',
     defaultDownloadQuality: 'best',
-    defaultDownloadType: 'video',
-    maxStorageLimit: 10, // GB
     showMediaIndicator: true
 }
 
@@ -37,12 +42,24 @@ export default class CrossPlayerPlugin extends Plugin {
     fsWatcher: any = null;
     debouncedReload: any;
 
+    deviceId: string = '';
+    deviceName: string = '';
+    dynamicStorageLimit: number = 0; // bytes
+    limitingDevice: string = '';
+
+    debouncedUpdateDeviceStatus: any;
+
     async onload() {
         await this.loadData();
 
         // ffmpeg-static is removed because it causes issues on mobile (bundling Node-only code).
         // Users should install ffmpeg systematically.
         
+        // Debounced update for device status
+        this.debouncedUpdateDeviceStatus = debounce(async () => {
+            await this.updateDeviceStatus();
+        }, 2000, true);
+
         this.addCommand({
             id: 'test-yt-dlp',
             name: 'Test yt-dlp Configuration',
@@ -252,7 +269,7 @@ export default class CrossPlayerPlugin extends Plugin {
                      const dataPath = path.join(basePath, this.manifest.dir, 'data.json');
                      
                      if (fs.existsSync(dataPath)) {
-                         this.fsWatcher = fs.watch(dataPath, (eventType: string, filename: string) => {
+                         this.fsWatcher = fs.watch(dataPath, (eventType: string) => {
                              if (eventType === 'change') {
                                  this.debouncedReload();
                              }
@@ -269,12 +286,135 @@ export default class CrossPlayerPlugin extends Plugin {
         if (this.data.settings.watchedFolder) {
             this.scanFolder(this.data.settings.watchedFolder);
         }
+
+        // Initialize Device Status
+        await this.loadDeviceId();
+        this.updateDeviceStatus();
+        
+        // Removed interval check as requested, relying on file events
     }
 
     onunload() {
         if (this.fsWatcher) {
             this.fsWatcher.close();
             this.fsWatcher = null;
+        }
+    }
+
+    async loadDeviceId() {
+        // Try to load from localStorage
+        let id = localStorage.getItem('cross-player-device-id');
+        if (!id) {
+            id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+            localStorage.setItem('cross-player-device-id', id);
+        }
+        this.deviceId = id;
+        
+        // Set device name
+        let name = Platform.isMobile ? "Mobile" : "Desktop";
+        if (Platform.isDesktop) {
+            try {
+                const os = require('os');
+                name = os.hostname();
+            } catch (e) {
+                // fallback
+            }
+        } else {
+            if (Platform.isIosApp) name = "iPad/iPhone";
+            if (Platform.isAndroidApp) name = "Android";
+        }
+        this.deviceName = name;
+    }
+
+    async getFreeSpace(): Promise<number> {
+        // Try navigator.storage
+        if (navigator.storage && navigator.storage.estimate) {
+            try {
+                const estimate = await navigator.storage.estimate();
+                if (estimate.quota && estimate.usage !== undefined) {
+                    return estimate.quota - estimate.usage;
+                }
+            } catch (e) {
+                console.error("Storage estimate failed", e);
+            }
+        }
+        
+        // Fallback default 10GB
+        return 10 * 1024 * 1024 * 1024;
+    }
+
+    async updateDeviceStatus() {
+        if (!this.deviceId) await this.loadDeviceId();
+        
+        const freeSpace = await this.getFreeSpace();
+        const status: DeviceStatus = {
+            id: this.deviceId,
+            name: this.deviceName,
+            freeSpace: freeSpace,
+            timestamp: Date.now()
+        };
+        
+        // Determine folder path
+        const watchedFolder = this.data.settings.watchedFolder;
+        if (!watchedFolder) return;
+        
+        const devicesDir = watchedFolder + "/.cross-player-devices";
+        
+        try {
+            if (!(await this.app.vault.adapter.exists(devicesDir))) {
+                await this.app.vault.createFolder(devicesDir);
+            }
+            
+            const filePath = `${devicesDir}/${this.deviceId}.json`;
+            await this.app.vault.adapter.write(filePath, JSON.stringify(status, null, 2));
+            
+            // Also calculate limit now
+            await this.calculateDynamicLimit();
+            
+        } catch (e) {
+            console.error("Failed to update device status", e);
+        }
+    }
+
+    async calculateDynamicLimit() {
+        const watchedFolder = this.data.settings.watchedFolder;
+        if (!watchedFolder) return;
+        
+        const devicesDir = watchedFolder + "/.cross-player-devices";
+        if (!(await this.app.vault.adapter.exists(devicesDir))) return;
+        
+        try {
+            const result = await this.app.vault.adapter.list(devicesDir);
+            const files = result.files;
+            
+            let minFreeSpace = Number.MAX_VALUE;
+            let limitingDevice = "";
+            
+            for (const file of files) {
+                if (file.endsWith(".json")) {
+                    const content = await this.app.vault.adapter.read(file);
+                    try {
+                        const status = JSON.parse(content) as DeviceStatus;
+                        if (status.freeSpace < minFreeSpace) {
+                            minFreeSpace = status.freeSpace;
+                            limitingDevice = status.name;
+                        }
+                    } catch (e) {
+                        // ignore bad json
+                    }
+                }
+            }
+            
+            if (minFreeSpace !== Number.MAX_VALUE) {
+                this.dynamicStorageLimit = minFreeSpace * 0.7; // 70%
+                this.limitingDevice = limitingDevice;
+                
+                // Update stats in queue view
+                if (this.listView) this.listView.refresh();
+            }
+            
+        } catch (e) {
+            console.error("Failed to calculate dynamic limit", e);
         }
     }
 
@@ -313,6 +453,8 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerEvent(
             this.app.vault.on('create', (file) => {
                 this.handleFileChange(file);
+                // Update device status if file added
+                this.debouncedUpdateDeviceStatus();
             })
         );
 
@@ -326,6 +468,19 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerEvent(
             this.app.vault.on('delete', (file) => {
                 this.handleDelete(file);
+                // Update device status if file deleted
+                this.debouncedUpdateDeviceStatus();
+            })
+        );
+        
+        // Also watch for modifications to sync files from other devices
+        this.registerEvent(
+            this.app.vault.on('modify', (file) => {
+                const watchedFolder = this.data.settings.watchedFolder;
+                if (watchedFolder && file.path.startsWith(watchedFolder + "/.cross-player-devices/")) {
+                    // Another device updated its status
+                    this.calculateDynamicLimit();
+                }
             })
         );
     }
@@ -476,6 +631,9 @@ export default class CrossPlayerPlugin extends Plugin {
         const folderPath = this.data.settings.watchedFolder;
         if (!folderPath) return;
 
+        // Ignore hidden files and folders (starting with .)
+        if (file.name.startsWith('.') || file.path.includes('/.')) return;
+
         // Recursively handle folders
         if (file instanceof TFolder) {
             for (const child of file.children) {
@@ -554,6 +712,8 @@ export default class CrossPlayerPlugin extends Plugin {
             await leaf.setViewState({ type: VIEW_TYPE_CROSS_PLAYER_MAIN, active: true });
         }
         workspace.revealLeaf(leaf);
+        workspace.setActiveLeaf(leaf, { focus: true });
+        
         // Ensure we get the view instance
         if (leaf.view instanceof CrossPlayerMainView) {
             this.mainView = leaf.view;
@@ -566,7 +726,15 @@ export default class CrossPlayerPlugin extends Plugin {
         // Update status of previous item if playing
         const currentPlaying = this.data.queue.find(i => i.status === 'playing');
         if (currentPlaying && currentPlaying.id !== item.id) {
-            currentPlaying.status = 'pending'; 
+            if (currentPlaying.finished) {
+                currentPlaying.status = 'completed';
+            } else {
+                currentPlaying.status = 'pending';
+            }
+        }
+
+        if (item.status === 'completed') {
+            item.finished = true;
         }
 
         item.status = 'playing';
@@ -630,6 +798,9 @@ export default class CrossPlayerPlugin extends Plugin {
         const item = this.data.queue.find(i => i.id === id);
         if (item) {
             item.status = status;
+            if (status === 'completed') {
+                item.finished = true;
+            }
             await this.saveData();
         }
     }
@@ -766,6 +937,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         // Update state
         item.status = 'pending';
+        item.finished = false;
         item.position = 0;
         await this.saveData();
         
@@ -912,7 +1084,12 @@ export default class CrossPlayerPlugin extends Plugin {
                         const etaMatch = line.match(/ETA\s+([^\s]+)/);
                         
                         if (percentMatch) {
-                            downloadStatus.progress = percentMatch[1] + '%';
+                            let percent = parseFloat(percentMatch[1]);
+                            // If audio/converting expected, scale download progress to 90% max
+                            if (type === 'audio') {
+                                percent = percent * 0.9;
+                            }
+                            downloadStatus.progress = percent.toFixed(1) + '%';
                         }
                         if (speedMatch) {
                             downloadStatus.speed = speedMatch[1];
@@ -926,6 +1103,12 @@ export default class CrossPlayerPlugin extends Plugin {
                         const name = line.split('Destination:')[1].trim();
                         downloadStatus.name = name;
                         this.listView?.updateDownloadProgress();
+                    }
+                    // Conversion / Post-processing detection
+                    if (line.includes('[ExtractAudio]') || line.includes('[ffmpeg]') || line.includes('[Merger]')) {
+                         downloadStatus.status = 'converting';
+                         downloadStatus.progress = '95%'; // Jump to 95% during conversion
+                         this.listView?.updateDownloadProgress();
                     }
                 }
             });
@@ -1278,31 +1461,6 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     this.plugin.data.settings.defaultDownloadQuality = value as any;
                     await this.plugin.saveData();
                 }));
-
-        new Setting(containerEl)
-            .setName('Default Type')
-            .setDesc('Default download type.')
-            .addDropdown(drop => drop
-                .addOption('video', 'Video')
-                .addOption('audio', 'Audio')
-                .setValue(this.plugin.data.settings.defaultDownloadType)
-                .onChange(async (value) => {
-                    this.plugin.data.settings.defaultDownloadType = value as any;
-                    await this.plugin.saveData();
-                }));
-
-        new Setting(containerEl)
-            .setName('Max Storage Limit (GB)')
-            .setDesc('Maximum storage size for watched folder before warning.')
-            .addText(text => text
-                .setValue(String(this.plugin.data.settings.maxStorageLimit || 10))
-                .onChange(async (value) => {
-                    const parsed = parseFloat(value);
-                    if (!isNaN(parsed) && parsed > 0) {
-                        this.plugin.data.settings.maxStorageLimit = parsed;
-                        await this.plugin.saveData();
-                    }
-                }));
     }
 }
 
@@ -1414,7 +1572,10 @@ class CrossPlayerListView extends ItemView {
         // Stats Display
         const stats = this.plugin.getQueueStats();
         const adjustedDuration = stats.totalDuration / speed;
-        const maxStorage = this.plugin.data.settings.maxStorageLimit || 10;
+        
+        // Dynamic Limit
+        const limitBytes = this.plugin.dynamicStorageLimit;
+        const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10; // Default 10GB if waiting
         const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
 
         const statsContainer = headerContainer.createDiv({ cls: "cross-player-stats" });
@@ -1427,8 +1588,13 @@ class CrossPlayerListView extends ItemView {
         
         statsContainer.createSpan({ text: " • " });
         
-        const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${maxStorage} GB` });
-        if (sizeInGB > maxStorage) {
+        let limitText = `${limitGB.toFixed(1)} GB`;
+        if (this.plugin.limitingDevice) {
+            limitText += ` (${this.plugin.limitingDevice})`;
+        }
+        
+        const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitText}` });
+        if (sizeInGB > limitGB) {
             sizeSpan.style.color = "var(--text-error)";
             sizeSpan.style.fontWeight = "bold";
         }
@@ -1486,32 +1652,19 @@ class CrossPlayerListView extends ItemView {
             nameEl.title = item.path;
 
             nameEl.onClickEvent(() => {
-                // Auto-play ONLY if it's unread (position == 0) OR if it's resuming (position > 0)
-                // Actually, the user wants "unread media file" to play automatically.
-                // Previously logic was: "Auto-play if item has progress (resuming), otherwise pause (new)".
-                // User complaint: "unread media file it's not played automatically, it's paused".
-                // So user WANTS unread media to play automatically too.
-                // In fact, user probably wants EVERYTHING to auto-play when clicked.
-                // "this behavior (pausing) should be present only for opening read media files" -> This implies read/completed files should start paused?
-                // Or maybe "opening read media files" means "resuming"? No, resuming usually implies auto-play.
-                // Let's assume standard behavior: Click = Play.
-                // Unless there is a specific reason to pause.
-                // Let's set autoPlay = true for everything for now to fix the "not played automatically" issue.
-                // Wait, re-reading: "it's paused even though this behavior should be present only for opening read media files."
-                // This means:
-                // Unread (New) -> Auto Play
-                // Read (Completed?) -> Pause?
-                // Resuming (In Progress) -> Auto Play?
+                // Prevent click if right-click (context menu) might have triggered this somehow, 
+                // though usually contextmenu event is separate.
+                // But specifically "does focus on the center player pane".
                 
-                // Let's simplified: Always Auto-Play when user clicks.
-                // If user wants to pause, they can click pause.
-                // Usually when I click a video in a list, I want to watch it.
+                // Always auto-play when user clicks
                 this.plugin.playMedia(item, true);
             });
 
             // Context Menu
             itemEl.addEventListener("contextmenu", (event) => {
-                event.preventDefault();
+                event.preventDefault(); // This stops the browser context menu, and usually click events too
+                event.stopPropagation(); // Stop propagation to prevent triggering parent click handlers if any
+
                 const menu = new Menu();
                 
                 menu.addItem((menuItem) =>
@@ -1672,7 +1825,13 @@ class CrossPlayerListView extends ItemView {
             // 1. Name
             const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
             nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
-            nameRow.createSpan({ text: dl.status === 'error' ? 'Error' : (dl.status === 'paused' ? 'Paused' : dl.progress) });
+            
+            let statusText = dl.progress;
+            if (dl.status === 'error') statusText = 'Error';
+            else if (dl.status === 'paused') statusText = 'Paused';
+            else if (dl.status === 'converting') statusText = 'Converting...';
+            
+            nameRow.createSpan({ text: statusText });
 
             // 2. Progress Bar
             const progressBar = dlItem.createEl("progress");
@@ -1691,6 +1850,8 @@ class CrossPlayerListView extends ItemView {
             const info = controlsRow.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
             if (dl.status === 'downloading') {
                 info.setText(`${dl.speed} - ETA: ${dl.eta}`);
+            } else if (dl.status === 'converting') {
+                info.setText('Processing media...');
             } else if (dl.status === 'error') {
                  info.setText(dl.error || "Unknown Error");
                  info.style.color = "var(--text-error)";

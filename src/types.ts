@@ -3,6 +3,7 @@ export interface MediaItem {
     path: string;
     name: string;
     status: 'pending' | 'playing' | 'completed';
+    finished?: boolean;
     position: number;
     duration: number;
     size?: number; // in bytes
@@ -18,8 +19,6 @@ export interface CrossPlayerSettings {
     ffmpegPath: string;
     downloadFolder: string;
     defaultDownloadQuality: 'best' | '1080p' | '720p' | '480p' | 'audio';
-    defaultDownloadType: 'video' | 'audio';
-    maxStorageLimit: number; // in GB
     showMediaIndicator: boolean;
 }
 
@@ -29,7 +28,7 @@ export interface DownloadStatus {
     progress: string;
     speed: string;
     eta: string;
-    status: 'downloading' | 'paused' | 'completed' | 'error';
+    status: 'downloading' | 'paused' | 'converting' | 'completed' | 'error';
     error?: string;
     params?: {
         url: string;
