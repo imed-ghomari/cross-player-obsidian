@@ -64,3 +64,52 @@
 .sortable-handle:active {
     cursor: grabbing;
 }
+
+/* Overlay Button Styles */
+.cross-player-overlay-btn {
+    width: 50px;
+    height: 50px;
+    min-width: 50px;
+    flex-shrink: 0;
+    border-radius: 50%;
+    background-color: var(--interactive-normal); /* Adapts to theme (light/dark) */
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--background-modifier-border);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    color: var(--text-normal);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+.cross-player-overlay-btn:active {
+    transform: scale(0.95);
+}
+
+.cross-player-overlay-btn.play-btn {
+    transform: scale(1.5);
+}
+
+.cross-player-overlay-btn.play-btn:active {
+    transform: scale(1.4); /* 1.5 * 0.95 approx */
+}
+
+.cross-player-overlay-btn svg {
+    width: 24px;
+    height: 24px;
+}
+
+/* Hide native play button on video to avoid conflict with overlay */
+video::-webkit-media-controls-overlay-play-button {
+    display: none !important;
+    -webkit-appearance: none;
+}
+
+video::-webkit-media-controls-start-playback-button {
+    display: none !important;
+    -webkit-appearance: none;
+}
+

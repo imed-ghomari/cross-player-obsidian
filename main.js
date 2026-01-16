@@ -3695,22 +3695,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
   }
   refreshMobileOverlay() {
-    var _a;
     const container = this.contentEl;
     const shouldShow = import_obsidian.Platform.isMobile;
     if (!shouldShow) {
-      if (this.overlayEl) {
-        this.overlayEl.remove();
-        this.overlayEl = null;
-      }
-      return;
-    }
-    let isAudio = false;
-    if (this.currentItem) {
-      const ext = (_a = this.currentItem.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
-      isAudio = ["mp3", "wav", "ogg", "m4a", "aac"].includes(ext || "");
-    }
-    if (!isAudio) {
       if (this.overlayEl) {
         this.overlayEl.remove();
         this.overlayEl = null;
@@ -3752,11 +3739,23 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         overlay.style.pointerEvents = "none";
       }, 3e3);
     };
+    const hideOverlay = () => {
+      overlay.style.opacity = "0";
+      overlay.style.pointerEvents = "none";
+      if (hideTimeout)
+        clearTimeout(hideTimeout);
+    };
     container.addEventListener("click", () => {
       if (overlay.style.opacity === "0") {
+        if (!this.videoEl.paused) {
+          this.videoEl.pause();
+          const playBtn = overlay.querySelector(".play-btn");
+          if (playBtn)
+            (0, import_obsidian.setIcon)(playBtn, "play");
+        }
         showOverlay();
       } else {
-        showOverlay();
+        hideOverlay();
       }
     });
     const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
@@ -3784,7 +3783,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const playPauseBtn = controlsRow.createDiv({ cls: "cross-player-big-btn play-btn" });
     (0, import_obsidian.setIcon)(playPauseBtn, "pause");
     this.styleBigButton(playPauseBtn);
-    playPauseBtn.style.transform = "scale(1.5)";
     playPauseBtn.onclick = (e) => {
       e.stopPropagation();
       if (this.videoEl.paused) {
@@ -3816,26 +3814,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
   }
   styleBigButton(btn) {
-    btn.style.width = "50px";
-    btn.style.height = "50px";
-    btn.style.minWidth = "50px";
-    btn.style.flexShrink = "0";
-    btn.style.borderRadius = "50%";
-    btn.style.backgroundColor = "var(--background-modifier-cover)";
-    btn.style.setProperty("backdrop-filter", "blur(10px)");
-    btn.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
-    btn.style.boxShadow = "0 8px 24px rgba(0, 0, 0, 0.6)";
-    btn.style.border = "1px solid var(--background-modifier-border)";
-    btn.style.display = "flex";
-    btn.style.justifyContent = "center";
-    btn.style.alignItems = "center";
-    btn.style.cursor = "pointer";
-    btn.style.color = "var(--text-normal)";
-    const svg = btn.querySelector("svg");
-    if (svg) {
-      svg.style.width = "24px";
-      svg.style.height = "24px";
-    }
+    btn.addClass("cross-player-overlay-btn");
   }
   async play(item, autoPlay = false) {
     var _a;

@@ -1967,25 +1967,9 @@ class CrossPlayerMainView extends ItemView {
             return;
         }
 
-        // Check if current item is audio
-        let isAudio = false;
-        if (this.currentItem) {
-            const ext = this.currentItem.path.split('.').pop()?.toLowerCase();
-            isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac'].includes(ext || '');
-        }
-
-        // Only show overlay for audio files on mobile
-        if (!isAudio) {
-            if (this.overlayEl) {
-                this.overlayEl.remove();
-                this.overlayEl = null;
-            }
-            return;
-        }
-
-        // If enabled, check if we need to create it
+        // Always show overlay on mobile for both audio and video
         if (!this.overlayEl || !container.contains(this.overlayEl)) {
-            // Remove existing if it's detached but not null (shouldn't happen with correct logic, but safe)
+            // Remove existing if it's detached but not null
             if (this.overlayEl) {
                 this.overlayEl.remove();
             }
@@ -2024,18 +2008,28 @@ class CrossPlayerMainView extends ItemView {
             }, 3000); // Hide after 3 seconds
         };
 
+        const hideOverlay = () => {
+            overlay.style.opacity = "0";
+            overlay.style.pointerEvents = "none";
+            if (hideTimeout) clearTimeout(hideTimeout);
+        };
+
         // Toggle on tap
         container.addEventListener('click', () => {
              // If clicking on a button, don't toggle immediately (buttons handle their own clicks)
              // But the overlay covers the video.
-             // If hidden, show it.
+             // If hidden, show it and pause if playing.
              if (overlay.style.opacity === "0") {
+                 if (!this.videoEl.paused) {
+                     this.videoEl.pause();
+                     // Update play button icon immediately
+                     const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
+                     if (playBtn) setIcon(playBtn, "play");
+                 }
                  showOverlay();
              } else {
-                 // If visible and clicking background, maybe hide? 
-                 // Or just let timeout handle it.
-                 // Let's reset timeout.
-                 showOverlay();
+                 // If visible and clicking background, hide immediately
+                 hideOverlay();
              }
         });
 
@@ -2071,7 +2065,7 @@ class CrossPlayerMainView extends ItemView {
         const playPauseBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn play-btn' });
         setIcon(playPauseBtn, "pause"); // Default to pause as we auto-play usually
         this.styleBigButton(playPauseBtn);
-        playPauseBtn.style.transform = "scale(1.5)"; // Make it bigger
+        // Scale is now handled in CSS
         
         playPauseBtn.onclick = (e) => {
             e.stopPropagation();
@@ -2111,29 +2105,7 @@ class CrossPlayerMainView extends ItemView {
     }
 
     styleBigButton(btn: HTMLElement) {
-        btn.style.width = "50px";
-        btn.style.height = "50px";
-        btn.style.minWidth = "50px"; // Prevent shrinking
-        btn.style.flexShrink = "0";  // Prevent shrinking
-        btn.style.borderRadius = "50%";
-        // Use theme-aware background with opacity
-        btn.style.backgroundColor = "var(--background-modifier-cover)"; 
-        // Use setProperty to avoid TS error for backdrop-filter
-        btn.style.setProperty("backdrop-filter", "blur(10px)");
-        btn.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
-        btn.style.boxShadow = "0 8px 24px rgba(0, 0, 0, 0.6)"; // Stronger shadow for visibility
-        btn.style.border = "1px solid var(--background-modifier-border)"; // Subtle border
-        btn.style.display = "flex";
-        btn.style.justifyContent = "center";
-        btn.style.alignItems = "center";
-        btn.style.cursor = "pointer";
-        btn.style.color = "var(--text-normal)"; // Theme aware text color
-        // SVG size
-        const svg = btn.querySelector('svg');
-        if (svg) {
-            svg.style.width = "24px";
-            svg.style.height = "24px";
-        }
+        btn.addClass("cross-player-overlay-btn");
     }
 
     async play(item: MediaItem, autoPlay: boolean = false) {
