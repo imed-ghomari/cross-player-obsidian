@@ -3639,6 +3639,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.overlayEl = null;
+    this.audioPlaceholderEl = null;
     this.currentItem = null;
     this.plugin = plugin;
   }
@@ -3747,8 +3748,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     });
     const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
     controlsRow.style.display = "flex";
-    controlsRow.style.gap = "40px";
+    controlsRow.style.gap = "15px";
     controlsRow.style.alignItems = "center";
+    controlsRow.style.justifyContent = "center";
+    controlsRow.style.padding = "0 10px";
     const prevBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
     (0, import_obsidian.setIcon)(prevBtn, "skip-back");
     this.styleBigButton(prevBtn);
@@ -3802,6 +3805,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   styleBigButton(btn) {
     btn.style.width = "50px";
     btn.style.height = "50px";
+    btn.style.minWidth = "50px";
+    btn.style.flexShrink = "0";
     btn.style.borderRadius = "50%";
     btn.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
     btn.style.display = "flex";
@@ -3816,6 +3821,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
   }
   async play(item, autoPlay = false) {
+    var _a;
     this.currentItem = item;
     if (this.leaf.view.headerTitleEl) {
       this.leaf.view.headerTitleEl.setText(item.name);
@@ -3841,6 +3847,46 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
     this.videoEl.currentTime = item.position || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
+    const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
+    const isAudio = ["mp3", "wav", "ogg", "m4a", "aac"].includes(ext || "");
+    if (isAudio) {
+      if (!this.audioPlaceholderEl) {
+        this.audioPlaceholderEl = this.contentEl.createDiv({ cls: "cross-player-audio-placeholder" });
+        this.audioPlaceholderEl.style.position = "absolute";
+        this.audioPlaceholderEl.style.top = "0";
+        this.audioPlaceholderEl.style.left = "0";
+        this.audioPlaceholderEl.style.width = "100%";
+        this.audioPlaceholderEl.style.height = "100%";
+        this.audioPlaceholderEl.style.display = "flex";
+        this.audioPlaceholderEl.style.justifyContent = "center";
+        this.audioPlaceholderEl.style.alignItems = "center";
+        this.audioPlaceholderEl.style.zIndex = "1";
+        this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e";
+        const iconContainer = this.audioPlaceholderEl.createDiv();
+        (0, import_obsidian.setIcon)(iconContainer, "music");
+        const svg = iconContainer.querySelector("svg");
+        if (svg) {
+          svg.style.width = "100px";
+          svg.style.height = "100px";
+          svg.style.color = "var(--text-muted)";
+          svg.style.opacity = "0.5";
+        }
+      } else {
+        this.audioPlaceholderEl.style.display = "flex";
+      }
+      this.videoEl.style.height = "50px";
+      this.videoEl.style.position = "absolute";
+      this.videoEl.style.bottom = "0";
+      this.videoEl.style.zIndex = "5";
+      this.videoEl.style.background = "transparent";
+    } else {
+      if (this.audioPlaceholderEl) {
+        this.audioPlaceholderEl.style.display = "none";
+      }
+      this.videoEl.style.height = "100%";
+      this.videoEl.style.position = "static";
+      this.videoEl.style.zIndex = "auto";
+    }
     if (autoPlay) {
       try {
         await this.videoEl.play();

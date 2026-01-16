@@ -1877,6 +1877,7 @@ class CrossPlayerMainView extends ItemView {
     plugin: CrossPlayerPlugin;
     videoEl: HTMLVideoElement;
     overlayEl: HTMLElement | null = null;
+    audioPlaceholderEl: HTMLElement | null = null;
     currentItem: MediaItem | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: CrossPlayerPlugin) {
@@ -2025,8 +2026,10 @@ class CrossPlayerMainView extends ItemView {
         // Controls Row
         const controlsRow = overlay.createDiv({ cls: 'cross-player-controls-row' });
         controlsRow.style.display = "flex";
-        controlsRow.style.gap = "40px";
+        controlsRow.style.gap = "15px"; // Reduced gap for mobile
         controlsRow.style.alignItems = "center";
+        controlsRow.style.justifyContent = "center";
+        controlsRow.style.padding = "0 10px";
 
         // Previous Button
         const prevBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
@@ -2094,6 +2097,8 @@ class CrossPlayerMainView extends ItemView {
     styleBigButton(btn: HTMLElement) {
         btn.style.width = "50px";
         btn.style.height = "50px";
+        btn.style.minWidth = "50px"; // Prevent shrinking
+        btn.style.flexShrink = "0";  // Prevent shrinking
         btn.style.borderRadius = "50%";
         btn.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
         btn.style.display = "flex";
@@ -2145,6 +2150,62 @@ class CrossPlayerMainView extends ItemView {
         this.videoEl.currentTime = item.position || 0;
         this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1.0;
         
+        // Handle Audio vs Video UI
+        const ext = item.path.split('.').pop()?.toLowerCase();
+        const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac'].includes(ext || '');
+
+        if (isAudio) {
+            // Show audio placeholder
+            if (!this.audioPlaceholderEl) {
+                this.audioPlaceholderEl = this.contentEl.createDiv({ cls: 'cross-player-audio-placeholder' });
+                this.audioPlaceholderEl.style.position = "absolute";
+                this.audioPlaceholderEl.style.top = "0";
+                this.audioPlaceholderEl.style.left = "0";
+                this.audioPlaceholderEl.style.width = "100%";
+                this.audioPlaceholderEl.style.height = "100%"; // Occupy full space behind controls
+                this.audioPlaceholderEl.style.display = "flex";
+                this.audioPlaceholderEl.style.justifyContent = "center";
+                this.audioPlaceholderEl.style.alignItems = "center";
+                this.audioPlaceholderEl.style.zIndex = "1"; // Behind overlay (10) but above video background (0)
+                this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e"; // Dark background to hide video player default
+                
+                const iconContainer = this.audioPlaceholderEl.createDiv();
+                // setIcon(iconContainer, "headphones"); // Or music
+                // Let's make it big
+                // setIcon produces svg.
+                setIcon(iconContainer, "music");
+                
+                const svg = iconContainer.querySelector('svg');
+                if (svg) {
+                    svg.style.width = "100px";
+                    svg.style.height = "100px";
+                    svg.style.color = "var(--text-muted)";
+                    svg.style.opacity = "0.5";
+                }
+            } else {
+                this.audioPlaceholderEl.style.display = "flex";
+            }
+            
+            // Adjust video element to be minimal (just controls)
+            // But we can't easily make it "just controls". 
+            // If we set height small, it might look weird.
+            // Let's set it to absolute bottom?
+            this.videoEl.style.height = "50px"; // Height for controls
+            this.videoEl.style.position = "absolute";
+            this.videoEl.style.bottom = "0";
+            this.videoEl.style.zIndex = "5"; // Above placeholder
+            this.videoEl.style.background = "transparent"; // Try to transparent?
+            
+        } else {
+            // Video
+            if (this.audioPlaceholderEl) {
+                this.audioPlaceholderEl.style.display = "none";
+            }
+            this.videoEl.style.height = "100%";
+            this.videoEl.style.position = "static"; // Default
+            this.videoEl.style.zIndex = "auto";
+        }
+
         if (autoPlay) {
             try {
                 await this.videoEl.play();
