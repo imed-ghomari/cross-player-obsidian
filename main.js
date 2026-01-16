@@ -3745,7 +3745,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       if (hideTimeout)
         clearTimeout(hideTimeout);
     };
-    container.addEventListener("click", () => {
+    const handleTap = (e) => {
       if (overlay.style.opacity === "0") {
         if (!this.videoEl.paused) {
           this.videoEl.pause();
@@ -3757,7 +3757,17 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       } else {
         hideOverlay();
       }
-    });
+    };
+    container.onclick = (e) => {
+      if (e.target !== this.videoEl) {
+        handleTap(e);
+      }
+    };
+    if (this.videoEl) {
+      this.videoEl.onclick = (e) => {
+        handleTap(e);
+      };
+    }
     const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
     controlsRow.style.display = "flex";
     controlsRow.style.gap = "15px";
@@ -3859,14 +3869,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         this.audioPlaceholderEl.style.zIndex = "1";
         this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e";
         const iconContainer = this.audioPlaceholderEl.createDiv();
-        (0, import_obsidian.setIcon)(iconContainer, "music");
-        const svg = iconContainer.querySelector("svg");
-        if (svg) {
-          svg.style.width = "100px";
-          svg.style.height = "100px";
-          svg.style.color = "var(--text-muted)";
-          svg.style.opacity = "0.5";
-        }
       } else {
         this.audioPlaceholderEl.style.display = "flex";
       }

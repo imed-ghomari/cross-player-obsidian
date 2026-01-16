@@ -2014,11 +2014,15 @@ class CrossPlayerMainView extends ItemView {
             if (hideTimeout) clearTimeout(hideTimeout);
         };
 
-        // Toggle on tap
-        container.addEventListener('click', () => {
-             // If clicking on a button, don't toggle immediately (buttons handle their own clicks)
-             // But the overlay covers the video.
-             // If hidden, show it and pause if playing.
+        const handleTap = (e: Event) => {
+             // Stop propagation to prevent double firing if attached to both video and container
+             // or if bubbling happens unexpectedly.
+             // But we need to be careful if e.target is not what we expect.
+             
+             // If clicking on a button, don't toggle (buttons handle their own clicks and stopPropagation)
+             // But just in case.
+             
+             // If overlay is hidden
              if (overlay.style.opacity === "0") {
                  if (!this.videoEl.paused) {
                      this.videoEl.pause();
@@ -2031,7 +2035,27 @@ class CrossPlayerMainView extends ItemView {
                  // If visible and clicking background, hide immediately
                  hideOverlay();
              }
-        });
+        };
+
+        // Toggle on tap - Attach to container (for audio placeholder/background)
+        container.onclick = (e) => {
+            // Check if target is not the video element (to avoid double handling if video bubbles)
+            if (e.target !== this.videoEl) {
+                handleTap(e);
+            }
+        };
+
+        // Attach to video element specifically for video files
+        if (this.videoEl) {
+            // We use onclick to ensure we capture it even if native controls are enabled (though they might consume it)
+            // On mobile, native controls often swallow clicks, but let's try.
+            this.videoEl.onclick = (e) => {
+                // If the user clicks native controls, we might want to avoid this?
+                // But we can't easily detect that.
+                // Assuming tapping the video area.
+                handleTap(e);
+            };
+        }
 
         // Controls Row
         const controlsRow = overlay.createDiv({ cls: 'cross-player-controls-row' });
@@ -2164,18 +2188,16 @@ class CrossPlayerMainView extends ItemView {
                 this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e"; // Dark background to hide video player default
                 
                 const iconContainer = this.audioPlaceholderEl.createDiv();
-                // setIcon(iconContainer, "headphones"); // Or music
-                // Let's make it big
-                // setIcon produces svg.
-                setIcon(iconContainer, "music");
+                // Removed the big icon as requested
+                // setIcon(iconContainer, "music");
                 
-                const svg = iconContainer.querySelector('svg');
-                if (svg) {
-                    svg.style.width = "100px";
-                    svg.style.height = "100px";
-                    svg.style.color = "var(--text-muted)";
-                    svg.style.opacity = "0.5";
-                }
+                // const svg = iconContainer.querySelector('svg');
+                // if (svg) {
+                //    svg.style.width = "100px";
+                //    svg.style.height = "100px";
+                //    svg.style.color = "var(--text-muted)";
+                //    svg.style.opacity = "0.5";
+                // }
             } else {
                 this.audioPlaceholderEl.style.display = "flex";
             }
