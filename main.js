@@ -3695,9 +3695,22 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
   }
   refreshMobileOverlay() {
+    var _a;
     const container = this.contentEl;
     const shouldShow = import_obsidian.Platform.isMobile;
     if (!shouldShow) {
+      if (this.overlayEl) {
+        this.overlayEl.remove();
+        this.overlayEl = null;
+      }
+      return;
+    }
+    let isAudio = false;
+    if (this.currentItem) {
+      const ext = (_a = this.currentItem.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
+      isAudio = ["mp3", "wav", "ogg", "m4a", "aac"].includes(ext || "");
+    }
+    if (!isAudio) {
       if (this.overlayEl) {
         this.overlayEl.remove();
         this.overlayEl = null;
@@ -3808,12 +3821,16 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     btn.style.minWidth = "50px";
     btn.style.flexShrink = "0";
     btn.style.borderRadius = "50%";
-    btn.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
+    btn.style.backgroundColor = "var(--background-modifier-cover)";
+    btn.style.setProperty("backdrop-filter", "blur(10px)");
+    btn.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
+    btn.style.boxShadow = "0 8px 24px rgba(0, 0, 0, 0.6)";
+    btn.style.border = "1px solid var(--background-modifier-border)";
     btn.style.display = "flex";
     btn.style.justifyContent = "center";
     btn.style.alignItems = "center";
     btn.style.cursor = "pointer";
-    btn.style.color = "white";
+    btn.style.color = "var(--text-normal)";
     const svg = btn.querySelector("svg");
     if (svg) {
       svg.style.width = "24px";
@@ -3894,6 +3911,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         console.error("Autoplay failed", e);
       }
     }
+    this.refreshMobileOverlay();
   }
   async changePlaybackSpeed(delta) {
     if (!this.videoEl)

@@ -1967,6 +1967,22 @@ class CrossPlayerMainView extends ItemView {
             return;
         }
 
+        // Check if current item is audio
+        let isAudio = false;
+        if (this.currentItem) {
+            const ext = this.currentItem.path.split('.').pop()?.toLowerCase();
+            isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac'].includes(ext || '');
+        }
+
+        // Only show overlay for audio files on mobile
+        if (!isAudio) {
+            if (this.overlayEl) {
+                this.overlayEl.remove();
+                this.overlayEl = null;
+            }
+            return;
+        }
+
         // If enabled, check if we need to create it
         if (!this.overlayEl || !container.contains(this.overlayEl)) {
             // Remove existing if it's detached but not null (shouldn't happen with correct logic, but safe)
@@ -2100,12 +2116,18 @@ class CrossPlayerMainView extends ItemView {
         btn.style.minWidth = "50px"; // Prevent shrinking
         btn.style.flexShrink = "0";  // Prevent shrinking
         btn.style.borderRadius = "50%";
-        btn.style.backgroundColor = "rgba(0, 0, 0, 0.6)";
+        // Use theme-aware background with opacity
+        btn.style.backgroundColor = "var(--background-modifier-cover)"; 
+        // Use setProperty to avoid TS error for backdrop-filter
+        btn.style.setProperty("backdrop-filter", "blur(10px)");
+        btn.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
+        btn.style.boxShadow = "0 8px 24px rgba(0, 0, 0, 0.6)"; // Stronger shadow for visibility
+        btn.style.border = "1px solid var(--background-modifier-border)"; // Subtle border
         btn.style.display = "flex";
         btn.style.justifyContent = "center";
         btn.style.alignItems = "center";
         btn.style.cursor = "pointer";
-        btn.style.color = "white";
+        btn.style.color = "var(--text-normal)"; // Theme aware text color
         // SVG size
         const svg = btn.querySelector('svg');
         if (svg) {
@@ -2213,6 +2235,9 @@ class CrossPlayerMainView extends ItemView {
                 console.error("Autoplay failed", e);
             }
         }
+        
+        // Update overlay visibility based on new item type
+        this.refreshMobileOverlay();
     }
 
     async changePlaybackSpeed(delta: number) {
