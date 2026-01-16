@@ -223,6 +223,18 @@ export default class CrossPlayerPlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'toggle-fullscreen',
+            name: 'Toggle Fullscreen',
+            callback: () => {
+                if (this.mainView) {
+                    this.mainView.toggleFullscreen();
+                } else {
+                    new Notice("Open a media file first.");
+                }
+            }
+        });
+
         // Setup auto-reload for Desktop (handle Sync)
         if (Platform.isDesktop) {
             this.debouncedReload = debounce(async () => {
@@ -2008,5 +2020,17 @@ class CrossPlayerMainView extends ItemView {
         if (!this.videoEl) return;
         const newTime = Math.max(0, Math.min(this.videoEl.duration, this.videoEl.currentTime + seconds));
         this.videoEl.currentTime = newTime;
+    }
+
+    toggleFullscreen() {
+        if (!this.videoEl) return;
+
+        if (!document.fullscreenElement) {
+            this.contentEl.requestFullscreen().catch(err => {
+                new Notice(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+            });
+        } else {
+            document.exitFullscreen();
+        }
     }
 }

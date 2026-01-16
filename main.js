@@ -2461,6 +2461,17 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice("Data reloaded.");
       }
     });
+    this.addCommand({
+      id: "toggle-fullscreen",
+      name: "Toggle Fullscreen",
+      callback: () => {
+        if (this.mainView) {
+          this.mainView.toggleFullscreen();
+        } else {
+          new import_obsidian.Notice("Open a media file first.");
+        }
+      }
+    });
     if (import_obsidian.Platform.isDesktop) {
       this.debouncedReload = (0, import_obsidian.debounce)(async () => {
         await this.loadData();
@@ -3725,6 +3736,17 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       return;
     const newTime = Math.max(0, Math.min(this.videoEl.duration, this.videoEl.currentTime + seconds));
     this.videoEl.currentTime = newTime;
+  }
+  toggleFullscreen() {
+    if (!this.videoEl)
+      return;
+    if (!document.fullscreenElement) {
+      this.contentEl.requestFullscreen().catch((err) => {
+        new import_obsidian.Notice(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+      });
+    } else {
+      document.exitFullscreen();
+    }
   }
 };
 /*! Bundled license information:
