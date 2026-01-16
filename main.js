@@ -2300,6 +2300,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.listView = null;
     this.mainView = null;
     this.activeDownloads = [];
+    this.fsWatcher = null;
   }
   async onload() {
     await this.loadData();
@@ -2450,12 +2451,50 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         new YouTubeDownloadModal(this.app, this).open();
       }
     });
+    this.addCommand({
+      id: "reload-data",
+      name: "Reload Data from Disk",
+      callback: async () => {
+        await this.loadData();
+        if (this.listView)
+          this.listView.refresh();
+        new import_obsidian.Notice("Data reloaded.");
+      }
+    });
+    if (import_obsidian.Platform.isDesktop) {
+      this.debouncedReload = (0, import_obsidian.debounce)(async () => {
+        await this.loadData();
+        if (this.listView)
+          this.listView.refresh();
+      }, 1e3, true);
+      try {
+        const path = require("path");
+        const fs = require("fs");
+        if (this.app.vault.adapter && this.app.vault.adapter.getBasePath) {
+          const basePath = this.app.vault.adapter.getBasePath();
+          const dataPath = path.join(basePath, this.manifest.dir, "data.json");
+          if (fs.existsSync(dataPath)) {
+            this.fsWatcher = fs.watch(dataPath, (eventType, filename) => {
+              if (eventType === "change") {
+                this.debouncedReload();
+              }
+            });
+          }
+        }
+      } catch (e) {
+        console.error("Failed to setup data watcher", e);
+      }
+    }
     this.registerWatchers();
     if (this.data.settings.watchedFolder) {
       this.scanFolder(this.data.settings.watchedFolder);
     }
   }
   onunload() {
+    if (this.fsWatcher) {
+      this.fsWatcher.close();
+      this.fsWatcher = null;
+    }
   }
   async loadData() {
     const loaded = await super.loadData();
@@ -3225,6 +3264,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       menu.addItem((item) => item.setTitle("Size (Smallest)").setIcon("chevrons-down").onClick(() => this.plugin.sortQueue("size", "asc")));
       menu.addItem((item) => item.setTitle("Size (Largest)").setIcon("chevrons-up").onClick(() => this.plugin.sortQueue("size", "desc")));
       menu.showAtMouseEvent(evt);
+    };
+    const refreshBtn = titleRow.createDiv({ cls: "clickable-icon" });
+    (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
+    refreshBtn.ariaLabel = "Refresh Data";
+    refreshBtn.onclick = async () => {
+      await this.plugin.loadData();
+      this.refresh();
+      new import_obsidian.Notice("Data reloaded.");
     };
     const speed = this.plugin.data.playbackSpeed || 1;
     const speedEl = headerContainer.createDiv({ cls: "cross-player-speed-display" });

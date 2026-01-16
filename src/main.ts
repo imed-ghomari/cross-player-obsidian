@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform, debounce } from 'obsidian';
 // @ts-ignore
 // import ffmpegStatic from 'ffmpeg-static';
 import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus } from './types';
@@ -34,6 +34,8 @@ export default class CrossPlayerPlugin extends Plugin {
     listView: CrossPlayerListView | null = null;
     mainView: CrossPlayerMainView | null = null;
     activeDownloads: ActiveDownload[] = [];
+    fsWatcher: any = null;
+    debouncedReload: any;
 
     async onload() {
         await this.loadData();
@@ -211,6 +213,45 @@ export default class CrossPlayerPlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'reload-data',
+            name: 'Reload Data from Disk',
+            callback: async () => {
+                await this.loadData();
+                if (this.listView) this.listView.refresh();
+                new Notice("Data reloaded.");
+            }
+        });
+
+        // Setup auto-reload for Desktop (handle Sync)
+        if (Platform.isDesktop) {
+            this.debouncedReload = debounce(async () => {
+                 await this.loadData();
+                 if (this.listView) this.listView.refresh();
+            }, 1000, true);
+
+            try {
+                const path = require('path');
+                const fs = require('fs');
+                // @ts-ignore
+                if (this.app.vault.adapter && this.app.vault.adapter.getBasePath) {
+                     // @ts-ignore
+                     const basePath = this.app.vault.adapter.getBasePath();
+                     const dataPath = path.join(basePath, this.manifest.dir, 'data.json');
+                     
+                     if (fs.existsSync(dataPath)) {
+                         this.fsWatcher = fs.watch(dataPath, (eventType: string, filename: string) => {
+                             if (eventType === 'change') {
+                                 this.debouncedReload();
+                             }
+                         });
+                     }
+                }
+            } catch (e) {
+                console.error("Failed to setup data watcher", e);
+            }
+        }
+
         this.registerWatchers();
 
         if (this.data.settings.watchedFolder) {
@@ -219,9 +260,10 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     onunload() {
-        // Events are automatically cleaned up by Obsidian on plugin unload if registered correctly
-        // but we used `app.vault.on` so we might need to handle it if we want to be super clean,
-        // but usually Plugin class handles event refs if we use `this.registerEvent`.
+        if (this.fsWatcher) {
+            this.fsWatcher.close();
+            this.fsWatcher = null;
+        }
     }
 
     async loadData() {
@@ -1337,6 +1379,15 @@ class CrossPlayerListView extends ItemView {
                  .onClick(() => this.plugin.sortQueue('size', 'desc')));
              
              menu.showAtMouseEvent(evt);
+        };
+
+        const refreshBtn = titleRow.createDiv({ cls: "clickable-icon" });
+        setIcon(refreshBtn, "refresh-cw");
+        refreshBtn.ariaLabel = "Refresh Data";
+        refreshBtn.onclick = async () => {
+             await this.plugin.loadData();
+             this.refresh();
+             new Notice("Data reloaded.");
         };
         
         const speed = this.plugin.data.playbackSpeed || 1.0;
