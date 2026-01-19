@@ -20,6 +20,9 @@ export interface CrossPlayerSettings {
     downloadFolder: string;
     showMediaIndicator: boolean;
     storageLimitGB: number;
+    autoplayNext: boolean;
+    showProgressColor: boolean;
+    pauseOnMobileTap: boolean;
 }
 
 export interface DownloadStatus {

@@ -2288,7 +2288,10 @@ var DEFAULT_SETTINGS = {
   ffmpegPath: "",
   downloadFolder: "",
   showMediaIndicator: true,
-  storageLimitGB: 10
+  storageLimitGB: 10,
+  autoplayNext: true,
+  showProgressColor: true,
+  pauseOnMobileTap: true
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -2668,10 +2671,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       } else if (item.size) {
         totalSize += item.size;
       }
-      if (item.status === "pending") {
-        totalDuration += item.duration;
-      } else if (item.status === "playing") {
-        totalDuration += Math.max(0, item.duration - item.position);
+      if (item.status === "pending" || item.status === "playing") {
+        const position = item.position || 0;
+        totalDuration += Math.max(0, item.duration - position);
       }
     }
     return { totalDuration, totalSize };
@@ -2970,18 +2972,26 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.deleteMediaItem(this.mainView.currentItem);
   }
   async setMediaItemAsUnread(item) {
+    const queueItem = this.data.queue.find((i) => i.id === item.id);
+    if (!queueItem) {
+      new import_obsidian.Notice("Item not found in queue.");
+      return;
+    }
     const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
-    item.status = "pending";
-    item.finished = false;
-    item.position = 0;
-    await this.saveData();
     if (isCurrent && this.mainView) {
-      this.mainView.videoEl.pause();
       this.mainView.currentItem = null;
+      this.mainView.videoEl.pause();
       this.mainView.videoEl.src = "";
       this.activateListView();
     }
-    new import_obsidian.Notice(`Marked as unread: ${item.name}`);
+    queueItem.status = "pending";
+    queueItem.finished = false;
+    queueItem.position = 0;
+    await this.saveData();
+    if (this.listView) {
+      this.listView.refresh();
+    }
+    new import_obsidian.Notice(`Marked as unread: ${queueItem.name}`);
   }
   async setCurrentAsUnread() {
     if (!this.mainView || !this.mainView.currentItem) {
@@ -3315,6 +3325,20 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.data.settings.showMediaIndicator = value;
       await this.plugin.saveData();
     }));
+    new import_obsidian.Setting(containerEl).setName("Show Progress Color in Queue").setDesc("Color the queue items based on playback progress.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.showProgressColor).onChange(async (value) => {
+      var _a;
+      this.plugin.data.settings.showProgressColor = value;
+      await this.plugin.saveData();
+      (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Autoplay Next Video").setDesc("Automatically play the next video in the queue when the current one finishes.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.autoplayNext).onChange(async (value) => {
+      this.plugin.data.settings.autoplayNext = value;
+      await this.plugin.saveData();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Pause on Mobile Tap").setDesc("Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.pauseOnMobileTap).onChange(async (value) => {
+      this.plugin.data.settings.pauseOnMobileTap = value;
+      await this.plugin.saveData();
+    }));
     containerEl.createEl("h3", { text: "Storage & Download Settings" });
     new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
       this.plugin.data.settings.youtubeDlpPath = value;
@@ -3424,12 +3448,20 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     this.plugin.data.queue.forEach((item) => {
       var _a;
       const itemEl = list.createDiv({ cls: "cross-player-item" });
+      itemEl.dataset.id = item.id;
       itemEl.style.display = "flex";
       itemEl.style.alignItems = "center";
       itemEl.style.padding = "5px";
       itemEl.style.borderBottom = "1px solid var(--background-modifier-border)";
       if (item.status === "playing") {
         itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
+      }
+      if (this.plugin.data.settings.showProgressColor && item.duration > 0 && item.position > 0) {
+        const pct = Math.min(100, item.position / item.duration * 100);
+        const color = `color-mix(in srgb, var(--interactive-accent), transparent 80%)`;
+        itemEl.style.backgroundImage = `linear-gradient(to right, ${color} ${pct}%, transparent ${pct}%)`;
+        itemEl.style.backgroundSize = "100% 100%";
+        itemEl.style.backgroundRepeat = "no-repeat";
       }
       const statusIcon = itemEl.createDiv({ cls: "cross-player-status-icon" });
       if (item.status === "completed")
@@ -3502,6 +3534,36 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     downloadContainer.style.borderTop = "1px solid var(--background-modifier-border)";
     downloadContainer.style.backgroundColor = "var(--background-secondary)";
     this.updateDownloadProgress(downloadContainer);
+  }
+  updateStats() {
+    const statsContainer = this.contentEl.querySelector(".cross-player-stats");
+    if (!statsContainer)
+      return;
+    const speed = this.plugin.data.playbackSpeed || 1;
+    const stats = this.plugin.getQueueStats();
+    const adjustedDuration = stats.totalDuration / speed;
+    const limitBytes = this.plugin.dynamicStorageLimit;
+    const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
+    const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
+    statsContainer.empty();
+    const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
+    statsContainer.createSpan({ text: etcText });
+    statsContainer.createSpan({ text: " \u2022 " });
+    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
+    if (sizeInGB > limitGB) {
+      sizeSpan.style.color = "var(--text-error)";
+      sizeSpan.style.fontWeight = "bold";
+    }
+  }
+  updateItemProgress(id, percentage) {
+    if (!this.plugin.data.settings.showProgressColor)
+      return;
+    const itemEl = this.contentEl.querySelector(`.cross-player-item[data-id="${id}"]`);
+    if (itemEl) {
+      const pct = Math.min(100, Math.max(0, percentage));
+      const color = `color-mix(in srgb, var(--interactive-accent), transparent 80%)`;
+      itemEl.style.backgroundImage = `linear-gradient(to right, ${color} ${pct}%, transparent ${pct}%)`;
+    }
   }
   updateDownloadProgress(parentContainer) {
     let container = parentContainer;
@@ -3648,6 +3710,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.overlayEl = null;
     this.audioPlaceholderEl = null;
     this.currentItem = null;
+    this.lastEtcUpdate = 0;
+    this.lastProgressUpdate = 0;
     this.plugin = plugin;
   }
   getViewType() {
@@ -3663,6 +3727,36 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const container = this.contentEl;
     container.empty();
     container.addClass("cross-player-main-view");
+    container.tabIndex = 0;
+    container.style.outline = "none";
+    container.addEventListener("keydown", (e) => {
+      if (!this.videoEl)
+        return;
+      if (document.activeElement === this.videoEl)
+        return;
+      if (["INPUT", "TEXTAREA"].includes(e.target.tagName))
+        return;
+      const { seekSecondsForward, seekSecondsBackward } = this.plugin.data.settings;
+      switch (e.key) {
+        case " ":
+        case "Spacebar":
+          e.preventDefault();
+          if (this.videoEl.paused) {
+            this.videoEl.play();
+          } else {
+            this.videoEl.pause();
+          }
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          this.videoEl.currentTime = Math.min(this.videoEl.duration, this.videoEl.currentTime + seekSecondsForward);
+          break;
+        case "ArrowLeft":
+          e.preventDefault();
+          this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - seekSecondsBackward);
+          break;
+      }
+    });
     container.style.display = "flex";
     container.style.flexDirection = "column";
     container.style.justifyContent = "center";
@@ -3688,13 +3782,29 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       if (this.currentItem) {
         if (this.currentItem.status !== "completed") {
           await this.plugin.updateStatus(this.currentItem.id, "completed");
-          this.plugin.playNextUnread();
+          if (this.plugin.data.settings.autoplayNext) {
+            this.plugin.playNextUnread();
+          }
         }
       }
     };
     this.videoEl.ontimeupdate = async () => {
       if (this.currentItem) {
         this.currentItem.position = this.videoEl.currentTime;
+        const now = Date.now();
+        if (now - this.lastEtcUpdate > 5e3) {
+          this.lastEtcUpdate = now;
+          if (this.plugin.listView) {
+            this.plugin.listView.updateStats();
+          }
+        }
+        if (now - this.lastProgressUpdate > 1e3) {
+          this.lastProgressUpdate = now;
+          if (this.plugin.listView && this.plugin.data.settings.showProgressColor && this.videoEl.duration > 0) {
+            const pct = this.videoEl.currentTime / this.videoEl.duration * 100;
+            this.plugin.listView.updateItemProgress(this.currentItem.id, pct);
+          }
+        }
         if (this.currentItem.status !== "completed" && this.videoEl.duration > 0) {
           const progress = this.videoEl.currentTime / this.videoEl.duration;
           if (progress > 0.95) {
@@ -3790,11 +3900,13 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         }
         e.preventDefault();
         e.stopPropagation();
-        if (!this.videoEl.paused) {
-          this.videoEl.pause();
-          const playBtn = overlay.querySelector(".play-btn");
-          if (playBtn)
-            (0, import_obsidian.setIcon)(playBtn, "play");
+        if (this.plugin.data.settings.pauseOnMobileTap) {
+          if (!this.videoEl.paused) {
+            this.videoEl.pause();
+            const playBtn = overlay.querySelector(".play-btn");
+            if (playBtn)
+              (0, import_obsidian.setIcon)(playBtn, "play");
+          }
         }
         showOverlay();
       } else {
