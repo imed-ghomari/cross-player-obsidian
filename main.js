@@ -2492,10 +2492,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         const fs = require("fs");
         if (this.app.vault.adapter && this.app.vault.adapter.getBasePath) {
           const basePath = this.app.vault.adapter.getBasePath();
-          const dataPath = path.join(basePath, this.manifest.dir, "data.json");
-          if (fs.existsSync(dataPath)) {
-            this.fsWatcher = fs.watch(dataPath, (eventType) => {
-              if (eventType === "change") {
+          const pluginDir = path.join(basePath, this.manifest.dir);
+          if (fs.existsSync(pluginDir)) {
+            this.fsWatcher = fs.watch(pluginDir, (eventType, filename) => {
+              if (!filename || filename === "data.json") {
                 this.debouncedReload();
               }
             });
@@ -2505,6 +2505,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         console.error("Failed to setup data watcher", e);
       }
     }
+    this.registerDomEvent(window, "focus", () => {
+      this.debouncedReload();
+    });
     this.registerWatchers();
     if (this.data.settings.watchedFolder) {
       this.scanFolder(this.data.settings.watchedFolder);
@@ -3782,9 +3785,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       if (this.currentItem) {
         if (this.currentItem.status !== "completed") {
           await this.plugin.updateStatus(this.currentItem.id, "completed");
-          if (this.plugin.data.settings.autoplayNext) {
-            this.plugin.playNextUnread();
-          }
+        }
+        if (this.plugin.data.settings.autoplayNext) {
+          this.plugin.playNextUnread();
         }
       }
     };

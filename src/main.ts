@@ -270,11 +270,13 @@ export default class CrossPlayerPlugin extends Plugin {
                 if (this.app.vault.adapter && this.app.vault.adapter.getBasePath) {
                      // @ts-ignore
                      const basePath = this.app.vault.adapter.getBasePath();
-                     const dataPath = path.join(basePath, this.manifest.dir, 'data.json');
+                     const pluginDir = path.join(basePath, this.manifest.dir);
                      
-                     if (fs.existsSync(dataPath)) {
-                         this.fsWatcher = fs.watch(dataPath, (eventType: string) => {
-                             if (eventType === 'change') {
+                     if (fs.existsSync(pluginDir)) {
+                         this.fsWatcher = fs.watch(pluginDir, (eventType: string, filename: string | null) => {
+                             // Resilio/Sync tools might trigger events where filename is null or specific rename events.
+                             // We reload if it's explicitly data.json OR if we can't tell (null) to be safe.
+                             if (!filename || filename === 'data.json') {
                                  this.debouncedReload();
                              }
                          });
@@ -284,6 +286,11 @@ export default class CrossPlayerPlugin extends Plugin {
                 console.error("Failed to setup data watcher", e);
             }
         }
+        
+        // Also reload when window gains focus (best for switching devices)
+        this.registerDomEvent(window, 'focus', () => {
+            this.debouncedReload();
+        });
 
         this.registerWatchers();
 
@@ -2072,9 +2079,11 @@ class CrossPlayerMainView extends ItemView {
                 // If onended fires, it's definitely completed
                 if (this.currentItem.status !== 'completed') {
                     await this.plugin.updateStatus(this.currentItem.id, 'completed');
-                    if (this.plugin.data.settings.autoplayNext) {
-                        this.plugin.playNextUnread();
-                    }
+                }
+                
+                // Check autoplay regardless of whether it was already marked completed
+                if (this.plugin.data.settings.autoplayNext) {
+                    this.plugin.playNextUnread();
                 }
             }
         };
