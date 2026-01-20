@@ -5,8 +5,9 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 ## Features
 
 ### 📺 Media Playback
-- **Universal Player**: Supports standard audio and video formats.
+- **Universal Player**: Supports a wide range of audio and video formats (mp3, wav, ogg, m4a, 3gp, flac, aac, mp4, webm, ogv, mkv).
 - **Smart Resume**: Automatically resumes where you left off. New files start paused; in-progress files auto-play.
+- **Auto-play Next**: Automatically plays the next unread item in the queue when the current one finishes (configurable).
 - **Variable Speed**: Adjustable playback speed (default 2x) with persistence per session.
 - **Minimalist Audio Player**: Audio files play with a clean, distraction-free interface, showing only the essential controls bar.
 - **Seek Controls**: Customizable forward/backward seek intervals.
@@ -23,6 +24,7 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 ### 📋 Queue Management
 - **Watched Folder**: Automatically monitors a specific folder for new media.
 - **Recursive Scanning**: Detects files in subfolders of the watched directory.
+- **Sort Queue**: Sort by Name, Type, or Size (Ascending/Descending).
 - **Drag & Drop**: Reorder your queue manually to prioritize content. Optimized for mobile touch dragging.
 - **Visual Indicators**: Icons distinguish between audio and video files (toggleable in settings).
 - **ETC & Storage**: Displays "Estimated Time to Complete" based on current playback speed and warns when storage limits are exceeded.
@@ -70,6 +72,7 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 ### General Settings
 - **Watched Folder**: The absolute path to your media folder.
 - **Default Playback Speed**: Speed to start new files at.
+- **Auto-play Next**: Toggle automatic playback of the next unread item.
 - **Seek Intervals**: Custom seconds for forward/back.
 - **Show Media Indicator**: Toggle audio/video icons in the queue.
 

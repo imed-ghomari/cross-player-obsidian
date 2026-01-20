@@ -643,7 +643,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (!file.path.startsWith(folderPath + "/")) return;
 
         const ext = file.extension.toLowerCase();
-        const validExtensions = ['mp4', 'webm', 'ogv', 'mp3', 'wav', 'ogg', 'mkv'];
+        const validExtensions = ['mp4', 'webm', 'ogv', 'mp3', 'wav', 'ogg', 'mkv', 'm4a', '3gp', 'flac', 'aac'];
 
         if (!validExtensions.includes(ext)) return;
         
