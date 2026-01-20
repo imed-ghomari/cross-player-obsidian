@@ -2705,6 +2705,16 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async handleDelete(file) {
     const path = file.path;
+    if (this.mainView && this.mainView.currentItem) {
+      if (this.mainView.currentItem.path === path || this.mainView.currentItem.path.startsWith(path + "/")) {
+        this.mainView.videoEl.pause();
+        this.mainView.videoEl.src = "";
+        this.mainView.currentItem = null;
+        if (this.mainView.leaf.view.headerTitleEl)
+          this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+        new import_obsidian.Notice("Playing media was deleted.");
+      }
+    }
     const initialLength = this.data.queue.length;
     this.data.queue = this.data.queue.filter((item) => item.path !== path && !item.path.startsWith(path + "/"));
     if (this.data.queue.length !== initialLength) {
@@ -2731,9 +2741,18 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const validExtensions = ["mp4", "webm", "ogv", "mp3", "wav", "ogg", "mkv"];
     if (!validExtensions.includes(ext))
       return;
-    const existing = this.data.queue.find((item) => item.path === file.path);
+    let existing = this.data.queue.find((item) => item.path === file.path);
     if (!existing) {
       const duration = await this.getMediaDuration(file);
+      existing = this.data.queue.find((item) => item.path === file.path);
+      if (existing) {
+        if (!existing.duration) {
+          existing.duration = duration;
+          if (shouldSave)
+            await this.saveData();
+        }
+        return;
+      }
       const newItem = {
         id: Math.random().toString(36).substring(2, 11),
         path: file.path,
@@ -2816,7 +2835,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.saveData();
     const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CROSS_PLAYER_MAIN);
     if (leaves.length > 0 && leaves[0].view instanceof CrossPlayerMainView) {
-      leaves[0].view.play(item, autoPlay);
+      const success = await leaves[0].view.play(item, autoPlay);
+      if (!success) {
+        item.status = "pending";
+        await this.saveData();
+        new import_obsidian.Notice(`Failed to play ${item.name}`);
+      }
     }
   }
   async playNextUnread() {
@@ -3456,7 +3480,8 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       itemEl.style.alignItems = "center";
       itemEl.style.padding = "5px";
       itemEl.style.borderBottom = "1px solid var(--background-modifier-border)";
-      if (item.status === "playing") {
+      const isPlaying = item.status === "playing" || this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id;
+      if (isPlaying) {
         itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
       }
       if (this.plugin.data.settings.showProgressColor && item.duration > 0 && item.position > 0) {
@@ -4008,8 +4033,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
     } else {
       console.error("File not found for playback:", item.path);
-      return;
+      return false;
     }
+    this.videoEl.onerror = () => {
+      console.error("Video playback error", this.videoEl.error);
+      new import_obsidian.Notice("Error playing video file.");
+    };
     this.videoEl.currentTime = item.position || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
@@ -4055,6 +4084,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
     }
     this.refreshMobileOverlay();
+    return true;
   }
   async changePlaybackSpeed(delta) {
     if (!this.videoEl)

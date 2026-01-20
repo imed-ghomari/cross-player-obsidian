@@ -598,6 +598,22 @@ export default class CrossPlayerPlugin extends Plugin {
     async handleDelete(file: TAbstractFile) {
         // If file or folder deleted, remove from queue
         const path = file.path;
+        
+        // Stop playback if current item is deleted
+        if (this.mainView && this.mainView.currentItem) {
+            // Check if deleted file is the current item
+            // OR if deleted file is a folder containing the current item
+            if (this.mainView.currentItem.path === path || this.mainView.currentItem.path.startsWith(path + "/")) {
+                this.mainView.videoEl.pause();
+                this.mainView.videoEl.src = "";
+                this.mainView.currentItem = null;
+                // Update title to show it's gone
+                // @ts-ignore
+                if (this.mainView.leaf.view.headerTitleEl) this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+                new Notice("Playing media was deleted.");
+            }
+        }
+
         const initialLength = this.data.queue.length;
         this.data.queue = this.data.queue.filter(item => item.path !== path && !item.path.startsWith(path + "/"));
         
@@ -632,9 +648,21 @@ export default class CrossPlayerPlugin extends Plugin {
         if (!validExtensions.includes(ext)) return;
         
         // Check if already in queue
-        const existing = this.data.queue.find(item => item.path === file.path);
+        let existing = this.data.queue.find(item => item.path === file.path);
         if (!existing) {
             const duration = await this.getMediaDuration(file);
+            
+            // Double check existence after async duration fetch to prevent race conditions
+            existing = this.data.queue.find(item => item.path === file.path);
+            if (existing) {
+                // If it appeared while we were waiting, verify its props
+                 if (!existing.duration) {
+                     existing.duration = duration;
+                     if (shouldSave) await this.saveData();
+                 }
+                 return;
+            }
+
             const newItem: MediaItem = {
                 id: Math.random().toString(36).substring(2, 11),
                 path: file.path, // Store vault relative path
@@ -732,7 +760,13 @@ export default class CrossPlayerPlugin extends Plugin {
         // Find the main view again just in case
         const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CROSS_PLAYER_MAIN);
         if (leaves.length > 0 && leaves[0].view instanceof CrossPlayerMainView) {
-             leaves[0].view.play(item, autoPlay);
+             const success = await leaves[0].view.play(item, autoPlay);
+             if (!success) {
+                 // Revert status if playback failed
+                 item.status = 'pending';
+                 await this.saveData();
+                 new Notice(`Failed to play ${item.name}`);
+             }
         }
     }
     
@@ -1644,7 +1678,11 @@ class CrossPlayerListView extends ItemView {
             itemEl.style.padding = "5px";
             itemEl.style.borderBottom = "1px solid var(--background-modifier-border)";
             
-            if (item.status === 'playing') {
+            // Check if item is currently playing (status 'playing' OR it is the active item in main view)
+            // This prevents the "selection" color from disappearing when status changes to 'completed' at 95%
+            const isPlaying = item.status === 'playing' || (this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id);
+
+            if (isPlaying) {
                 itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
             }
 
@@ -2353,7 +2391,7 @@ class CrossPlayerMainView extends ItemView {
         btn.addClass("cross-player-overlay-btn");
     }
 
-    async play(item: MediaItem, autoPlay: boolean = false) {
+    async play(item: MediaItem, autoPlay: boolean = false): Promise<boolean> {
         this.currentItem = item;
         
         // Update view title
@@ -2383,8 +2421,18 @@ class CrossPlayerMainView extends ItemView {
              this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
         } else {
              console.error("File not found for playback:", item.path);
-             return;
+             return false;
         }
+
+        // Add error handling
+        this.videoEl.onerror = () => {
+            console.error("Video playback error", this.videoEl.error);
+            new Notice("Error playing video file.");
+            // If we could signal back to plugin, we would.
+            // But play() has already returned true by the time this fires (usually).
+            // However, if it fails immediately on load, we might catch it?
+            // Usually src loading is async.
+        };
 
         this.videoEl.currentTime = item.position || 0;
         this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1.0;
@@ -2448,6 +2496,8 @@ class CrossPlayerMainView extends ItemView {
         
         // Update overlay visibility based on new item type
         this.refreshMobileOverlay();
+        
+        return true;
     }
 
     async changePlaybackSpeed(delta: number) {
