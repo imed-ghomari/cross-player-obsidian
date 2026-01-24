@@ -2481,6 +2481,28 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         }
       }
     });
+    this.addCommand({
+      id: "toggle-subtitles",
+      name: "Toggle Subtitles On/Off",
+      callback: () => {
+        if (this.mainView) {
+          this.mainView.toggleSubtitles();
+        } else {
+          new import_obsidian.Notice("Open a media file first.");
+        }
+      }
+    });
+    this.addCommand({
+      id: "switch-subtitle-track",
+      name: "Switch Subtitle Track",
+      callback: () => {
+        if (this.mainView) {
+          this.mainView.switchSubtitleTrack();
+        } else {
+          new import_obsidian.Notice("Open a media file first.");
+        }
+      }
+    });
     if (import_obsidian.Platform.isDesktop) {
       this.debouncedReload = (0, import_obsidian.debounce)(async () => {
         await this.loadData();
@@ -3230,6 +3252,24 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
     }
   }
+  retryDownload(id) {
+    const dl = this.activeDownloads.find((d) => d.id === id);
+    if (dl && dl.status === "error") {
+      const { url, quality, type } = dl.params;
+      const { downloadFolder, watchedFolder } = this.data.settings;
+      const targetFolder = downloadFolder || watchedFolder;
+      const path = require("path");
+      const adapter = this.app.vault.adapter;
+      let absolutePath;
+      if (adapter instanceof Object && "getBasePath" in adapter) {
+        absolutePath = path.join(adapter.getBasePath(), targetFolder);
+      } else {
+        new import_obsidian.Notice("Could not resolve absolute path for vault.");
+        return;
+      }
+      this.startDownload(url, quality, type, absolutePath, id);
+    }
+  }
   resumeDownload(id) {
     if (!import_obsidian.Platform.isDesktop)
       return;
@@ -3447,10 +3487,43 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       new import_obsidian.Notice("Data reloaded.");
     };
     const speed = this.plugin.data.playbackSpeed || 1;
-    const speedEl = headerContainer.createDiv({ cls: "cross-player-speed-display" });
+    const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
+    speedContainer.style.display = "flex";
+    speedContainer.style.justifyContent = "center";
+    speedContainer.style.alignItems = "center";
+    speedContainer.style.gap = "10px";
+    speedContainer.style.marginTop = "5px";
+    const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
+    (0, import_obsidian.setIcon)(minusBtn, "minus-circle");
+    minusBtn.ariaLabel = "Decrease Speed";
+    minusBtn.onclick = () => {
+      if (this.plugin.mainView) {
+        this.plugin.mainView.changePlaybackSpeed(-0.1);
+      } else {
+        const newSpeed = Math.max(0.1, (this.plugin.data.playbackSpeed || 1) - 0.1);
+        this.plugin.data.playbackSpeed = newSpeed;
+        this.plugin.saveData();
+        this.updateSpeedDisplay();
+      }
+    };
+    const speedEl = speedContainer.createDiv({ cls: "cross-player-speed-display" });
     speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
     speedEl.style.fontSize = "0.8em";
     speedEl.style.color = "var(--text-muted)";
+    speedEl.style.fontWeight = "bold";
+    const plusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
+    (0, import_obsidian.setIcon)(plusBtn, "plus-circle");
+    plusBtn.ariaLabel = "Increase Speed";
+    plusBtn.onclick = () => {
+      if (this.plugin.mainView) {
+        this.plugin.mainView.changePlaybackSpeed(0.1);
+      } else {
+        const newSpeed = Math.min(10, (this.plugin.data.playbackSpeed || 1) + 0.1);
+        this.plugin.data.playbackSpeed = newSpeed;
+        this.plugin.saveData();
+        this.updateSpeedDisplay();
+      }
+    };
     const stats = this.plugin.getQueueStats();
     const adjustedDuration = stats.totalDuration / speed;
     const limitBytes = this.plugin.dynamicStorageLimit;
@@ -3705,6 +3778,11 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         resumeBtn.style.fontSize = "0.8em";
         resumeBtn.style.padding = "2px 5px";
         resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
+      } else if (dl.status === "error") {
+        const retryBtn = btnGroup.createEl("button", { text: "Retry" });
+        retryBtn.style.fontSize = "0.8em";
+        retryBtn.style.padding = "2px 5px";
+        retryBtn.onclick = () => this.plugin.retryDownload(dl.id);
       }
       const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
       cancelBtn.style.fontSize = "0.8em";
@@ -3885,6 +3963,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const showOverlay = () => {
       overlay.style.opacity = "1";
       overlay.style.pointerEvents = "auto";
+      if (this.videoEl) {
+        this.videoEl.controls = false;
+        this.videoEl.controls = true;
+      }
       if (hideTimeout)
         clearTimeout(hideTimeout);
       hideTimeout = setTimeout(() => {
@@ -4028,6 +4110,45 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.videoEl.style.width = "100%";
       this.videoEl.style.height = "100%";
     }
+    while (this.videoEl.firstChild) {
+      this.videoEl.removeChild(this.videoEl.firstChild);
+    }
+    const baseName = item.path.substring(0, item.path.lastIndexOf("."));
+    const subtitleExtensions = ["vtt", "srt"];
+    let sidecarFound = false;
+    for (const subExt of subtitleExtensions) {
+      const subPath = `${baseName}.${subExt}`;
+      const subFile = this.plugin.app.vault.getAbstractFileByPath(subPath);
+      if (subFile instanceof import_obsidian.TFile) {
+        this.videoEl.createEl("track", {
+          attr: {
+            kind: "subtitles",
+            label: subExt.toUpperCase(),
+            srclang: "en",
+            src: this.plugin.app.vault.getResourcePath(subFile),
+            default: "true"
+          }
+        });
+        sidecarFound = true;
+        break;
+      }
+    }
+    this.videoEl.onloadedmetadata = () => {
+      if (!sidecarFound && this.videoEl && this.videoEl.textTracks && this.videoEl.textTracks.length > 0) {
+        for (let i = 0; i < this.videoEl.textTracks.length; i++) {
+          const track = this.videoEl.textTracks[i];
+          if (track.kind === "subtitles" || track.kind === "captions") {
+            track.mode = "showing";
+            break;
+          }
+        }
+      }
+    };
+    this.videoEl.onerror = () => {
+      var _a2;
+      console.error("Video playback error", (_a2 = this.videoEl) == null ? void 0 : _a2.error);
+      new import_obsidian.Notice("Error playing video file.");
+    };
     const file = this.plugin.app.vault.getAbstractFileByPath(item.path);
     if (file instanceof import_obsidian.TFile) {
       this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
@@ -4035,10 +4156,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       console.error("File not found for playback:", item.path);
       return false;
     }
-    this.videoEl.onerror = () => {
-      console.error("Video playback error", this.videoEl.error);
-      new import_obsidian.Notice("Error playing video file.");
-    };
     this.videoEl.currentTime = item.position || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
@@ -4113,6 +4230,77 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     } else {
       document.exitFullscreen();
     }
+  }
+  toggleSubtitles() {
+    var _a, _b;
+    if (!this.videoEl || !this.videoEl.textTracks)
+      return;
+    const tracks = this.videoEl.textTracks;
+    let anyShowing = false;
+    for (let i = 0; i < tracks.length; i++) {
+      if (tracks[i].mode === "showing") {
+        anyShowing = true;
+        break;
+      }
+    }
+    if (anyShowing) {
+      for (let i = 0; i < tracks.length; i++) {
+        tracks[i].mode = "disabled";
+      }
+      new import_obsidian.Notice("Subtitles disabled");
+    } else {
+      for (let i = 0; i < tracks.length; i++) {
+        if (tracks[i].kind === "subtitles" || tracks[i].kind === "captions") {
+          tracks[i].mode = "showing";
+          new import_obsidian.Notice(`Subtitles enabled: ${tracks[i].label || "Track " + (i + 1)}`);
+          break;
+        }
+      }
+      if (!anyShowing && tracks.length === 0) {
+        const ext = (_b = (_a = this.currentItem) == null ? void 0 : _a.path.split(".").pop()) == null ? void 0 : _b.toLowerCase();
+        if (ext === "mkv") {
+          new import_obsidian.Notice("No subtitle tracks found. MKV embedded subtitles (like PGS/ASS) are often not supported natively by the browser. Try an external .vtt or .srt file.");
+        } else {
+          new import_obsidian.Notice("No subtitle tracks found.");
+        }
+      }
+    }
+  }
+  switchSubtitleTrack() {
+    var _a, _b;
+    if (!this.videoEl || !this.videoEl.textTracks || this.videoEl.textTracks.length === 0) {
+      new import_obsidian.Notice("No subtitle tracks available.");
+      return;
+    }
+    const tracks = this.videoEl.textTracks;
+    const subtitleTracks = [];
+    for (let i = 0; i < tracks.length; i++) {
+      if (tracks[i].kind === "subtitles" || tracks[i].kind === "captions") {
+        subtitleTracks.push(tracks[i]);
+      }
+    }
+    if (subtitleTracks.length === 0) {
+      const ext = (_b = (_a = this.currentItem) == null ? void 0 : _a.path.split(".").pop()) == null ? void 0 : _b.toLowerCase();
+      if (ext === "mkv") {
+        new import_obsidian.Notice("No subtitle tracks available. MKV embedded subtitles (like PGS/ASS) are often not supported natively by the browser. Try an external .vtt or .srt file.");
+      } else {
+        new import_obsidian.Notice("No subtitle tracks found.");
+      }
+      return;
+    }
+    let activeIndex = -1;
+    for (let i = 0; i < subtitleTracks.length; i++) {
+      if (subtitleTracks[i].mode === "showing") {
+        activeIndex = i;
+        break;
+      }
+    }
+    for (let i = 0; i < subtitleTracks.length; i++) {
+      subtitleTracks[i].mode = "disabled";
+    }
+    const nextIndex = (activeIndex + 1) % subtitleTracks.length;
+    subtitleTracks[nextIndex].mode = "showing";
+    new import_obsidian.Notice(`Subtitle track: ${subtitleTracks[nextIndex].label || "Track " + (nextIndex + 1)}`);
   }
 };
 /*! Bundled license information:

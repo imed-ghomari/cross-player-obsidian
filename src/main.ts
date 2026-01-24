@@ -256,6 +256,30 @@ export default class CrossPlayerPlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'toggle-subtitles',
+            name: 'Toggle Subtitles On/Off',
+            callback: () => {
+                if (this.mainView) {
+                    this.mainView.toggleSubtitles();
+                } else {
+                    new Notice("Open a media file first.");
+                }
+            }
+        });
+
+        this.addCommand({
+            id: 'switch-subtitle-track',
+            name: 'Switch Subtitle Track',
+            callback: () => {
+                if (this.mainView) {
+                    this.mainView.switchSubtitleTrack();
+                } else {
+                    new Notice("Open a media file first.");
+                }
+            }
+        });
+
         // Setup auto-reload for Desktop (handle Sync)
         if (Platform.isDesktop) {
             this.debouncedReload = debounce(async () => {
@@ -1231,6 +1255,31 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
+    retryDownload(id: string) {
+        const dl = this.activeDownloads.find(d => d.id === id);
+        if (dl && dl.status === 'error') {
+            const { url, quality, type } = dl.params;
+            
+            // Re-resolve cwd just in case, though we could store it in params too
+            const { downloadFolder, watchedFolder } = this.data.settings;
+            const targetFolder = downloadFolder || watchedFolder;
+            
+            const path = require('path');
+            // @ts-ignore
+            const adapter = this.app.vault.adapter;
+            let absolutePath: string;
+            if (adapter instanceof Object && 'getBasePath' in adapter) {
+                 // @ts-ignore
+                 absolutePath = path.join(adapter.getBasePath(), targetFolder);
+            } else {
+                 new Notice("Could not resolve absolute path for vault.");
+                 return;
+            }
+
+            this.startDownload(url, quality, type, absolutePath, id);
+        }
+    }
+
     resumeDownload(id: string) {
         if (!Platform.isDesktop) return;
         const path = require('path');
@@ -1633,10 +1682,47 @@ class CrossPlayerListView extends ItemView {
         };
         
         const speed = this.plugin.data.playbackSpeed || 1.0;
-        const speedEl = headerContainer.createDiv({ cls: "cross-player-speed-display" });
+        const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
+        speedContainer.style.display = "flex";
+        speedContainer.style.justifyContent = "center";
+        speedContainer.style.alignItems = "center";
+        speedContainer.style.gap = "10px";
+        speedContainer.style.marginTop = "5px";
+
+        const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
+        setIcon(minusBtn, "minus-circle");
+        minusBtn.ariaLabel = "Decrease Speed";
+        minusBtn.onclick = () => {
+            if (this.plugin.mainView) {
+                this.plugin.mainView.changePlaybackSpeed(-0.1);
+            } else {
+                // Fallback if main view isn't open but we want to change default
+                const newSpeed = Math.max(0.1, (this.plugin.data.playbackSpeed || 1.0) - 0.1);
+                this.plugin.data.playbackSpeed = newSpeed;
+                this.plugin.saveData();
+                this.updateSpeedDisplay();
+            }
+        };
+
+        const speedEl = speedContainer.createDiv({ cls: "cross-player-speed-display" });
         speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
         speedEl.style.fontSize = "0.8em";
         speedEl.style.color = "var(--text-muted)";
+        speedEl.style.fontWeight = "bold";
+
+        const plusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
+        setIcon(plusBtn, "plus-circle");
+        plusBtn.ariaLabel = "Increase Speed";
+        plusBtn.onclick = () => {
+            if (this.plugin.mainView) {
+                this.plugin.mainView.changePlaybackSpeed(0.1);
+            } else {
+                const newSpeed = Math.min(10.0, (this.plugin.data.playbackSpeed || 1.0) + 0.1);
+                this.plugin.data.playbackSpeed = newSpeed;
+                this.plugin.saveData();
+                this.updateSpeedDisplay();
+            }
+        };
 
         // Stats Display
         const stats = this.plugin.getQueueStats();
@@ -1989,6 +2075,11 @@ class CrossPlayerListView extends ItemView {
                 resumeBtn.style.fontSize = "0.8em";
                 resumeBtn.style.padding = "2px 5px";
                 resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
+            } else if (dl.status === 'error') {
+                const retryBtn = btnGroup.createEl("button", { text: "Retry" });
+                retryBtn.style.fontSize = "0.8em";
+                retryBtn.style.padding = "2px 5px";
+                retryBtn.onclick = () => this.plugin.retryDownload(dl.id);
             }
 
             // Cancel Button
@@ -2219,6 +2310,13 @@ class CrossPlayerMainView extends ItemView {
         const showOverlay = () => {
             overlay.style.opacity = "1";
             overlay.style.pointerEvents = "auto";
+
+            // Force native controls (bottom bar) to appear
+            if (this.videoEl) {
+                this.videoEl.controls = false;
+                this.videoEl.controls = true;
+            }
+
             if (hideTimeout) clearTimeout(hideTimeout);
             hideTimeout = setTimeout(() => {
                 overlay.style.opacity = "0";
@@ -2415,7 +2513,55 @@ class CrossPlayerMainView extends ItemView {
              this.videoEl.style.width = "100%";
              this.videoEl.style.height = "100%";
         }
+
+        // --- Subtitle Support Preparation ---
+        // Clear existing tracks
+        while (this.videoEl.firstChild) {
+            this.videoEl.removeChild(this.videoEl.firstChild);
+        }
+
+        const baseName = item.path.substring(0, item.path.lastIndexOf('.'));
+        const subtitleExtensions = ['vtt', 'srt'];
+        let sidecarFound = false;
         
+        for (const subExt of subtitleExtensions) {
+            const subPath = `${baseName}.${subExt}`;
+            const subFile = this.plugin.app.vault.getAbstractFileByPath(subPath);
+            if (subFile instanceof TFile) {
+                this.videoEl.createEl("track", {
+                    attr: {
+                        kind: "subtitles",
+                        label: subExt.toUpperCase(),
+                        srclang: "en",
+                        src: this.plugin.app.vault.getResourcePath(subFile),
+                        default: "true"
+                    }
+                });
+                sidecarFound = true;
+                break; // Use the first one found
+            }
+        }
+
+        // Setup listeners BEFORE setting src
+        this.videoEl.onloadedmetadata = () => {
+            // Logic for embedded subtitles: 
+            // If no sidecar was found, we try to enable the first available embedded track.
+            if (!sidecarFound && this.videoEl && this.videoEl.textTracks && this.videoEl.textTracks.length > 0) {
+                for (let i = 0; i < this.videoEl.textTracks.length; i++) {
+                    const track = this.videoEl.textTracks[i];
+                    if (track.kind === 'subtitles' || track.kind === 'captions') {
+                        track.mode = 'showing';
+                        break; 
+                    }
+                }
+            }
+        };
+
+        this.videoEl.onerror = () => {
+            console.error("Video playback error", this.videoEl?.error);
+            new Notice("Error playing video file.");
+        };
+
         const file = this.plugin.app.vault.getAbstractFileByPath(item.path);
         if (file instanceof TFile) {
              this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
@@ -2423,16 +2569,6 @@ class CrossPlayerMainView extends ItemView {
              console.error("File not found for playback:", item.path);
              return false;
         }
-
-        // Add error handling
-        this.videoEl.onerror = () => {
-            console.error("Video playback error", this.videoEl.error);
-            new Notice("Error playing video file.");
-            // If we could signal back to plugin, we would.
-            // But play() has already returned true by the time this fires (usually).
-            // However, if it fails immediately on load, we might catch it?
-            // Usually src loading is async.
-        };
 
         this.videoEl.currentTime = item.position || 0;
         this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1.0;
@@ -2531,5 +2667,88 @@ class CrossPlayerMainView extends ItemView {
         } else {
             document.exitFullscreen();
         }
+    }
+
+    toggleSubtitles() {
+        if (!this.videoEl || !this.videoEl.textTracks) return;
+        
+        const tracks = this.videoEl.textTracks;
+        let anyShowing = false;
+        
+        for (let i = 0; i < tracks.length; i++) {
+            if (tracks[i].mode === 'showing') {
+                anyShowing = true;
+                break;
+            }
+        }
+
+        if (anyShowing) {
+            for (let i = 0; i < tracks.length; i++) {
+                tracks[i].mode = 'disabled';
+            }
+            new Notice("Subtitles disabled");
+        } else {
+            // Enable the first available track
+            for (let i = 0; i < tracks.length; i++) {
+                if (tracks[i].kind === 'subtitles' || tracks[i].kind === 'captions') {
+                    tracks[i].mode = 'showing';
+                    new Notice(`Subtitles enabled: ${tracks[i].label || 'Track ' + (i + 1)}`);
+                    break;
+                }
+            }
+            if (!anyShowing && tracks.length === 0) {
+                const ext = this.currentItem?.path.split('.').pop()?.toLowerCase();
+                if (ext === 'mkv') {
+                    new Notice("No subtitle tracks found. MKV embedded subtitles (like PGS/ASS) are often not supported natively by the browser. Try an external .vtt or .srt file.");
+                } else {
+                    new Notice("No subtitle tracks found.");
+                }
+            }
+        }
+    }
+
+    switchSubtitleTrack() {
+        if (!this.videoEl || !this.videoEl.textTracks || this.videoEl.textTracks.length === 0) {
+            new Notice("No subtitle tracks available.");
+            return;
+        }
+
+        const tracks = this.videoEl.textTracks;
+        const subtitleTracks: TextTrack[] = [];
+        for (let i = 0; i < tracks.length; i++) {
+            if (tracks[i].kind === 'subtitles' || tracks[i].kind === 'captions') {
+                subtitleTracks.push(tracks[i]);
+            }
+        }
+
+        if (subtitleTracks.length === 0) {
+            const ext = this.currentItem?.path.split('.').pop()?.toLowerCase();
+            if (ext === 'mkv') {
+                new Notice("No subtitle tracks available. MKV embedded subtitles (like PGS/ASS) are often not supported natively by the browser. Try an external .vtt or .srt file.");
+            } else {
+                new Notice("No subtitle tracks found.");
+            }
+            return;
+        }
+
+        // Find current active track index
+        let activeIndex = -1;
+        for (let i = 0; i < subtitleTracks.length; i++) {
+            if (subtitleTracks[i].mode === 'showing') {
+                activeIndex = i;
+                break;
+            }
+        }
+
+        // Disable all
+        for (let i = 0; i < subtitleTracks.length; i++) {
+            subtitleTracks[i].mode = 'disabled';
+        }
+
+        // Enable next track (or cycle to first)
+        const nextIndex = (activeIndex + 1) % subtitleTracks.length;
+        subtitleTracks[nextIndex].mode = 'showing';
+        
+        new Notice(`Subtitle track: ${subtitleTracks[nextIndex].label || 'Track ' + (nextIndex + 1)}`);
     }
 }
