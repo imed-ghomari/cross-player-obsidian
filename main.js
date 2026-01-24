@@ -2621,9 +2621,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }, loaded);
     this.data.settings = settings;
   }
-  async saveData() {
+  async saveData(refresh = true) {
     await super.saveData(this.data);
-    if (this.listView)
+    if (refresh && this.listView)
       this.listView.refresh();
   }
   registerWatchers() {
@@ -2902,7 +2902,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async updateStatus(id, status) {
     const item = this.data.queue.find((i) => i.id === id);
-    if (item) {
+    if (item && item.status !== status) {
       item.status = status;
       if (status === "completed") {
         item.finished = true;
@@ -2912,9 +2912,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async updatePosition(id, position) {
     const item = this.data.queue.find((i) => i.id === id);
-    if (item) {
+    if (item && Math.abs(item.position - position) > 1) {
       item.position = position;
-      await this.saveData();
+      await this.saveData(false);
     }
   }
   async moveItem(index2, direction) {
@@ -3575,7 +3575,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       if (this.plugin.data.settings.showMediaIndicator) {
         const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
         const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
-        const isAudio = ["mp3", "wav", "ogg"].includes(ext || "");
+        const isAudio = ["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(ext || "");
         (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
         typeIcon.style.marginRight = "10px";
         typeIcon.style.color = "var(--text-muted)";
@@ -4159,7 +4159,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.videoEl.currentTime = item.position || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
-    const isAudio = ["mp3", "wav", "ogg", "m4a", "aac"].includes(ext || "");
+    const isAudio = ["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(ext || "");
     if (isAudio) {
       if (!this.audioPlaceholderEl) {
         this.audioPlaceholderEl = this.contentEl.createDiv({ cls: "cross-player-audio-placeholder" });
@@ -4169,13 +4169,25 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         this.audioPlaceholderEl.style.width = "100%";
         this.audioPlaceholderEl.style.height = "100%";
         this.audioPlaceholderEl.style.display = "flex";
+        this.audioPlaceholderEl.style.flexDirection = "column";
         this.audioPlaceholderEl.style.justifyContent = "center";
         this.audioPlaceholderEl.style.alignItems = "center";
         this.audioPlaceholderEl.style.zIndex = "1";
-        this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e";
+        this.audioPlaceholderEl.style.backgroundColor = "var(--background-primary)";
       } else {
         this.audioPlaceholderEl.style.display = "flex";
         this.audioPlaceholderEl.empty();
+      }
+      const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: "cross-player-music-icon" });
+      (0, import_obsidian.setIcon)(musicIconEl, "music");
+      musicIconEl.style.width = "120px";
+      musicIconEl.style.height = "120px";
+      musicIconEl.style.color = "var(--text-muted)";
+      musicIconEl.style.opacity = "0.2";
+      const svg = musicIconEl.querySelector("svg");
+      if (svg) {
+        svg.style.width = "100%";
+        svg.style.height = "100%";
       }
       this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
       this.videoEl.style.height = "50px";

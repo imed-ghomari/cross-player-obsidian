@@ -446,9 +446,9 @@ export default class CrossPlayerPlugin extends Plugin {
         // If it's missing, it defaults to settings.defaultPlaybackSpeed.
     }
 
-    async saveData() {
+    async saveData(refresh: boolean = true) {
         await super.saveData(this.data);
-        if (this.listView) this.listView.refresh();
+        if (refresh && this.listView) this.listView.refresh();
     }
 
     registerWatchers() {
@@ -843,7 +843,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async updateStatus(id: string, status: 'pending' | 'playing' | 'completed') {
         const item = this.data.queue.find(i => i.id === id);
-        if (item) {
+        if (item && item.status !== status) {
             item.status = status;
             if (status === 'completed') {
                 item.finished = true;
@@ -854,9 +854,10 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async updatePosition(id: string, position: number) {
         const item = this.data.queue.find(i => i.id === id);
-        if (item) {
+        if (item && Math.abs(item.position - position) > 1) { // Only save if moved more than 1 second
             item.position = position;
-            await this.saveData();
+            await this.saveData(false); // Don't refresh the list view, it causes flashing. 
+                                       // The progress bar is updated directly via updateItemProgress.
         }
     }
 
@@ -1792,7 +1793,7 @@ class CrossPlayerListView extends ItemView {
             if (this.plugin.data.settings.showMediaIndicator) {
                 const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
                 const ext = item.path.split('.').pop()?.toLowerCase();
-                const isAudio = ['mp3', 'wav', 'ogg'].includes(ext || '');
+                const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '');
                 setIcon(typeIcon, isAudio ? "headphones" : "film");
                 typeIcon.style.marginRight = "10px";
                 typeIcon.style.color = "var(--text-muted)";
@@ -2575,7 +2576,7 @@ class CrossPlayerMainView extends ItemView {
         
         // Handle Audio vs Video UI
         const ext = item.path.split('.').pop()?.toLowerCase();
-        const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac'].includes(ext || '');
+        const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '');
 
         if (isAudio) {
             // Show audio placeholder
@@ -2587,13 +2588,27 @@ class CrossPlayerMainView extends ItemView {
                 this.audioPlaceholderEl.style.width = "100%";
                 this.audioPlaceholderEl.style.height = "100%"; // Occupy full space behind controls
                 this.audioPlaceholderEl.style.display = "flex";
+                this.audioPlaceholderEl.style.flexDirection = "column";
                 this.audioPlaceholderEl.style.justifyContent = "center";
                 this.audioPlaceholderEl.style.alignItems = "center";
                 this.audioPlaceholderEl.style.zIndex = "1"; // Behind overlay (10) but above video background (0)
-                this.audioPlaceholderEl.style.backgroundColor = "#1e1e1e"; // Dark background to hide video player default
+                this.audioPlaceholderEl.style.backgroundColor = "var(--background-primary)"; // Match theme background
             } else {
                 this.audioPlaceholderEl.style.display = "flex";
                 this.audioPlaceholderEl.empty(); // Ensure no leftover icons
+            }
+
+            // Add music icon
+            const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: 'cross-player-music-icon' });
+            setIcon(musicIconEl, "music");
+            musicIconEl.style.width = "120px";
+            musicIconEl.style.height = "120px";
+            musicIconEl.style.color = "var(--text-muted)";
+            musicIconEl.style.opacity = "0.2";
+            const svg = musicIconEl.querySelector('svg');
+            if (svg) {
+                svg.style.width = "100%";
+                svg.style.height = "100%";
             }
             
             // Set transparent poster to prevent browser from showing default audio icon
