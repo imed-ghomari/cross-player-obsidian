@@ -762,9 +762,13 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async playMedia(item: MediaItem, autoPlay: boolean = false) {
+        // 1. Prepare Main View and stop any current playback immediately
         await this.activateMainView();
+        if (this.mainView) {
+            await this.mainView.stop();
+        }
         
-        // Update status of previous item if playing
+        // 2. Update status of previous item if playing
         const currentPlaying = this.data.queue.find(i => i.status === 'playing');
         if (currentPlaying && currentPlaying.id !== item.id) {
             if (currentPlaying.finished) {
@@ -781,10 +785,9 @@ export default class CrossPlayerPlugin extends Plugin {
         item.status = 'playing';
         await this.saveData();
 
-        // Find the main view again just in case
-        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CROSS_PLAYER_MAIN);
-        if (leaves.length > 0 && leaves[0].view instanceof CrossPlayerMainView) {
-             const success = await leaves[0].view.play(item, autoPlay);
+        // 3. Start new playback
+        if (this.mainView) {
+             const success = await this.mainView.play(item, autoPlay);
              if (!success) {
                  // Revert status if playback failed
                  item.status = 'pending';
@@ -852,12 +855,11 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async updatePosition(id: string, position: number) {
+    async updatePosition(id: string, position: number, force: boolean = false) {
         const item = this.data.queue.find(i => i.id === id);
-        if (item && Math.abs(item.position - position) > 1) { // Only save if moved more than 1 second
+        if (item && (force || Math.abs(item.position - position) > 1)) { 
             item.position = position;
-            await this.saveData(false); // Don't refresh the list view, it causes flashing. 
-                                       // The progress bar is updated directly via updateItemProgress.
+            await this.saveData(false); 
         }
     }
 
@@ -1109,7 +1111,8 @@ export default class CrossPlayerPlugin extends Plugin {
             link,
             '-o', '%(title)s.%(ext)s',
             '--no-playlist',
-            '--newline' 
+            '--newline',
+            '--get-title'
         ];
 
         if (ffmpegPath) {
@@ -1139,7 +1142,15 @@ export default class CrossPlayerPlugin extends Plugin {
 
             child.stdout.on('data', (data: Buffer) => {
                 const lines = data.toString().split('\n');
-                for (const line of lines) {
+        for (const line of lines) {
+                    const trimmedLine = line.trim();
+                    
+                    // The first line might be the title due to --get-title
+                    if (trimmedLine && !trimmedLine.startsWith('[') && downloadStatus.name === link) {
+                        downloadStatus.name = trimmedLine;
+                        this.listView?.updateDownloadProgress();
+                    }
+
                     if (line.includes('[download]')) {
                         const percentMatch = line.match(/(\d+\.\d+)%/);
                         const speedMatch = line.match(/at\s+([^\s]+)/);
@@ -1161,9 +1172,26 @@ export default class CrossPlayerPlugin extends Plugin {
                         }
                         this.listView?.updateDownloadProgress();
                     }
+                    if (line.includes('[youtube]')) {
+                        // Extract title from youtube metadata line: [youtube] <id>: Downloading webpage
+                        // We need another way to get the title quickly.
+                        // Actually, yt-dlp prints the title if we use --print title.
+                        // But let's look for info logs.
+                    }
+                    if (line.includes('[info]')) {
+                        const titleMatch = line.match(/\[info\]\s+(.*?):\s+Downloading/);
+                        if (titleMatch && titleMatch[1]) {
+                            downloadStatus.name = titleMatch[1];
+                        }
+                    }
                     if (line.includes('[download] Destination:')) {
                         const name = line.split('Destination:')[1].trim();
-                        downloadStatus.name = name;
+                        // Only update if it's not a generic name
+                        if (name) {
+                            // Remove extension if possible
+                            const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
+                            downloadStatus.name = nameWithoutExt;
+                        }
                         this.listView?.updateDownloadProgress();
                     }
                     // Conversion / Post-processing detection
@@ -1585,10 +1613,12 @@ class CrossPlayerSettingTab extends PluginSettingTab {
 
 class CrossPlayerListView extends ItemView {
     plugin: CrossPlayerPlugin;
+    private savedScrollTop: number = 0;
 
     constructor(leaf: WorkspaceLeaf, plugin: CrossPlayerPlugin) {
         super(leaf);
         this.plugin = plugin;
+        this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
     }
 
     getViewType() {
@@ -1609,6 +1639,13 @@ class CrossPlayerListView extends ItemView {
 
     refresh() {
         const container = this.contentEl;
+        
+        // Save scroll position before emptying
+        const oldList = container.querySelector(".cross-player-list");
+        if (oldList) {
+            this.savedScrollTop = oldList.scrollTop;
+        }
+
         container.empty();
         container.style.display = "flex";
         container.style.flexDirection = "column";
@@ -1755,15 +1792,26 @@ class CrossPlayerListView extends ItemView {
         list.style.flexGrow = "1";
         list.style.overflowY = "auto";
         list.style.overflowX = "hidden";
+        
+        // Restore scroll position
+        if (this.savedScrollTop > 0) {
+            // Use requestAnimationFrame to ensure the list is rendered before scrolling
+            requestAnimationFrame(() => {
+                list.scrollTop = this.savedScrollTop;
+            });
+        }
+
+        // Save scroll position on scroll
+        list.addEventListener('scroll', () => {
+            this.savedScrollTop = list.scrollTop;
+            this.plugin.data.queueScrollTop = this.savedScrollTop;
+        });
+
         // list.style.minHeight = "0"; // Firefox fix for flex overflow
 
         this.plugin.data.queue.forEach((item) => {
             const itemEl = list.createDiv({ cls: "cross-player-item" });
             itemEl.dataset.id = item.id;
-            itemEl.style.display = "flex";
-            itemEl.style.alignItems = "center";
-            itemEl.style.padding = "5px";
-            itemEl.style.borderBottom = "1px solid var(--background-modifier-border)";
             
             // Check if item is currently playing (status 'playing' OR it is the active item in main view)
             // This prevents the "selection" color from disappearing when status changes to 'completed' at 95%
@@ -1773,13 +1821,13 @@ class CrossPlayerListView extends ItemView {
                 itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
             }
 
-            // Progress Background
-            if (this.plugin.data.settings.showProgressColor && item.duration > 0 && item.position > 0) {
-                 const pct = Math.min(100, (item.position / item.duration) * 100);
-                 const color = `color-mix(in srgb, var(--interactive-accent), transparent 80%)`;
-                 itemEl.style.backgroundImage = `linear-gradient(to right, ${color} ${pct}%, transparent ${pct}%)`;
-                 itemEl.style.backgroundSize = "100% 100%";
-                 itemEl.style.backgroundRepeat = "no-repeat";
+            // Progress Highlight
+            const progressEl = itemEl.createDiv({ cls: "cross-player-item-progress" });
+            if (this.plugin.data.settings.showProgressColor && item.duration > 0 && (item.position > 0 || item.status === 'completed')) {
+                 const pct = item.status === 'completed' ? 100 : Math.min(100, (item.position / item.duration) * 100);
+                 progressEl.style.width = `${pct}%`;
+            } else {
+                 progressEl.style.width = "0%";
             }
 
             // Status Icon
@@ -1921,13 +1969,17 @@ class CrossPlayerListView extends ItemView {
     }
 
     updateItemProgress(id: string, percentage: number) {
-        if (!this.plugin.data.settings.showProgressColor) return;
-        
         const itemEl = this.contentEl.querySelector(`.cross-player-item[data-id="${id}"]`) as HTMLElement;
         if (itemEl) {
-            const pct = Math.min(100, Math.max(0, percentage));
-            const color = `color-mix(in srgb, var(--interactive-accent), transparent 80%)`;
-            itemEl.style.backgroundImage = `linear-gradient(to right, ${color} ${pct}%, transparent ${pct}%)`;
+            const progressEl = itemEl.querySelector(".cross-player-item-progress") as HTMLElement;
+            if (progressEl) {
+                if (!this.plugin.data.settings.showProgressColor) {
+                    progressEl.style.width = "0%";
+                    return;
+                }
+                const pct = Math.min(100, Math.max(0, percentage));
+                progressEl.style.width = `${pct}%`;
+            }
         }
     }
 
@@ -2220,6 +2272,13 @@ class CrossPlayerMainView extends ItemView {
 
         this.videoEl.ontimeupdate = async () => {
              if (this.currentItem) {
+                 // Check if the current video source duration matches the expected metadata
+                 // This helps prevent "jumps" during source switches
+                 if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
+                      // Metadata mismatch - probably transitioning source
+                      return;
+                 }
+
                  this.currentItem.position = this.videoEl.currentTime;
 
                  // Throttled ETC update in List View
@@ -2242,17 +2301,10 @@ class CrossPlayerMainView extends ItemView {
                 }
                 
                 // Mark as completed if > 95% watched
-                 // We don't want to auto-skip yet, just mark as completed so if user exits it's done.
-                 // But wait, if we mark as completed, does it affect playback? No.
-                 // But we should only do this once to avoid spamming save.
                  if (this.currentItem.status !== 'completed' && this.videoEl.duration > 0) {
                      const progress = this.videoEl.currentTime / this.videoEl.duration;
                      if (progress > 0.95) {
-                         // Mark as completed silently?
-                         // If we update status, it saves data.
                          await this.plugin.updateStatus(this.currentItem.id, 'completed');
-                         // We do NOT trigger playNextUnread() here, we let the video finish naturally.
-                         // Or user can skip.
                      }
                  }
              }
@@ -2260,7 +2312,11 @@ class CrossPlayerMainView extends ItemView {
         
         this.videoEl.onpause = async () => {
             if (this.currentItem) {
-                await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime);
+                // Check if the current video source duration matches the expected metadata
+                if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
+                     return;
+                }
+                await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
             }
         }
     }
@@ -2490,6 +2546,24 @@ class CrossPlayerMainView extends ItemView {
         btn.addClass("cross-player-overlay-btn");
     }
 
+    async stop() {
+        if (this.videoEl) {
+            // 1. Pause immediately to freeze currentTime
+            this.videoEl.pause();
+
+            // 2. Save current position if we have an active item
+             if (this.currentItem) {
+                 this.currentItem.position = this.videoEl.currentTime;
+                 await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
+             }
+            
+            // 3. Clear sources and listeners
+            this.videoEl.removeAttribute('src');
+            this.videoEl.load(); 
+        }
+        this.currentItem = null;
+    }
+
     async play(item: MediaItem, autoPlay: boolean = false): Promise<boolean> {
         this.currentItem = item;
         
@@ -2571,7 +2645,9 @@ class CrossPlayerMainView extends ItemView {
              return false;
         }
 
-        this.videoEl.currentTime = item.position || 0;
+        // Context Rewind: go back 2 seconds to provide context and counter any transition-related "advance"
+        const resumePosition = item.position > 2 ? item.position - 2 : item.position;
+        this.videoEl.currentTime = resumePosition || 0;
         this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1.0;
         
         // Handle Audio vs Video UI

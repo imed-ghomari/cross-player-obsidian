@@ -1,6 +1,6 @@
 {
   "name": "cross-player",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Media player plugin for Obsidian",
   "main": "main.js",
   "scripts": {

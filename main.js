@@ -2842,6 +2842,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async playMedia(item, autoPlay = false) {
     await this.activateMainView();
+    if (this.mainView) {
+      await this.mainView.stop();
+    }
     const currentPlaying = this.data.queue.find((i) => i.status === "playing");
     if (currentPlaying && currentPlaying.id !== item.id) {
       if (currentPlaying.finished) {
@@ -2855,9 +2858,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     item.status = "playing";
     await this.saveData();
-    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CROSS_PLAYER_MAIN);
-    if (leaves.length > 0 && leaves[0].view instanceof CrossPlayerMainView) {
-      const success = await leaves[0].view.play(item, autoPlay);
+    if (this.mainView) {
+      const success = await this.mainView.play(item, autoPlay);
       if (!success) {
         item.status = "pending";
         await this.saveData();
@@ -2910,9 +2912,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       await this.saveData();
     }
   }
-  async updatePosition(id, position) {
+  async updatePosition(id, position, force = false) {
     const item = this.data.queue.find((i) => i.id === id);
-    if (item && Math.abs(item.position - position) > 1) {
+    if (item && (force || Math.abs(item.position - position) > 1)) {
       item.position = position;
       await this.saveData(false);
     }
@@ -3121,7 +3123,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       "-o",
       "%(title)s.%(ext)s",
       "--no-playlist",
-      "--newline"
+      "--newline",
+      "--get-title"
     ];
     if (ffmpegPath) {
       args.push("--ffmpeg-location", ffmpegPath);
@@ -3146,9 +3149,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const child = spawn(ytPath, args, { cwd });
       downloadStatus.childProcess = child;
       child.stdout.on("data", (data) => {
-        var _a2, _b2, _c;
+        var _a2, _b2, _c, _d;
         const lines = data.toString().split("\n");
         for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (trimmedLine && !trimmedLine.startsWith("[") && downloadStatus.name === link) {
+            downloadStatus.name = trimmedLine;
+            (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
+          }
           if (line.includes("[download]")) {
             const percentMatch = line.match(/(\d+\.\d+)%/);
             const speedMatch = line.match(/at\s+([^\s]+)/);
@@ -3166,17 +3174,28 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             if (etaMatch) {
               downloadStatus.eta = etaMatch[1];
             }
-            (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
+            (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
+          }
+          if (line.includes("[youtube]")) {
+          }
+          if (line.includes("[info]")) {
+            const titleMatch = line.match(/\[info\]\s+(.*?):\s+Downloading/);
+            if (titleMatch && titleMatch[1]) {
+              downloadStatus.name = titleMatch[1];
+            }
           }
           if (line.includes("[download] Destination:")) {
             const name = line.split("Destination:")[1].trim();
-            downloadStatus.name = name;
-            (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
+            if (name) {
+              const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
+              downloadStatus.name = nameWithoutExt;
+            }
+            (_c = this.listView) == null ? void 0 : _c.updateDownloadProgress();
           }
           if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
             downloadStatus.status = "converting";
             downloadStatus.progress = "95%";
-            (_c = this.listView) == null ? void 0 : _c.updateDownloadProgress();
+            (_d = this.listView) == null ? void 0 : _d.updateDownloadProgress();
           }
         }
       });
@@ -3432,7 +3451,9 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
 var CrossPlayerListView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
+    this.savedScrollTop = 0;
     this.plugin = plugin;
+    this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
   }
   getViewType() {
     return VIEW_TYPE_CROSS_PLAYER_LIST;
@@ -3448,6 +3469,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
   }
   refresh() {
     const container = this.contentEl;
+    const oldList = container.querySelector(".cross-player-list");
+    if (oldList) {
+      this.savedScrollTop = oldList.scrollTop;
+    }
     container.empty();
     container.style.display = "flex";
     container.style.flexDirection = "column";
@@ -3545,24 +3570,29 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     list.style.flexGrow = "1";
     list.style.overflowY = "auto";
     list.style.overflowX = "hidden";
+    if (this.savedScrollTop > 0) {
+      requestAnimationFrame(() => {
+        list.scrollTop = this.savedScrollTop;
+      });
+    }
+    list.addEventListener("scroll", () => {
+      this.savedScrollTop = list.scrollTop;
+      this.plugin.data.queueScrollTop = this.savedScrollTop;
+    });
     this.plugin.data.queue.forEach((item) => {
       var _a;
       const itemEl = list.createDiv({ cls: "cross-player-item" });
       itemEl.dataset.id = item.id;
-      itemEl.style.display = "flex";
-      itemEl.style.alignItems = "center";
-      itemEl.style.padding = "5px";
-      itemEl.style.borderBottom = "1px solid var(--background-modifier-border)";
       const isPlaying = item.status === "playing" || this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id;
       if (isPlaying) {
         itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
       }
-      if (this.plugin.data.settings.showProgressColor && item.duration > 0 && item.position > 0) {
-        const pct = Math.min(100, item.position / item.duration * 100);
-        const color = `color-mix(in srgb, var(--interactive-accent), transparent 80%)`;
-        itemEl.style.backgroundImage = `linear-gradient(to right, ${color} ${pct}%, transparent ${pct}%)`;
-        itemEl.style.backgroundSize = "100% 100%";
-        itemEl.style.backgroundRepeat = "no-repeat";
+      const progressEl = itemEl.createDiv({ cls: "cross-player-item-progress" });
+      if (this.plugin.data.settings.showProgressColor && item.duration > 0 && (item.position > 0 || item.status === "completed")) {
+        const pct = item.status === "completed" ? 100 : Math.min(100, item.position / item.duration * 100);
+        progressEl.style.width = `${pct}%`;
+      } else {
+        progressEl.style.width = "0%";
       }
       const statusIcon = itemEl.createDiv({ cls: "cross-player-status-icon" });
       if (item.status === "completed")
@@ -3657,13 +3687,17 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     }
   }
   updateItemProgress(id, percentage) {
-    if (!this.plugin.data.settings.showProgressColor)
-      return;
     const itemEl = this.contentEl.querySelector(`.cross-player-item[data-id="${id}"]`);
     if (itemEl) {
-      const pct = Math.min(100, Math.max(0, percentage));
-      const color = `color-mix(in srgb, var(--interactive-accent), transparent 80%)`;
-      itemEl.style.backgroundImage = `linear-gradient(to right, ${color} ${pct}%, transparent ${pct}%)`;
+      const progressEl = itemEl.querySelector(".cross-player-item-progress");
+      if (progressEl) {
+        if (!this.plugin.data.settings.showProgressColor) {
+          progressEl.style.width = "0%";
+          return;
+        }
+        const pct = Math.min(100, Math.max(0, percentage));
+        progressEl.style.width = `${pct}%`;
+      }
     }
   }
   updateDownloadProgress(parentContainer) {
@@ -3896,6 +3930,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
     this.videoEl.ontimeupdate = async () => {
       if (this.currentItem) {
+        if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
+          return;
+        }
         this.currentItem.position = this.videoEl.currentTime;
         const now = Date.now();
         if (now - this.lastEtcUpdate > 5e3) {
@@ -3921,7 +3958,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
     this.videoEl.onpause = async () => {
       if (this.currentItem) {
-        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime);
+        if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
+          return;
+        }
+        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
       }
     };
   }
@@ -4092,6 +4132,18 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   styleBigButton(btn) {
     btn.addClass("cross-player-overlay-btn");
   }
+  async stop() {
+    if (this.videoEl) {
+      this.videoEl.pause();
+      if (this.currentItem) {
+        this.currentItem.position = this.videoEl.currentTime;
+        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
+      }
+      this.videoEl.removeAttribute("src");
+      this.videoEl.load();
+    }
+    this.currentItem = null;
+  }
   async play(item, autoPlay = false) {
     var _a;
     this.currentItem = item;
@@ -4156,7 +4208,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       console.error("File not found for playback:", item.path);
       return false;
     }
-    this.videoEl.currentTime = item.position || 0;
+    const resumePosition = item.position > 2 ? item.position - 2 : item.position;
+    this.videoEl.currentTime = resumePosition || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
     const isAudio = ["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(ext || "");

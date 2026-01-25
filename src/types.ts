@@ -44,4 +44,5 @@ export interface CrossPlayerData {
     settings: CrossPlayerSettings;
     queue: MediaItem[];
     playbackSpeed: number;
+    queueScrollTop?: number;
 }
