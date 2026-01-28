@@ -2286,6 +2286,7 @@ var DEFAULT_SETTINGS = {
   seekSecondsBackward: 10,
   youtubeDlpPath: "yt-dlp",
   ffmpegPath: "",
+  jsRuntimePath: "",
   downloadFolder: "",
   showMediaIndicator: true,
   storageLimitGB: 10,
@@ -2326,7 +2327,19 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice(`Testing yt-dlp at: ${ytPath}`);
         try {
           const { spawn } = require("child_process");
-          const child = spawn(ytPath, ["--version"]);
+          const env = { ...process.env };
+          if (import_obsidian.Platform.isDesktop && process.platform === "darwin") {
+            const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+            env.PATH = extraPaths.join(":") + (env.PATH ? ":" + env.PATH : "");
+          }
+          const { jsRuntimePath } = this.data.settings;
+          const testArgs = ["--version"];
+          if (jsRuntimePath) {
+            testArgs.push("--js-runtimes", `node:${jsRuntimePath}`);
+          } else {
+            testArgs.push("--js-runtimes", "node");
+          }
+          const child = spawn(ytPath, testArgs, { env });
           child.stdout.on("data", (data) => {
             const version2 = data.toString().trim();
             new import_obsidian.Notice(`yt-dlp version: ${version2}`);
@@ -2342,7 +2355,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           });
           const { ffmpegPath } = this.data.settings;
           if (ffmpegPath) {
-            const ffmpegChild = spawn(ffmpegPath, ["-version"]);
+            const ffmpegChild = spawn(ffmpegPath, ["-version"], { env });
             ffmpegChild.on("error", () => {
               new import_obsidian.Notice(`\u26A0\uFE0F FFmpeg not found at: ${ffmpegPath}`);
             });
@@ -2660,10 +2673,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.scanFolder(path);
   }
   async scanFolder(folderPath) {
-    const folder = this.app.vault.getAbstractFileByPath(folderPath);
+    const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
     if (folder instanceof import_obsidian.TFolder) {
       const files = this.app.vault.getFiles();
-      const filesInFolder = files.filter((file) => file.path.startsWith(folderPath + "/"));
+      const filesInFolder = files.filter((file) => {
+        if (folderPath === "")
+          return true;
+        return file.path.startsWith(folderPath + "/");
+      });
       const promises = filesInFolder.map((file) => this.handleFileChange(file, false));
       await Promise.all(promises);
       await this.saveData();
@@ -2744,8 +2761,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async handleFileChange(file, shouldSave = true) {
-    const folderPath = this.data.settings.watchedFolder;
-    if (!folderPath)
+    var _a;
+    const folderPath = (_a = this.data.settings.watchedFolder) != null ? _a : "";
+    if (this.data.settings.watchedFolder === void 0)
       return;
     if (file.name.startsWith(".") || file.path.includes("/."))
       return;
@@ -2757,8 +2775,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     if (!(file instanceof import_obsidian.TFile))
       return;
-    if (!file.path.startsWith(folderPath + "/"))
+    if (folderPath !== "" && !file.path.startsWith(folderPath + "/"))
       return;
+    console.log(`[Cross Player] processing: ${file.path}`);
     const ext = file.extension.toLowerCase();
     const validExtensions = ["mp4", "webm", "ogv", "mp3", "wav", "ogg", "mkv", "m4a", "3gp", "flac", "aac"];
     if (!validExtensions.includes(ext))
@@ -3092,7 +3111,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     var _a, _b;
     if (!import_obsidian.Platform.isDesktop)
       return;
-    const { youtubeDlpPath, ffmpegPath } = this.data.settings;
+    const { youtubeDlpPath, ffmpegPath, jsRuntimePath } = this.data.settings;
     const ytPath = youtubeDlpPath.trim();
     const downloadId = existingId || Math.random().toString(36).substring(7);
     let downloadStatus;
@@ -3124,7 +3143,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       "%(title)s.%(ext)s",
       "--no-playlist",
       "--newline",
-      "--get-title"
+      "--restrict-filenames",
+      "--no-mtime",
+      "--js-runtimes",
+      jsRuntimePath ? `node:${jsRuntimePath}` : "node",
+      "--format-sort",
+      "ext:mp4:m4a"
     ];
     if (ffmpegPath) {
       args.push("--ffmpeg-location", ffmpegPath);
@@ -3133,20 +3157,25 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       args.push("-x", "--audio-format", "mp3");
     } else {
       if (quality === "best") {
-        args.push("-f", "bestvideo+bestaudio/best");
+        args.push("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best");
       } else if (quality === "1080p") {
-        args.push("-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]");
+        args.push("-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best");
       } else if (quality === "720p") {
-        args.push("-f", "bestvideo[height<=720]+bestaudio/best[height<=720]");
+        args.push("-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best");
       } else if (quality === "480p") {
-        args.push("-f", "bestvideo[height<=480]+bestaudio/best[height<=480]");
+        args.push("-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/best");
       }
       args.push("--merge-output-format", "mp4");
     }
     try {
       const { spawn } = require("child_process");
-      console.log(`Spawning: ${ytPath} ${args.join(" ")}`);
-      const child = spawn(ytPath, args, { cwd });
+      console.log(`[Cross Player] Spawning in ${cwd}: ${ytPath} ${args.join(" ")}`);
+      const env = { ...process.env };
+      if (import_obsidian.Platform.isDesktop && process.platform === "darwin") {
+        const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+        env.PATH = extraPaths.join(":") + (env.PATH ? ":" + env.PATH : "");
+      }
+      const child = spawn(ytPath, args, { cwd, env });
       downloadStatus.childProcess = child;
       child.stdout.on("data", (data) => {
         var _a2, _b2, _c, _d;
@@ -3195,6 +3224,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
             downloadStatus.status = "converting";
             downloadStatus.progress = "95%";
+            const destMatch = line.match(/(?:into|to)\s+"(.*)"/);
+            if (destMatch && destMatch[1]) {
+              const nameWithoutExt = destMatch[1].replace(/\.[^/.]+$/, "");
+              downloadStatus.name = nameWithoutExt;
+            }
             (_d = this.listView) == null ? void 0 : _d.updateDownloadProgress();
           }
         }
@@ -3223,10 +3257,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         if (code === 0) {
           downloadStatus.status = "completed";
           downloadStatus.progress = "100%";
-          const { watchedFolder, downloadFolder } = this.data.settings;
-          const targetFolder = downloadFolder || watchedFolder;
-          if (targetFolder === watchedFolder) {
-            this.scanFolder(watchedFolder);
+          console.log(`Download completed for: ${downloadStatus.name}`);
+          const { watchedFolder } = this.data.settings;
+          if (watchedFolder) {
+            setTimeout(() => {
+              this.scanFolder(watchedFolder);
+            }, 2e3);
           }
         } else if (downloadStatus.status !== "paused" && code !== null) {
           downloadStatus.status = "error";
@@ -3432,6 +3468,10 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     }));
     new import_obsidian.Setting(containerEl).setName("FFmpeg Binary Path").setDesc("Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.").addText((text) => text.setValue(this.plugin.data.settings.ffmpegPath).onChange(async (value) => {
       this.plugin.data.settings.ffmpegPath = value;
+      await this.plugin.saveData();
+    }));
+    new import_obsidian.Setting(containerEl).setName("JS Runtime Path").setDesc("Absolute path to node, deno or bun (required for YouTube signature extraction).").addText((text) => text.setPlaceholder("e.g. /usr/local/bin/node").setValue(this.plugin.data.settings.jsRuntimePath).onChange(async (value) => {
+      this.plugin.data.settings.jsRuntimePath = value;
       await this.plugin.saveData();
     }));
     new import_obsidian.Setting(containerEl).setName("Download Folder").setDesc("Folder to save downloads (relative to vault). Leave empty to use Watched Folder.").addText((text) => text.setValue(this.plugin.data.settings.downloadFolder).onChange(async (value) => {

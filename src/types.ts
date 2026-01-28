@@ -17,6 +17,7 @@ export interface CrossPlayerSettings {
     // YouTube Download Settings
     youtubeDlpPath: string;
     ffmpegPath: string;
+    jsRuntimePath: string;
     downloadFolder: string;
     showMediaIndicator: boolean;
     storageLimitGB: number;
