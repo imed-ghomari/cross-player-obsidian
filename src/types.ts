@@ -24,7 +24,6 @@ export interface CrossPlayerSettings {
     autoplayNext: boolean;
     showProgressColor: boolean;
     pauseOnMobileTap: boolean;
-    maxConcurrentDownloads: number;
 }
 
 export interface DownloadStatus {
@@ -33,13 +32,12 @@ export interface DownloadStatus {
     progress: string;
     speed: string;
     eta: string;
-    status: 'downloading' | 'queued' | 'paused' | 'converting' | 'completed' | 'error';
+    status: 'downloading' | 'paused' | 'converting' | 'completed' | 'error';
     error?: string;
     params?: {
         url: string;
         quality: string;
         type: 'video' | 'audio';
-        cwd: string;
     };
 }
 

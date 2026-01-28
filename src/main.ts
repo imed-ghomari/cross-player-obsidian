@@ -34,8 +34,7 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     storageLimitGB: 10,
     autoplayNext: true,
     showProgressColor: true,
-    pauseOnMobileTap: true,
-    maxConcurrentDownloads: 2
+    pauseOnMobileTap: true
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -53,13 +52,6 @@ export default class CrossPlayerPlugin extends Plugin {
     limitingDevice: string = '';
 
     debouncedUpdateDeviceStatus: any;
-    debouncedUpdateDownloadProgress: any;
-
-    // Track download session for consistent progress bar
-    downloadSession = {
-        total: 0,
-        completed: 0
-    };
 
     async onload() {
         await this.loadData();
@@ -72,13 +64,6 @@ export default class CrossPlayerPlugin extends Plugin {
         this.debouncedUpdateDeviceStatus = debounce(async () => {
             await this.updateDeviceStatus();
         }, 2000, true);
-
-        // Debounced download progress updates to prevent UI lag
-        this.debouncedUpdateDownloadProgress = debounce(() => {
-            if (this.listView) {
-                this.listView.updateDownloadProgress();
-            }
-        }, 300, true);
 
         this.addCommand({
             id: 'test-yt-dlp',
@@ -1105,50 +1090,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         for (const link of links) {
             if (!link.trim()) continue;
-            this.queueDownload(link.trim(), quality, type, absolutePath);
-        }
-    }
-
-    queueDownload(link: string, quality: string, type: 'video' | 'audio', cwd: string) {
-        const downloadId = Math.random().toString(36).substring(7);
-
-        // Try to show a cleaner name while fetching
-        let initialName = link;
-        try {
-            const url = new URL(link);
-            if (url.hostname.includes('youtube.com') || url.hostname.includes('youtu.be')) {
-                const v = url.searchParams.get('v');
-                if (v) initialName = `YouTube: ${v}`;
-                else if (url.pathname.length > 1) initialName = `YouTube: ${url.pathname.substring(1)}`;
-            }
-        } catch (e) { }
-
-        const downloadStatus: ActiveDownload = {
-            id: downloadId,
-            name: initialName,
-            progress: '0%',
-            speed: '0',
-            eta: '?',
-            status: 'queued',
-            params: { url: link, quality, type, cwd }
-        };
-        this.activeDownloads.push(downloadStatus);
-        this.debouncedUpdateDownloadProgress();
-        this.processDownloadQueue();
-    }
-
-    async processDownloadQueue() {
-        if (!Platform.isDesktop) return;
-
-        const downloadingCount = this.activeDownloads.filter(d => d.status === 'downloading' || d.status === 'converting').length;
-        const maxConcurrent = this.data.settings.maxConcurrentDownloads || 2;
-
-        if (downloadingCount >= maxConcurrent) return;
-
-        const nextInQueue = this.activeDownloads.find(d => d.status === 'queued');
-        if (nextInQueue && nextInQueue.params) {
-            const { url, quality, type, cwd } = nextInQueue.params;
-            this.startDownload(url, quality, type, cwd, nextInQueue.id);
+            this.startDownload(link.trim(), quality, type, absolutePath);
         }
     }
 
@@ -1181,15 +1123,14 @@ export default class CrossPlayerPlugin extends Plugin {
                 speed: '0',
                 eta: '?',
                 status: 'downloading',
-                params: { url: link, quality, type, cwd }
+                params: { url: link, quality, type }
             };
             this.activeDownloads.push(downloadStatus);
         }
 
-        this.debouncedUpdateDownloadProgress();
+        this.listView?.updateDownloadProgress();
 
         let args = [
-            '--print', 'title',
             link,
             '-o', '%(title)s.%(ext)s',
             '--no-playlist',
@@ -1238,14 +1179,10 @@ export default class CrossPlayerPlugin extends Plugin {
                 for (const line of lines) {
                     const trimmedLine = line.trim();
 
-                    // If it's the title printed by --print title
-                    if (trimmedLine && !trimmedLine.startsWith('[') && !trimmedLine.includes(' ') && trimmedLine.length < 50 && downloadStatus.name.includes('YouTube:')) {
-                        // This might be the ID, let's keep looking
-                    }
-
-                    if (trimmedLine && !trimmedLine.startsWith('[') && (downloadStatus.name.includes('http') || downloadStatus.name.includes('YouTube:'))) {
+                    // The first line might be the title due to --get-title
+                    if (trimmedLine && !trimmedLine.startsWith('[') && downloadStatus.name === link) {
                         downloadStatus.name = trimmedLine;
-                        this.debouncedUpdateDownloadProgress();
+                        this.listView?.updateDownloadProgress();
                     }
 
                     if (line.includes('[download]')) {
@@ -1267,7 +1204,7 @@ export default class CrossPlayerPlugin extends Plugin {
                         if (etaMatch) {
                             downloadStatus.eta = etaMatch[1];
                         }
-                        this.debouncedUpdateDownloadProgress();
+                        this.listView?.updateDownloadProgress();
                     }
                     if (line.includes('[youtube]')) {
                         // Extract title from youtube metadata line: [youtube] <id>: Downloading webpage
@@ -1289,7 +1226,7 @@ export default class CrossPlayerPlugin extends Plugin {
                             const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
                             downloadStatus.name = nameWithoutExt;
                         }
-                        this.debouncedUpdateDownloadProgress();
+                        this.listView?.updateDownloadProgress();
                     }
                     // Conversion / Post-processing detection
                     if (line.includes('[ExtractAudio]') || line.includes('[ffmpeg]') || line.includes('[Merger]')) {
@@ -1302,7 +1239,7 @@ export default class CrossPlayerPlugin extends Plugin {
                             downloadStatus.name = nameWithoutExt;
                         }
 
-                        this.debouncedUpdateDownloadProgress();
+                        this.listView?.updateDownloadProgress();
                     }
                 }
             });
@@ -1315,7 +1252,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 if (errorMsg.includes("HTTP Error 400") || errorMsg.includes("Precondition check failed") || errorMsg.includes("Unable to extract")) {
                     downloadStatus.error = "Update yt-dlp!";
                     downloadStatus.status = 'error';
-                    this.debouncedUpdateDownloadProgress();
+                    this.listView?.updateDownloadProgress();
                 } else if (errorMsg.includes("ffmpeg-location") && errorMsg.includes("does not exist")) {
                     // This is a warning, but good to know
                     console.warn("FFmpeg path invalid");
@@ -1326,8 +1263,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 console.error("Failed to start process", err);
                 downloadStatus.status = 'error';
                 downloadStatus.error = err.message;
-                this.debouncedUpdateDownloadProgress();
-                this.processDownloadQueue();
+                this.listView?.updateDownloadProgress();
             });
 
             child.on('close', (code: number | null) => {
@@ -1335,7 +1271,6 @@ export default class CrossPlayerPlugin extends Plugin {
                 if (code === 0) {
                     downloadStatus.status = 'completed';
                     downloadStatus.progress = '100%';
-                    this.downloadSession.completed++;
                     console.log(`Download completed for: ${downloadStatus.name}`);
 
                     // Refresh watched folder after a slight delay to let Obsidian see the file
@@ -1353,13 +1288,12 @@ export default class CrossPlayerPlugin extends Plugin {
                 }
 
                 downloadStatus.childProcess = undefined;
-                this.debouncedUpdateDownloadProgress();
-                this.processDownloadQueue();
+                this.listView?.updateDownloadProgress();
 
                 if (downloadStatus.status === 'completed') {
                     setTimeout(() => {
                         this.activeDownloads = this.activeDownloads.filter(d => d.id !== downloadId);
-                        this.debouncedUpdateDownloadProgress();
+                        this.listView?.updateDownloadProgress();
                     }, 5000);
                 }
             });
@@ -1369,7 +1303,7 @@ export default class CrossPlayerPlugin extends Plugin {
             new Notice(`Failed to download: ${link}`);
             downloadStatus.status = 'error';
             downloadStatus.error = 'Failed to start';
-            this.debouncedUpdateDownloadProgress();
+            this.listView?.updateDownloadProgress();
         }
     }
 
@@ -1380,8 +1314,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 dl.childProcess.kill();
             }
             this.activeDownloads = this.activeDownloads.filter(d => d.id !== id);
-            this.debouncedUpdateDownloadProgress();
-            this.processDownloadQueue();
+            this.listView?.updateDownloadProgress();
             new Notice("Download cancelled");
         }
     }
@@ -1391,8 +1324,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (dl && dl.childProcess) {
             dl.status = 'paused';
             dl.childProcess.kill(); // Kill process to stop download
-            this.debouncedUpdateDownloadProgress();
-            this.processDownloadQueue();
+            this.listView?.updateDownloadProgress();
         }
     }
 
@@ -1417,9 +1349,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 return;
             }
 
-            this.queueDownload(url, quality, type, absolutePath);
-            // Remove the old error entry
-            this.activeDownloads = this.activeDownloads.filter(d => d.id !== id);
+            this.startDownload(url, quality, type, absolutePath, id);
         }
     }
 
@@ -1429,9 +1359,21 @@ export default class CrossPlayerPlugin extends Plugin {
 
         const dl = this.activeDownloads.find(d => d.id === id);
         if (dl && dl.params) {
-            dl.status = 'queued';
-            this.debouncedUpdateDownloadProgress();
-            this.processDownloadQueue();
+            const { downloadFolder, watchedFolder } = this.data.settings;
+            const targetFolder = downloadFolder || watchedFolder;
+
+            // Re-resolve path
+            // @ts-ignore
+            const adapter = this.app.vault.adapter;
+            let absolutePath: string = "";
+            if (adapter instanceof Object && 'getBasePath' in adapter) {
+                // @ts-ignore
+                absolutePath = path.join(adapter.getBasePath(), targetFolder);
+            }
+
+            if (absolutePath) {
+                this.startDownload(dl.params.url, dl.params.quality, dl.params.type, absolutePath, id);
+            }
         }
     }
 }
@@ -1519,12 +1461,10 @@ class YouTubeDownloadModal extends Modal {
                     }
 
                     if (videoList.length > 0) {
-                        this.plugin.downloadSession.total += videoList.length;
                         this.plugin.downloadVideos(videoList, this.quality, 'video');
                     }
 
                     if (audioList.length > 0) {
-                        this.plugin.downloadSession.total += audioList.length;
                         this.plugin.downloadVideos(audioList, this.quality, 'audio');
                     }
 
@@ -2113,8 +2053,10 @@ class CrossPlayerListView extends ItemView {
 
         const activeDownloads = this.plugin.activeDownloads;
         if (activeDownloads.length === 0) {
-            this.plugin.downloadSession.total = 0;
-            this.plugin.downloadSession.completed = 0;
+            // Collapsed or hidden state? 
+            // If empty, maybe just hide content but keep header? 
+            // Or hide completely? User said "collapsible towards the bottom". 
+            // If no downloads, usually hidden.
             container.style.display = 'none';
             return;
         } else {
@@ -2161,26 +2103,28 @@ class CrossPlayerListView extends ItemView {
 
         // Global Progress Bar
         if (activeDownloads.length > 0) {
-            let sumActiveProgress = 0;
+            let totalProgress = 0;
+            let count = 0;
             activeDownloads.forEach(d => {
-                if (d.status !== 'completed' && d.progress.includes('%')) {
-                    sumActiveProgress += parseFloat(d.progress) || 0;
+                if (d.status === 'completed') {
+                    totalProgress += 100;
+                    count++;
+                } else if (d.progress.includes('%')) {
+                    totalProgress += parseFloat(d.progress) || 0;
+                    count++;
+                } else if (d.status === 'downloading' || d.status === 'paused') {
+                    // if progress not yet parsed, assume 0
+                    count++;
                 }
             });
-
-            const session = this.plugin.downloadSession;
-            if (session.total < activeDownloads.length) session.total = activeDownloads.length;
-
-            const avgProgress = session.total > 0
-                ? (session.completed * 100 + sumActiveProgress) / session.total
-                : 0;
+            const avgProgress = count > 0 ? totalProgress / count : 0;
 
             const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
-            globalProgressContainer.createDiv({ text: `Total Progress: ${Math.min(100, avgProgress).toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
+            globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
             const globalBar = globalProgressContainer.createEl("progress");
             globalBar.style.width = "100%";
             globalBar.style.height = "8px";
-            globalBar.value = Math.min(100, avgProgress);
+            globalBar.value = avgProgress;
             globalBar.max = 100;
         }
 
@@ -2199,7 +2143,6 @@ class CrossPlayerListView extends ItemView {
             if (dl.status === 'error') statusText = 'Error';
             else if (dl.status === 'paused') statusText = 'Paused';
             else if (dl.status === 'converting') statusText = 'Converting...';
-            else if (dl.status === 'queued') statusText = 'Queued';
 
             nameRow.createSpan({ text: statusText });
 
@@ -2221,9 +2164,7 @@ class CrossPlayerListView extends ItemView {
             if (dl.status === 'downloading') {
                 info.setText(`${dl.speed} - ETA: ${dl.eta}`);
             } else if (dl.status === 'converting') {
-                info.setText('Finalizing...');
-            } else if (dl.status === 'queued') {
-                info.setText('Waiting in queue...');
+                info.setText('Processing media...');
             } else if (dl.status === 'error') {
                 info.setText(dl.error || "Unknown Error");
                 info.style.color = "var(--text-error)";
