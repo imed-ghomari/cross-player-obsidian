@@ -2292,8 +2292,7 @@ var DEFAULT_SETTINGS = {
   storageLimitGB: 10,
   autoplayNext: true,
   showProgressColor: true,
-  pauseOnMobileTap: true,
-  maxConcurrentDownloads: 2
+  pauseOnMobileTap: true
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -2308,11 +2307,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.dynamicStorageLimit = 0;
     // bytes
     this.limitingDevice = "";
-    // Track download session for consistent progress bar
-    this.downloadSession = {
-      total: 0,
-      completed: 0
-    };
   }
   async onload() {
     await this.loadData();
@@ -2320,11 +2314,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.debouncedUpdateDeviceStatus = (0, import_obsidian.debounce)(async () => {
       await this.updateDeviceStatus();
     }, 2e3, true);
-    this.debouncedUpdateDownloadProgress = (0, import_obsidian.debounce)(() => {
-      if (this.listView) {
-        this.listView.updateDownloadProgress();
-      }
-    }, 300, true);
     this.addCommand({
       id: "test-yt-dlp",
       name: "Test yt-dlp Configuration",
@@ -3115,50 +3104,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     for (const link of links) {
       if (!link.trim())
         continue;
-      this.queueDownload(link.trim(), quality, type, absolutePath);
-    }
-  }
-  queueDownload(link, quality, type, cwd) {
-    const downloadId = Math.random().toString(36).substring(7);
-    let initialName = link;
-    try {
-      const url = new URL(link);
-      if (url.hostname.includes("youtube.com") || url.hostname.includes("youtu.be")) {
-        const v = url.searchParams.get("v");
-        if (v)
-          initialName = `YouTube: ${v}`;
-        else if (url.pathname.length > 1)
-          initialName = `YouTube: ${url.pathname.substring(1)}`;
-      }
-    } catch (e) {
-    }
-    const downloadStatus = {
-      id: downloadId,
-      name: initialName,
-      progress: "0%",
-      speed: "0",
-      eta: "?",
-      status: "queued",
-      params: { url: link, quality, type, cwd }
-    };
-    this.activeDownloads.push(downloadStatus);
-    this.debouncedUpdateDownloadProgress();
-    this.processDownloadQueue();
-  }
-  async processDownloadQueue() {
-    if (!import_obsidian.Platform.isDesktop)
-      return;
-    const downloadingCount = this.activeDownloads.filter((d) => d.status === "downloading" || d.status === "converting").length;
-    const maxConcurrent = this.data.settings.maxConcurrentDownloads || 2;
-    if (downloadingCount >= maxConcurrent)
-      return;
-    const nextInQueue = this.activeDownloads.find((d) => d.status === "queued");
-    if (nextInQueue && nextInQueue.params) {
-      const { url, quality, type, cwd } = nextInQueue.params;
-      this.startDownload(url, quality, type, cwd, nextInQueue.id);
+      this.startDownload(link.trim(), quality, type, absolutePath);
     }
   }
   async startDownload(link, quality, type, cwd, existingId) {
+    var _a, _b;
     if (!import_obsidian.Platform.isDesktop)
       return;
     const { youtubeDlpPath, ffmpegPath, jsRuntimePath } = this.data.settings;
@@ -3182,14 +3132,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         speed: "0",
         eta: "?",
         status: "downloading",
-        params: { url: link, quality, type, cwd }
+        params: { url: link, quality, type }
       };
       this.activeDownloads.push(downloadStatus);
     }
-    this.debouncedUpdateDownloadProgress();
+    (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
     let args = [
-      "--print",
-      "title",
       link,
       "-o",
       "%(title)s.%(ext)s",
@@ -3197,6 +3145,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       "--newline",
       "--restrict-filenames",
       "--no-mtime",
+      "--extractor-args",
+      "youtube:player_client=android_vr",
       "--js-runtimes",
       jsRuntimePath ? `node:${jsRuntimePath}` : "node",
       "--format-sort",
@@ -3230,14 +3180,13 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const child = spawn(ytPath, args, { cwd, env });
       downloadStatus.childProcess = child;
       child.stdout.on("data", (data) => {
+        var _a2, _b2, _c, _d;
         const lines = data.toString().split("\n");
         for (const line of lines) {
           const trimmedLine = line.trim();
-          if (trimmedLine && !trimmedLine.startsWith("[") && !trimmedLine.includes(" ") && trimmedLine.length < 50 && downloadStatus.name.includes("YouTube:")) {
-          }
-          if (trimmedLine && !trimmedLine.startsWith("[") && (downloadStatus.name.includes("http") || downloadStatus.name.includes("YouTube:"))) {
+          if (trimmedLine && !trimmedLine.startsWith("[") && downloadStatus.name === link) {
             downloadStatus.name = trimmedLine;
-            this.debouncedUpdateDownloadProgress();
+            (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
           }
           if (line.includes("[download]")) {
             const percentMatch = line.match(/(\d+\.\d+)%/);
@@ -3256,7 +3205,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             if (etaMatch) {
               downloadStatus.eta = etaMatch[1];
             }
-            this.debouncedUpdateDownloadProgress();
+            (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
           }
           if (line.includes("[youtube]")) {
           }
@@ -3272,7 +3221,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
               const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
               downloadStatus.name = nameWithoutExt;
             }
-            this.debouncedUpdateDownloadProgress();
+            (_c = this.listView) == null ? void 0 : _c.updateDownloadProgress();
           }
           if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
             downloadStatus.status = "converting";
@@ -3282,33 +3231,34 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
               const nameWithoutExt = destMatch[1].replace(/\.[^/.]+$/, "");
               downloadStatus.name = nameWithoutExt;
             }
-            this.debouncedUpdateDownloadProgress();
+            (_d = this.listView) == null ? void 0 : _d.updateDownloadProgress();
           }
         }
       });
       child.stderr.on("data", (data) => {
+        var _a2;
         const errorMsg = data.toString();
         console.error(`yt-dlp stderr: ${errorMsg}`);
         if (errorMsg.includes("HTTP Error 400") || errorMsg.includes("Precondition check failed") || errorMsg.includes("Unable to extract")) {
           downloadStatus.error = "Update yt-dlp!";
           downloadStatus.status = "error";
-          this.debouncedUpdateDownloadProgress();
+          (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
         } else if (errorMsg.includes("ffmpeg-location") && errorMsg.includes("does not exist")) {
           console.warn("FFmpeg path invalid");
         }
       });
       child.on("error", (err) => {
+        var _a2;
         console.error("Failed to start process", err);
         downloadStatus.status = "error";
         downloadStatus.error = err.message;
-        this.debouncedUpdateDownloadProgress();
-        this.processDownloadQueue();
+        (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
       });
       child.on("close", (code) => {
+        var _a2;
         if (code === 0) {
           downloadStatus.status = "completed";
           downloadStatus.progress = "100%";
-          this.downloadSession.completed++;
           console.log(`Download completed for: ${downloadStatus.name}`);
           const { watchedFolder } = this.data.settings;
           if (watchedFolder) {
@@ -3321,12 +3271,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           downloadStatus.error = `Exit code ${code}`;
         }
         downloadStatus.childProcess = void 0;
-        this.debouncedUpdateDownloadProgress();
-        this.processDownloadQueue();
+        (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
         if (downloadStatus.status === "completed") {
           setTimeout(() => {
+            var _a3;
             this.activeDownloads = this.activeDownloads.filter((d) => d.id !== downloadId);
-            this.debouncedUpdateDownloadProgress();
+            (_a3 = this.listView) == null ? void 0 : _a3.updateDownloadProgress();
           }, 5e3);
         }
       });
@@ -3335,28 +3285,28 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(`Failed to download: ${link}`);
       downloadStatus.status = "error";
       downloadStatus.error = "Failed to start";
-      this.debouncedUpdateDownloadProgress();
+      (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
     }
   }
   cancelDownload(id) {
+    var _a;
     const dl = this.activeDownloads.find((d) => d.id === id);
     if (dl) {
       if (dl.childProcess) {
         dl.childProcess.kill();
       }
       this.activeDownloads = this.activeDownloads.filter((d) => d.id !== id);
-      this.debouncedUpdateDownloadProgress();
-      this.processDownloadQueue();
+      (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
       new import_obsidian.Notice("Download cancelled");
     }
   }
   pauseDownload(id) {
+    var _a;
     const dl = this.activeDownloads.find((d) => d.id === id);
     if (dl && dl.childProcess) {
       dl.status = "paused";
       dl.childProcess.kill();
-      this.debouncedUpdateDownloadProgress();
-      this.processDownloadQueue();
+      (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
     }
   }
   retryDownload(id) {
@@ -3374,8 +3324,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice("Could not resolve absolute path for vault.");
         return;
       }
-      this.queueDownload(url, quality, type, absolutePath);
-      this.activeDownloads = this.activeDownloads.filter((d) => d.id !== id);
+      this.startDownload(url, quality, type, absolutePath, id);
     }
   }
   resumeDownload(id) {
@@ -3384,9 +3333,16 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const path = require("path");
     const dl = this.activeDownloads.find((d) => d.id === id);
     if (dl && dl.params) {
-      dl.status = "queued";
-      this.debouncedUpdateDownloadProgress();
-      this.processDownloadQueue();
+      const { downloadFolder, watchedFolder } = this.data.settings;
+      const targetFolder = downloadFolder || watchedFolder;
+      const adapter = this.app.vault.adapter;
+      let absolutePath = "";
+      if (adapter instanceof Object && "getBasePath" in adapter) {
+        absolutePath = path.join(adapter.getBasePath(), targetFolder);
+      }
+      if (absolutePath) {
+        this.startDownload(dl.params.url, dl.params.quality, dl.params.type, absolutePath, id);
+      }
     }
   }
 };
@@ -3431,11 +3387,9 @@ var YouTubeDownloadModal = class extends import_obsidian.Modal {
         return;
       }
       if (videoList.length > 0) {
-        this.plugin.downloadSession.total += videoList.length;
         this.plugin.downloadVideos(videoList, this.quality, "video");
       }
       if (audioList.length > 0) {
-        this.plugin.downloadSession.total += audioList.length;
         this.plugin.downloadVideos(audioList, this.quality, "audio");
       }
       this.close();
@@ -3798,8 +3752,6 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     container.empty();
     const activeDownloads = this.plugin.activeDownloads;
     if (activeDownloads.length === 0) {
-      this.plugin.downloadSession.total = 0;
-      this.plugin.downloadSession.completed = 0;
       container.style.display = "none";
       return;
     } else {
@@ -3834,22 +3786,26 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       }
     };
     if (activeDownloads.length > 0) {
-      let sumActiveProgress = 0;
+      let totalProgress = 0;
+      let count = 0;
       activeDownloads.forEach((d) => {
-        if (d.status !== "completed" && d.progress.includes("%")) {
-          sumActiveProgress += parseFloat(d.progress) || 0;
+        if (d.status === "completed") {
+          totalProgress += 100;
+          count++;
+        } else if (d.progress.includes("%")) {
+          totalProgress += parseFloat(d.progress) || 0;
+          count++;
+        } else if (d.status === "downloading" || d.status === "paused") {
+          count++;
         }
       });
-      const session = this.plugin.downloadSession;
-      if (session.total < activeDownloads.length)
-        session.total = activeDownloads.length;
-      const avgProgress = session.total > 0 ? (session.completed * 100 + sumActiveProgress) / session.total : 0;
+      const avgProgress = count > 0 ? totalProgress / count : 0;
       const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
-      globalProgressContainer.createDiv({ text: `Total Progress: ${Math.min(100, avgProgress).toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
+      globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
       const globalBar = globalProgressContainer.createEl("progress");
       globalBar.style.width = "100%";
       globalBar.style.height = "8px";
-      globalBar.value = Math.min(100, avgProgress);
+      globalBar.value = avgProgress;
       globalBar.max = 100;
     }
     activeDownloads.forEach((dl) => {
@@ -3867,8 +3823,6 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         statusText = "Paused";
       else if (dl.status === "converting")
         statusText = "Converting...";
-      else if (dl.status === "queued")
-        statusText = "Queued";
       nameRow.createSpan({ text: statusText });
       const progressBar = dlItem.createEl("progress");
       progressBar.style.width = "100%";
@@ -3884,9 +3838,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       if (dl.status === "downloading") {
         info.setText(`${dl.speed} - ETA: ${dl.eta}`);
       } else if (dl.status === "converting") {
-        info.setText("Finalizing...");
-      } else if (dl.status === "queued") {
-        info.setText("Waiting in queue...");
+        info.setText("Processing media...");
       } else if (dl.status === "error") {
         info.setText(dl.error || "Unknown Error");
         info.style.color = "var(--text-error)";

@@ -1137,6 +1137,7 @@ export default class CrossPlayerPlugin extends Plugin {
             '--newline',
             '--restrict-filenames',
             '--no-mtime',
+            '--extractor-args', 'youtube:player_client=android_vr',
             '--js-runtimes', jsRuntimePath ? `node:${jsRuntimePath}` : 'node',
             '--format-sort', 'ext:mp4:m4a'
         ];
