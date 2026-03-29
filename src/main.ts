@@ -690,7 +690,7 @@ export default class CrossPlayerPlugin extends Plugin {
         console.log(`[Cross Player] processing: ${file.path}`);
 
         const ext = file.extension.toLowerCase();
-        const validExtensions = ['mp4', 'webm', 'ogv', 'mp3', 'wav', 'ogg', 'mkv', 'm4a', '3gp', 'flac', 'aac'];
+        const validExtensions = ['mp4', 'webm', 'ogv', 'mp3', 'wav', 'ogg', 'opus', 'mkv', 'm4a', '3gp', 'flac', 'aac'];
 
         if (!validExtensions.includes(ext)) return;
 
@@ -1897,7 +1897,7 @@ class CrossPlayerListView extends ItemView {
             if (this.plugin.data.settings.showMediaIndicator) {
                 const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
                 const ext = item.path.split('.').pop()?.toLowerCase();
-                const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '');
+                const isAudio = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'aac', 'flac'].includes(ext || '');
                 setIcon(typeIcon, isAudio ? "headphones" : "film");
                 typeIcon.style.marginRight = "10px";
                 typeIcon.style.color = "var(--text-muted)";
@@ -2708,7 +2708,7 @@ class CrossPlayerMainView extends ItemView {
 
         // Handle Audio vs Video UI
         const ext = item.path.split('.').pop()?.toLowerCase();
-        const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext || '');
+        const isAudio = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'aac', 'flac'].includes(ext || '');
 
         if (isAudio) {
             // Show audio placeholder

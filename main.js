@@ -2779,7 +2779,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return;
     console.log(`[Cross Player] processing: ${file.path}`);
     const ext = file.extension.toLowerCase();
-    const validExtensions = ["mp4", "webm", "ogv", "mp3", "wav", "ogg", "mkv", "m4a", "3gp", "flac", "aac"];
+    const validExtensions = ["mp4", "webm", "ogv", "mp3", "wav", "ogg", "opus", "mkv", "m4a", "3gp", "flac", "aac"];
     if (!validExtensions.includes(ext))
       return;
     let existing = this.data.queue.find((item) => item.path === file.path);
@@ -3647,7 +3647,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       if (this.plugin.data.settings.showMediaIndicator) {
         const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
         const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
-        const isAudio = ["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(ext || "");
+        const isAudio = ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac"].includes(ext || "");
         (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
         typeIcon.style.marginRight = "10px";
         typeIcon.style.color = "var(--text-muted)";
@@ -4254,7 +4254,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.videoEl.currentTime = resumePosition || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
-    const isAudio = ["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(ext || "");
+    const isAudio = ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac"].includes(ext || "");
     if (isAudio) {
       if (!this.audioPlaceholderEl) {
         this.audioPlaceholderEl = this.contentEl.createDiv({ cls: "cross-player-audio-placeholder" });
