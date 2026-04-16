@@ -4142,6 +4142,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.registerDomEvent(document, "fullscreenchange", () => {
       window.setTimeout(() => this.refreshMobileOverlay(), 50);
     });
+    this.showIdlePlaceholder();
     this.refreshMobileOverlay();
     this.videoEl.onended = async () => {
       if (this.currentItem) {
@@ -4583,6 +4584,95 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   styleBigButton(btn) {
     btn.addClass("cross-player-overlay-btn");
   }
+  ensurePlaceholderContainer() {
+    if (!this.audioPlaceholderEl) {
+      this.audioPlaceholderEl = this.contentEl.createDiv({ cls: "cross-player-audio-placeholder" });
+      this.audioPlaceholderEl.style.position = "absolute";
+      this.audioPlaceholderEl.style.top = "0";
+      this.audioPlaceholderEl.style.left = "0";
+      this.audioPlaceholderEl.style.width = "100%";
+      this.audioPlaceholderEl.style.height = "100%";
+      this.audioPlaceholderEl.style.display = "flex";
+      this.audioPlaceholderEl.style.flexDirection = "column";
+      this.audioPlaceholderEl.style.justifyContent = "center";
+      this.audioPlaceholderEl.style.alignItems = "center";
+      this.audioPlaceholderEl.style.gap = "16px";
+      this.audioPlaceholderEl.style.padding = "32px";
+      this.audioPlaceholderEl.style.zIndex = "1";
+      this.audioPlaceholderEl.style.background = "radial-gradient(circle at top, var(--background-secondary), var(--background-primary))";
+      this.audioPlaceholderEl.style.textAlign = "center";
+    } else {
+      this.audioPlaceholderEl.style.display = "flex";
+      this.audioPlaceholderEl.empty();
+    }
+  }
+  showIdlePlaceholder() {
+    this.ensurePlaceholderContainer();
+    if (!this.audioPlaceholderEl || !this.videoEl)
+      return;
+    const badge = this.audioPlaceholderEl.createDiv();
+    badge.style.width = "96px";
+    badge.style.height = "96px";
+    badge.style.borderRadius = "28px";
+    badge.style.display = "flex";
+    badge.style.alignItems = "center";
+    badge.style.justifyContent = "center";
+    badge.style.background = "var(--interactive-normal)";
+    badge.style.border = "1px solid var(--background-modifier-border)";
+    badge.style.boxShadow = "0 18px 48px rgba(0, 0, 0, 0.16)";
+    const iconEl = badge.createDiv();
+    (0, import_obsidian.setIcon)(iconEl, "play-circle");
+    iconEl.style.width = "44px";
+    iconEl.style.height = "44px";
+    iconEl.style.color = "var(--text-muted)";
+    const svg = iconEl.querySelector("svg");
+    if (svg) {
+      svg.style.width = "100%";
+      svg.style.height = "100%";
+    }
+    const titleEl = this.audioPlaceholderEl.createDiv({ text: "Nothing is playing" });
+    titleEl.style.fontSize = "1.1rem";
+    titleEl.style.fontWeight = "600";
+    titleEl.style.color = "var(--text-normal)";
+    const descEl = this.audioPlaceholderEl.createDiv({ text: "Pick something from the queue to start playback." });
+    descEl.style.maxWidth = "280px";
+    descEl.style.fontSize = "0.95rem";
+    descEl.style.lineHeight = "1.5";
+    descEl.style.color = "var(--text-muted)";
+    this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    this.videoEl.style.opacity = "0";
+    this.videoEl.style.pointerEvents = "none";
+    this.videoEl.style.background = "transparent";
+  }
+  showAudioPlaceholder() {
+    this.ensurePlaceholderContainer();
+    if (!this.audioPlaceholderEl || !this.videoEl)
+      return;
+    const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: "cross-player-music-icon" });
+    (0, import_obsidian.setIcon)(musicIconEl, "music");
+    musicIconEl.style.width = "120px";
+    musicIconEl.style.height = "120px";
+    musicIconEl.style.color = "var(--text-muted)";
+    musicIconEl.style.opacity = "0.2";
+    const svg = musicIconEl.querySelector("svg");
+    if (svg) {
+      svg.style.width = "100%";
+      svg.style.height = "100%";
+    }
+    this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+    this.videoEl.style.opacity = "1";
+    this.videoEl.style.pointerEvents = "auto";
+    this.videoEl.style.background = "transparent";
+  }
+  hidePlaceholder() {
+    if (this.audioPlaceholderEl) {
+      this.audioPlaceholderEl.style.display = "none";
+    }
+    if (this.videoEl) {
+      this.videoEl.style.opacity = "1";
+      this.videoEl.style.pointerEvents = "auto";
+    }
+  }
   async stop() {
     if (this.videoEl) {
       this.videoEl.pause();
@@ -4594,6 +4684,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.videoEl.load();
     }
     this.currentItem = null;
+    this.showIdlePlaceholder();
   }
   async play(item, autoPlay = false) {
     var _a;
@@ -4658,6 +4749,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
     } else {
       console.error("File not found for playback:", item.path);
+      this.showIdlePlaceholder();
       return false;
     }
     const resumePosition = item.position > 2 ? item.position - 2 : item.position;
@@ -4667,44 +4759,14 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
     const isAudio = ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac"].includes(ext || "");
     if (isAudio) {
-      if (!this.audioPlaceholderEl) {
-        this.audioPlaceholderEl = this.contentEl.createDiv({ cls: "cross-player-audio-placeholder" });
-        this.audioPlaceholderEl.style.position = "absolute";
-        this.audioPlaceholderEl.style.top = "0";
-        this.audioPlaceholderEl.style.left = "0";
-        this.audioPlaceholderEl.style.width = "100%";
-        this.audioPlaceholderEl.style.height = "100%";
-        this.audioPlaceholderEl.style.display = "flex";
-        this.audioPlaceholderEl.style.flexDirection = "column";
-        this.audioPlaceholderEl.style.justifyContent = "center";
-        this.audioPlaceholderEl.style.alignItems = "center";
-        this.audioPlaceholderEl.style.zIndex = "1";
-        this.audioPlaceholderEl.style.backgroundColor = "var(--background-primary)";
-      } else {
-        this.audioPlaceholderEl.style.display = "flex";
-        this.audioPlaceholderEl.empty();
-      }
-      const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: "cross-player-music-icon" });
-      (0, import_obsidian.setIcon)(musicIconEl, "music");
-      musicIconEl.style.width = "120px";
-      musicIconEl.style.height = "120px";
-      musicIconEl.style.color = "var(--text-muted)";
-      musicIconEl.style.opacity = "0.2";
-      const svg = musicIconEl.querySelector("svg");
-      if (svg) {
-        svg.style.width = "100%";
-        svg.style.height = "100%";
-      }
-      this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+      this.showAudioPlaceholder();
       this.videoEl.style.height = "50px";
       this.videoEl.style.position = "absolute";
       this.videoEl.style.bottom = "0";
       this.videoEl.style.zIndex = "5";
       this.videoEl.style.background = "transparent";
     } else {
-      if (this.audioPlaceholderEl) {
-        this.audioPlaceholderEl.style.display = "none";
-      }
+      this.hidePlaceholder();
       this.videoEl.poster = "";
       this.videoEl.style.background = "";
       this.videoEl.style.height = "100%";
