@@ -4347,6 +4347,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     progressBar.style.margin = "0";
     progressBar.style.accentColor = "var(--interactive-accent)";
     progressBar.style.touchAction = "none";
+    progressBar.style.height = "6px";
+    progressBar.style.borderRadius = "999px";
+    progressBar.style.setProperty("-webkit-appearance", "none");
+    progressBar.style.appearance = "none";
+    progressBar.style.outline = "none";
+    progressBar.style.border = "none";
     this.overlayProgressEl = progressBar;
     const durationEl = progressWrap.createSpan({ text: "0:00" });
     durationEl.style.minWidth = "40px";
@@ -4481,6 +4487,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (!this.overlayProgressEl || !this.videoEl || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
       if (this.overlayProgressEl) {
         this.overlayProgressEl.value = "0";
+        this.updateOverlayProgressTrack(0);
       }
       if (this.overlayCurrentTimeEl) {
         this.overlayCurrentTimeEl.setText("0:00");
@@ -4495,6 +4502,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
     const pct = Math.min(1, Math.max(0, this.videoEl.currentTime / this.videoEl.duration));
     this.overlayProgressEl.value = String(Math.round(pct * 1e3));
+    this.updateOverlayProgressTrack(pct);
     if (this.overlayCurrentTimeEl) {
       this.overlayCurrentTimeEl.setText(this.formatPlaybackTime(this.videoEl.currentTime));
     }
@@ -4504,6 +4512,17 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (this.overlayFullscreenBtn) {
       (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
     }
+  }
+  updateOverlayProgressTrack(progress) {
+    if (!this.overlayProgressEl)
+      return;
+    const normalized = Math.min(1, Math.max(0, progress));
+    const percent = (normalized * 100).toFixed(2);
+    const isDarkTheme = document.body.classList.contains("theme-dark");
+    const fillColor = "var(--interactive-accent)";
+    const trackColor = isDarkTheme ? "rgba(255, 255, 255, 0.22)" : "rgba(0, 0, 0, 0.10)";
+    this.overlayProgressEl.style.background = `linear-gradient(to right, ${fillColor} 0%, ${fillColor} ${percent}%, ${trackColor} ${percent}%, ${trackColor} 100%)`;
+    this.overlayProgressEl.style.boxShadow = isDarkTheme ? "0 0 0 1px rgba(255, 255, 255, 0.05) inset" : "none";
   }
   formatPlaybackTime(seconds) {
     if (!isFinite(seconds) || seconds < 0)
