@@ -43,6 +43,8 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 - **Quality Options**: Choose between Video (Best, 1080p, 720p, 480p) or Audio-only (mp3).
 - **Collapsible Progress**: Monitor active downloads in a dedicated, collapsible section at the bottom of the queue.
 
+> For Android users, please note that you should use the Seal app (JunkFood02/Seal) for downloading YouTube videos, as this feature does not work on mobile.
+
 ### 🧹 Maintenance
 - **Clean Consumed**: One-click command to delete all completed files from disk to free up space.
 - **Storage Limits**: Set a maximum storage limit (GB) to get visual warnings when your queue gets too big.
