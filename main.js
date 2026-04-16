@@ -4134,7 +4134,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.videoWrapperEl.style.justifyContent = "center";
     this.videoWrapperEl.style.alignItems = "center";
     this.videoEl = this.videoWrapperEl.createEl("video");
-    this.videoEl.controls = !import_obsidian.Platform.isMobile;
+    this.videoEl.controls = !this.shouldUseTouchOverlay();
     this.videoEl.style.maxWidth = "100%";
     this.videoEl.style.maxHeight = "100%";
     this.videoEl.style.width = "100%";
@@ -4195,7 +4195,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   }
   refreshMobileOverlay() {
     const container = this.videoWrapperEl || this.contentEl;
-    const shouldShow = import_obsidian.Platform.isMobile;
+    const shouldShow = this.shouldUseTouchOverlay();
     if (!shouldShow) {
       if (this.overlayEl) {
         this.overlayEl.remove();
@@ -4258,51 +4258,66 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         this.mobileOverlayHideTimeout = null;
       }
     };
-    let touchStartTime = 0;
-    let touchStartX = 0;
-    let touchStartY = 0;
-    let isScrolling = false;
-    const onTouchStart = (e) => {
-      touchStartTime = Date.now();
-      touchStartX = e.touches[0].clientX;
-      touchStartY = e.touches[0].clientY;
-      isScrolling = false;
+    let pointerStartTime = 0;
+    let pointerStartX = 0;
+    let pointerStartY = 0;
+    let pointerMoved = false;
+    const isOverlayControlTarget = (target) => {
+      if (!target)
+        return false;
+      return Boolean(
+        target.closest(".cross-player-big-btn") || target.closest(".cross-player-overlay-progress") || target.closest(".cross-player-overlay-progress-wrap")
+      );
     };
-    const onTouchMove = (e) => {
-      if (Math.abs(e.touches[0].clientX - touchStartX) > 10 || Math.abs(e.touches[0].clientY - touchStartY) > 10) {
-        isScrolling = true;
-      }
-    };
-    const onTouchEnd = (e) => {
-      if (isScrolling)
-        return;
-      if (Date.now() - touchStartTime > 500)
-        return;
-      const target = e.target;
+    const handlePlayerTap = (target, event) => {
       if (overlay.style.opacity === "0") {
-        e.preventDefault();
-        e.stopPropagation();
-        if (this.plugin.data.settings.pauseOnMobileTap) {
-          if (!this.videoEl.paused) {
-            this.videoEl.pause();
-            const playBtn = overlay.querySelector(".play-btn");
-            if (playBtn)
-              (0, import_obsidian.setIcon)(playBtn, "play");
-          }
+        event.preventDefault();
+        event.stopPropagation();
+        if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
+          this.videoEl.pause();
+          const playBtn = overlay.querySelector(".play-btn");
+          if (playBtn)
+            (0, import_obsidian.setIcon)(playBtn, "play");
         }
         showOverlay();
-      } else {
-        if (target.closest(".cross-player-big-btn") || target.closest(".cross-player-overlay-progress") || target.closest(".cross-player-overlay-progress-wrap")) {
-          return;
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        hideOverlay();
+        return;
+      }
+      if (isOverlayControlTarget(target)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      hideOverlay();
+    };
+    const onPointerDown = (e) => {
+      if (!e.isPrimary)
+        return;
+      pointerStartTime = Date.now();
+      pointerStartX = e.clientX;
+      pointerStartY = e.clientY;
+      pointerMoved = false;
+    };
+    const onPointerMove = (e) => {
+      if (!e.isPrimary)
+        return;
+      if (Math.abs(e.clientX - pointerStartX) > 10 || Math.abs(e.clientY - pointerStartY) > 10) {
+        pointerMoved = true;
       }
     };
-    container.addEventListener("touchstart", onTouchStart, { capture: true });
-    container.addEventListener("touchmove", onTouchMove, { capture: true });
-    container.addEventListener("touchend", onTouchEnd, { capture: true });
+    const onPointerUp = (e) => {
+      if (!e.isPrimary || pointerMoved)
+        return;
+      if (Date.now() - pointerStartTime > 500)
+        return;
+      handlePlayerTap(e.target, e);
+    };
+    const onPointerCancel = () => {
+      pointerMoved = true;
+    };
+    container.addEventListener("pointerdown", onPointerDown);
+    container.addEventListener("pointermove", onPointerMove);
+    container.addEventListener("pointerup", onPointerUp);
+    container.addEventListener("pointercancel", onPointerCancel);
     if (this.videoEl) {
       this.videoEl.onclick = null;
     }
@@ -4584,9 +4599,18 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   styleBigButton(btn) {
     btn.addClass("cross-player-overlay-btn");
   }
+  shouldUseTouchOverlay() {
+    return import_obsidian.Platform.isMobile || import_obsidian.Platform.isTablet;
+  }
   ensurePlaceholderContainer() {
-    if (!this.audioPlaceholderEl) {
-      this.audioPlaceholderEl = this.contentEl.createDiv({ cls: "cross-player-audio-placeholder" });
+    if (!this.videoWrapperEl)
+      return;
+    const needsNewContainer = !this.audioPlaceholderEl || this.audioPlaceholderEl.parentElement !== this.videoWrapperEl;
+    if (needsNewContainer) {
+      if (this.audioPlaceholderEl) {
+        this.audioPlaceholderEl.remove();
+      }
+      this.audioPlaceholderEl = this.videoWrapperEl.createDiv({ cls: "cross-player-audio-placeholder" });
       this.audioPlaceholderEl.style.position = "absolute";
       this.audioPlaceholderEl.style.top = "0";
       this.audioPlaceholderEl.style.left = "0";
@@ -4601,6 +4625,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.audioPlaceholderEl.style.zIndex = "1";
       this.audioPlaceholderEl.style.background = "radial-gradient(circle at top, var(--background-secondary), var(--background-primary))";
       this.audioPlaceholderEl.style.textAlign = "center";
+      this.audioPlaceholderEl.style.pointerEvents = "none";
     } else {
       this.audioPlaceholderEl.style.display = "flex";
       this.audioPlaceholderEl.empty();
@@ -4698,7 +4723,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (!this.videoEl) {
       const container = this.contentEl;
       this.videoEl = container.createEl("video");
-      this.videoEl.controls = !import_obsidian.Platform.isMobile;
+      this.videoEl.controls = !this.shouldUseTouchOverlay();
       this.videoEl.style.maxWidth = "100%";
       this.videoEl.style.maxHeight = "100%";
       this.videoEl.style.width = "100%";

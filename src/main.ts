@@ -2543,7 +2543,7 @@ class CrossPlayerMainView extends ItemView {
         this.videoWrapperEl.style.alignItems = "center";
 
         this.videoEl = this.videoWrapperEl.createEl("video");
-        this.videoEl.controls = !Platform.isMobile;
+        this.videoEl.controls = !this.shouldUseTouchOverlay();
         this.videoEl.style.maxWidth = "100%";
         this.videoEl.style.maxHeight = "100%";
         this.videoEl.style.width = "100%";
@@ -2626,7 +2626,7 @@ class CrossPlayerMainView extends ItemView {
 
     refreshMobileOverlay() {
         const container = this.videoWrapperEl || this.contentEl;
-        const shouldShow = Platform.isMobile;
+        const shouldShow = this.shouldUseTouchOverlay();
 
         if (!shouldShow) {
             if (this.overlayEl) {
@@ -2698,54 +2698,71 @@ class CrossPlayerMainView extends ItemView {
             }
         };
 
-        let touchStartTime = 0;
-        let touchStartX = 0;
-        let touchStartY = 0;
-        let isScrolling = false;
+        let pointerStartTime = 0;
+        let pointerStartX = 0;
+        let pointerStartY = 0;
+        let pointerMoved = false;
 
-        const onTouchStart = (e: TouchEvent) => {
-            touchStartTime = Date.now();
-            touchStartX = e.touches[0].clientX;
-            touchStartY = e.touches[0].clientY;
-            isScrolling = false;
+        const isOverlayControlTarget = (target: HTMLElement | null) => {
+            if (!target) return false;
+            return Boolean(
+                target.closest('.cross-player-big-btn') ||
+                target.closest('.cross-player-overlay-progress') ||
+                target.closest('.cross-player-overlay-progress-wrap')
+            );
         };
 
-        const onTouchMove = (e: TouchEvent) => {
-            if (Math.abs(e.touches[0].clientX - touchStartX) > 10 ||
-                Math.abs(e.touches[0].clientY - touchStartY) > 10) {
-                isScrolling = true;
-            }
-        };
-
-        const onTouchEnd = (e: TouchEvent) => {
-            if (isScrolling) return;
-            if (Date.now() - touchStartTime > 500) return;
-
-            const target = e.target as HTMLElement;
+        const handlePlayerTap = (target: HTMLElement | null, event: Event) => {
             if (overlay.style.opacity === "0") {
-                e.preventDefault();
-                e.stopPropagation();
-                if (this.plugin.data.settings.pauseOnMobileTap) {
-                    if (!this.videoEl.paused) {
-                        this.videoEl.pause();
-                        const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
-                        if (playBtn) setIcon(playBtn, "play");
-                    }
+                event.preventDefault();
+                event.stopPropagation();
+                if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
+                    this.videoEl.pause();
+                    const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
+                    if (playBtn) setIcon(playBtn, "play");
                 }
                 showOverlay();
-            } else {
-                if (target.closest('.cross-player-big-btn') || target.closest('.cross-player-overlay-progress') || target.closest('.cross-player-overlay-progress-wrap')) {
-                    return;
-                }
-                e.preventDefault();
-                e.stopPropagation();
-                hideOverlay();
+                return;
+            }
+
+            if (isOverlayControlTarget(target)) {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            hideOverlay();
+        };
+
+        const onPointerDown = (e: PointerEvent) => {
+            if (!e.isPrimary) return;
+            pointerStartTime = Date.now();
+            pointerStartX = e.clientX;
+            pointerStartY = e.clientY;
+            pointerMoved = false;
+        };
+
+        const onPointerMove = (e: PointerEvent) => {
+            if (!e.isPrimary) return;
+            if (Math.abs(e.clientX - pointerStartX) > 10 || Math.abs(e.clientY - pointerStartY) > 10) {
+                pointerMoved = true;
             }
         };
 
-        container.addEventListener('touchstart', onTouchStart, { capture: true });
-        container.addEventListener('touchmove', onTouchMove, { capture: true });
-        container.addEventListener('touchend', onTouchEnd, { capture: true });
+        const onPointerUp = (e: PointerEvent) => {
+            if (!e.isPrimary || pointerMoved) return;
+            if (Date.now() - pointerStartTime > 500) return;
+            handlePlayerTap(e.target as HTMLElement, e);
+        };
+
+        const onPointerCancel = () => {
+            pointerMoved = true;
+        };
+
+        container.addEventListener('pointerdown', onPointerDown);
+        container.addEventListener('pointermove', onPointerMove);
+        container.addEventListener('pointerup', onPointerUp);
+        container.addEventListener('pointercancel', onPointerCancel);
 
         if (this.videoEl) {
             this.videoEl.onclick = null;
@@ -3069,9 +3086,19 @@ class CrossPlayerMainView extends ItemView {
         btn.addClass("cross-player-overlay-btn");
     }
 
+    shouldUseTouchOverlay() {
+        return Platform.isMobile || Platform.isTablet;
+    }
+
     ensurePlaceholderContainer() {
-        if (!this.audioPlaceholderEl) {
-            this.audioPlaceholderEl = this.contentEl.createDiv({ cls: 'cross-player-audio-placeholder' });
+        if (!this.videoWrapperEl) return;
+
+        const needsNewContainer = !this.audioPlaceholderEl || this.audioPlaceholderEl.parentElement !== this.videoWrapperEl;
+        if (needsNewContainer) {
+            if (this.audioPlaceholderEl) {
+                this.audioPlaceholderEl.remove();
+            }
+            this.audioPlaceholderEl = this.videoWrapperEl.createDiv({ cls: 'cross-player-audio-placeholder' });
             this.audioPlaceholderEl.style.position = "absolute";
             this.audioPlaceholderEl.style.top = "0";
             this.audioPlaceholderEl.style.left = "0";
@@ -3086,6 +3113,7 @@ class CrossPlayerMainView extends ItemView {
             this.audioPlaceholderEl.style.zIndex = "1";
             this.audioPlaceholderEl.style.background = "radial-gradient(circle at top, var(--background-secondary), var(--background-primary))";
             this.audioPlaceholderEl.style.textAlign = "center";
+            this.audioPlaceholderEl.style.pointerEvents = "none";
         } else {
             this.audioPlaceholderEl.style.display = "flex";
             this.audioPlaceholderEl.empty();
@@ -3204,7 +3232,7 @@ class CrossPlayerMainView extends ItemView {
             // Re-create if missing (unlikely if view is open)
             const container = this.contentEl;
             this.videoEl = container.createEl("video");
-            this.videoEl.controls = !Platform.isMobile;
+            this.videoEl.controls = !this.shouldUseTouchOverlay();
             this.videoEl.style.maxWidth = "100%";
             this.videoEl.style.maxHeight = "100%";
             this.videoEl.style.width = "100%";
