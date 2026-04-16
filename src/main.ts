@@ -1,7 +1,7 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform, debounce } from 'obsidian';
 // @ts-ignore
 // import ffmpegStatic from 'ffmpeg-static';
-import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus } from './types';
+import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus, ConsumptionStatBucket } from './types';
 import Sortable from 'sortablejs';
 import type { ChildProcess } from 'child_process';
 // import * as path from 'path';
@@ -34,7 +34,10 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     storageLimitGB: 10,
     autoplayNext: true,
     showProgressColor: true,
-    pauseOnMobileTap: true
+    pauseOnMobileTap: true,
+    wrapQueueText: false,
+    volumeBoostPercent: 100,
+    soundNormalization: false
 }
 
 export default class CrossPlayerPlugin extends Plugin {
@@ -151,7 +154,7 @@ export default class CrossPlayerPlugin extends Plugin {
         this.addCommand({
             id: 'clean-consumed-media',
             name: 'Clean Consumed Media',
-            callback: () => this.cleanConsumedMedia()
+            callback: () => new ConfirmCleanConsumedMediaModal(this.app, this).open()
         });
 
         this.addCommand({
@@ -448,11 +451,13 @@ export default class CrossPlayerPlugin extends Plugin {
             settings: settings,
             queue: [],
             // Initialize playbackSpeed with default if not present
-            playbackSpeed: settings.defaultPlaybackSpeed
+            playbackSpeed: settings.defaultPlaybackSpeed,
+            consumptionStats: {}
         }, loaded);
 
         // Ensure settings are definitely correct in data object
         this.data.settings = settings;
+        this.data.consumptionStats = this.data.consumptionStats || {};
 
         // Force playbackSpeed to respect default if it's the old default (1.0) and new default is different (2.0)
         // Or if it was never set (which the above assignment handles for new users).
@@ -461,6 +466,76 @@ export default class CrossPlayerPlugin extends Plugin {
         // If I just rely on DEFAULT_SETTINGS, existing users won't see a change if they have saved data.
         // I will trust that `loaded.playbackSpeed` is what the user *last used*.
         // If it's missing, it defaults to settings.defaultPlaybackSpeed.
+    }
+
+    getTodayStatKey(): string {
+        return new Date().toISOString().slice(0, 10);
+    }
+
+    recordConsumption(item: MediaItem) {
+        if (item.countedAsConsumed) return;
+
+        const day = this.getTodayStatKey();
+        const bucket: ConsumptionStatBucket = this.data.consumptionStats?.[day] || {
+            seconds: 0,
+            completedCount: 0
+        };
+
+        bucket.seconds += Math.max(0, Math.round(item.duration || 0));
+        bucket.completedCount += 1;
+
+        this.data.consumptionStats = this.data.consumptionStats || {};
+        this.data.consumptionStats[day] = bucket;
+        item.countedAsConsumed = true;
+        item.consumedAt = day;
+    }
+
+    revertConsumption(item: MediaItem) {
+        if (!item.countedAsConsumed || !item.consumedAt || !this.data.consumptionStats) return;
+
+        const bucket = this.data.consumptionStats[item.consumedAt];
+        if (bucket) {
+            bucket.seconds = Math.max(0, bucket.seconds - Math.max(0, Math.round(item.duration || 0)));
+            bucket.completedCount = Math.max(0, bucket.completedCount - 1);
+
+            if (bucket.seconds === 0 && bucket.completedCount === 0) {
+                delete this.data.consumptionStats[item.consumedAt];
+            } else {
+                this.data.consumptionStats[item.consumedAt] = bucket;
+            }
+        }
+
+        item.countedAsConsumed = false;
+        delete item.consumedAt;
+    }
+
+    getConsumptionSummary(days?: number) {
+        const stats = this.data.consumptionStats || {};
+        const keys = Object.keys(stats).sort();
+        const now = new Date();
+
+        let seconds = 0;
+        let completedCount = 0;
+        let activeDays = 0;
+
+        for (const key of keys) {
+            const bucket = stats[key];
+            if (!bucket) continue;
+
+            if (typeof days === 'number') {
+                const diff = now.getTime() - new Date(`${key}T00:00:00`).getTime();
+                const diffDays = Math.floor(diff / 86400000);
+                if (diffDays < 0 || diffDays >= days) continue;
+            }
+
+            seconds += bucket.seconds || 0;
+            completedCount += bucket.completedCount || 0;
+            if ((bucket.seconds || 0) > 0 || (bucket.completedCount || 0) > 0) {
+                activeDays += 1;
+            }
+        }
+
+        return { seconds, completedCount, activeDays, trackedDays: keys.length };
     }
 
     async saveData(refresh: boolean = true) {
@@ -583,6 +658,15 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         return { totalDuration, totalSize };
+    }
+
+    formatDuration(seconds: number): string {
+        if (!seconds || isNaN(seconds)) return "0s";
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = Math.floor(seconds % 60);
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        return `${m}m ${s}s`;
     }
 
     async handleRename(file: TAbstractFile, oldPath: string) {
@@ -870,9 +954,13 @@ export default class CrossPlayerPlugin extends Plugin {
     async updateStatus(id: string, status: 'pending' | 'playing' | 'completed') {
         const item = this.data.queue.find(i => i.id === id);
         if (item && item.status !== status) {
+            const previousStatus = item.status;
             item.status = status;
             if (status === 'completed') {
                 item.finished = true;
+                this.recordConsumption(item);
+            } else if (previousStatus === 'completed') {
+                // Keep historical stats unless the user explicitly marks it unread.
             }
             await this.saveData();
         }
@@ -1026,6 +1114,7 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         // Update state on the queue item
+        this.revertConsumption(queueItem);
         queueItem.status = 'pending';
         queueItem.finished = false;
         queueItem.position = 0;
@@ -1501,6 +1590,95 @@ class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
     }
 }
 
+class ConfirmCleanConsumedMediaModal extends Modal {
+    plugin: CrossPlayerPlugin;
+
+    constructor(app: App, plugin: CrossPlayerPlugin) {
+        super(app);
+        this.plugin = plugin;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        const completedCount = this.plugin.data.queue.filter(item => item.status === 'completed').length;
+
+        contentEl.empty();
+        contentEl.createEl('h3', { text: 'Clean consumed media?' });
+        contentEl.createEl('p', {
+            text: completedCount > 0
+                ? `This will move ${completedCount} completed media file(s) to the trash and remove them from the queue.`
+                : 'There are no completed media files to clean right now.'
+        });
+
+        const actions = contentEl.createDiv({ cls: 'cross-player-modal-actions' });
+
+        const cancelBtn = actions.createEl('button', { text: completedCount > 0 ? 'Cancel' : 'Close' });
+        cancelBtn.onclick = () => this.close();
+
+        if (completedCount > 0) {
+            const confirmBtn = actions.createEl('button', { text: 'Clean Media', cls: 'mod-warning' });
+            confirmBtn.onclick = async () => {
+                this.close();
+                await this.plugin.cleanConsumedMedia();
+            };
+        }
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
+class ConsumptionStatsModal extends Modal {
+    plugin: CrossPlayerPlugin;
+
+    constructor(app: App, plugin: CrossPlayerPlugin) {
+        super(app);
+        this.plugin = plugin;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        const today = this.plugin.getConsumptionSummary(1);
+        const week = this.plugin.getConsumptionSummary(7);
+        const month = this.plugin.getConsumptionSummary(30);
+        const allTime = this.plugin.getConsumptionSummary();
+
+        contentEl.empty();
+        contentEl.createEl('h3', { text: 'Consumption Statistics' });
+
+        const summary = contentEl.createDiv({ cls: 'cross-player-consumption-summary' });
+        const rows = [
+            ['Today', today],
+            ['Last 7 days', week],
+            ['Last 30 days', month],
+            ['All time', allTime]
+        ] as const;
+
+        rows.forEach(([label, data]) => {
+            const row = summary.createDiv({ cls: 'cross-player-consumption-row' });
+            row.createEl('strong', { text: label });
+            row.createSpan({ text: `${this.plugin.formatDuration(data.seconds)} watched` });
+            row.createSpan({ text: `${data.completedCount} item(s) completed` });
+            if (label === 'All time') {
+                row.createSpan({ text: `${data.trackedDays} tracked day(s)` });
+            }
+        });
+
+        const hint = contentEl.createEl('p', {
+            text: 'Stats are stored as small daily buckets, so they stay compact even over long periods.'
+        });
+        hint.style.color = 'var(--text-muted)';
+
+        const closeBtn = contentEl.createEl('button', { text: 'Close' });
+        closeBtn.onclick = () => this.close();
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
 class CrossPlayerSettingTab extends PluginSettingTab {
     plugin: CrossPlayerPlugin;
 
@@ -1605,6 +1783,55 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.data.settings.pauseOnMobileTap = value;
                     await this.plugin.saveData();
+                }));
+
+        new Setting(containerEl)
+            .setName('Wrap Queue Item Text')
+            .setDesc('Show full queue item names on multiple lines instead of truncating them.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.data.settings.wrapQueueText)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.wrapQueueText = value;
+                    await this.plugin.saveData();
+                    this.plugin.listView?.refresh();
+                }));
+
+        containerEl.createEl('h3', { text: 'Audio Settings' });
+
+        new Setting(containerEl)
+            .setName('Volume Boost')
+            .setDesc('Boost playback above 100% for quiet media. Higher values may cause distortion.')
+            .addSlider(slider => slider
+                .setLimits(100, 300, 10)
+                .setValue(this.plugin.data.settings.volumeBoostPercent)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.data.settings.volumeBoostPercent = value;
+                    await this.plugin.saveData(false);
+                    this.plugin.mainView?.applyAudioSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Sound Normalization')
+            .setDesc('Apply dynamic range compression to make low-volume media easier to hear.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.data.settings.soundNormalization)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.soundNormalization = value;
+                    await this.plugin.saveData(false);
+                    this.plugin.mainView?.applyAudioSettings();
+                }));
+
+        containerEl.createEl('h3', { text: 'Consumption Statistics' });
+
+        const allTime = this.plugin.getConsumptionSummary();
+        new Setting(containerEl)
+            .setName('Usage Summary')
+            .setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`)
+            .addButton(button => button
+                .setButtonText('View Statistics')
+                .onClick(() => {
+                    new ConsumptionStatsModal(this.app, this.plugin).open();
                 }));
 
         containerEl.createEl('h3', { text: 'Storage & Download Settings' });
@@ -1775,6 +2002,13 @@ class CrossPlayerListView extends ItemView {
             new Notice("Data reloaded.");
         };
 
+        const cleanBtn = titleRow.createDiv({ cls: "clickable-icon" });
+        setIcon(cleanBtn, "trash-2");
+        cleanBtn.ariaLabel = "Clean Consumed Media";
+        cleanBtn.onclick = () => {
+            new ConfirmCleanConsumedMediaModal(this.app, this.plugin).open();
+        };
+
         const speed = this.plugin.data.playbackSpeed || 1.0;
         const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
         speedContainer.style.display = "flex";
@@ -1832,7 +2066,7 @@ class CrossPlayerListView extends ItemView {
         statsContainer.style.color = "var(--text-muted)";
         statsContainer.style.marginTop = "5px";
 
-        const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
+        const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
         statsContainer.createSpan({ text: etcText });
 
         statsContainer.createSpan({ text: " • " });
@@ -1914,11 +2148,15 @@ class CrossPlayerListView extends ItemView {
             // Name
             const nameEl = itemEl.createDiv({ text: item.name, cls: "cross-player-name" });
             nameEl.style.flexGrow = "1";
-            nameEl.style.overflow = "hidden";
-            nameEl.style.textOverflow = "ellipsis";
-            nameEl.style.whiteSpace = "nowrap";
             nameEl.style.cursor = "pointer";
             nameEl.title = item.path;
+            if (this.plugin.data.settings.wrapQueueText) {
+                nameEl.addClass("is-wrapped");
+            } else {
+                nameEl.style.overflow = "hidden";
+                nameEl.style.textOverflow = "ellipsis";
+                nameEl.style.whiteSpace = "nowrap";
+            }
 
             nameEl.addEventListener("click", (e) => {
                 e.stopPropagation();
@@ -2012,7 +2250,7 @@ class CrossPlayerListView extends ItemView {
 
         statsContainer.empty();
 
-        const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
+        const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
         statsContainer.createSpan({ text: etcText });
 
         statsContainer.createSpan({ text: " • " });
@@ -2208,14 +2446,6 @@ class CrossPlayerListView extends ItemView {
         }
     }
 
-    formatDuration(seconds: number): string {
-        if (!seconds || isNaN(seconds)) return "0s";
-        const h = Math.floor(seconds / 3600);
-        const m = Math.floor((seconds % 3600) / 60);
-        const s = Math.floor(seconds % 60);
-        if (h > 0) return `${h}h ${m}m ${s}s`;
-        return `${m}m ${s}s`;
-    }
 }
 
 class CrossPlayerMainView extends ItemView {
@@ -2223,10 +2453,19 @@ class CrossPlayerMainView extends ItemView {
     videoEl: HTMLVideoElement;
     videoWrapperEl: HTMLDivElement; // Added wrapper property
     overlayEl: HTMLElement | null = null;
+    overlayProgressEl: HTMLInputElement | null = null;
+    overlayCurrentTimeEl: HTMLElement | null = null;
+    overlayDurationEl: HTMLElement | null = null;
+    overlayFullscreenBtn: HTMLElement | null = null;
     audioPlaceholderEl: HTMLElement | null = null;
     currentItem: MediaItem | null = null;
     lastEtcUpdate: number = 0;
     lastProgressUpdate: number = 0;
+    audioContext: AudioContext | null = null;
+    mediaSourceNode: MediaElementAudioSourceNode | null = null;
+    gainNode: GainNode | null = null;
+    compressorNode: DynamicsCompressorNode | null = null;
+    mobileOverlayHideTimeout: number | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: CrossPlayerPlugin) {
         super(leaf);
@@ -2304,11 +2543,15 @@ class CrossPlayerMainView extends ItemView {
         this.videoWrapperEl.style.alignItems = "center";
 
         this.videoEl = this.videoWrapperEl.createEl("video");
-        this.videoEl.controls = true;
+        this.videoEl.controls = !Platform.isMobile;
         this.videoEl.style.maxWidth = "100%";
         this.videoEl.style.maxHeight = "100%";
         this.videoEl.style.width = "100%";
         this.videoEl.style.height = "100%";
+
+        this.registerDomEvent(document, 'fullscreenchange', () => {
+            window.setTimeout(() => this.refreshMobileOverlay(), 50);
+        });
 
         this.refreshMobileOverlay();
 
@@ -2356,6 +2599,8 @@ class CrossPlayerMainView extends ItemView {
                     }
                 }
 
+                this.updateOverlayProgress();
+
                 // Mark as completed if > 95% watched
                 if (this.currentItem.status !== 'completed' && this.videoEl.duration > 0) {
                     const progress = this.videoEl.currentTime / this.videoEl.duration;
@@ -2374,11 +2619,12 @@ class CrossPlayerMainView extends ItemView {
                 }
                 await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
             }
+            this.updateOverlayProgress();
         }
     }
 
     refreshMobileOverlay() {
-        const container = this.contentEl;
+        const container = this.videoWrapperEl || this.contentEl;
         const shouldShow = Platform.isMobile;
 
         if (!shouldShow) {
@@ -2386,12 +2632,18 @@ class CrossPlayerMainView extends ItemView {
                 this.overlayEl.remove();
                 this.overlayEl = null;
             }
+            this.overlayProgressEl = null;
+            if (this.videoEl) {
+                this.videoEl.controls = true;
+            }
             return;
         }
 
-        // Always show overlay on mobile for both audio and video
+        if (this.videoEl) {
+            this.videoEl.controls = false;
+        }
+
         if (!this.overlayEl || !container.contains(this.overlayEl)) {
-            // Remove existing if it's detached but not null
             if (this.overlayEl) {
                 this.overlayEl.remove();
             }
@@ -2400,7 +2652,6 @@ class CrossPlayerMainView extends ItemView {
     }
 
     createMobileOverlay(container: HTMLElement) {
-        // Overlay Container
         const overlay = container.createDiv({ cls: 'cross-player-overlay' });
         this.overlayEl = overlay;
         overlay.style.position = "absolute";
@@ -2416,34 +2667,36 @@ class CrossPlayerMainView extends ItemView {
         overlay.style.zIndex = "10";
         overlay.style.opacity = "0";
         overlay.style.transition = "opacity 0.3s ease";
-        overlay.style.pointerEvents = "none"; // Let clicks pass through when hidden
+        overlay.style.pointerEvents = "none";
 
-        // Visibility Logic
-        let hideTimeout: NodeJS.Timeout;
         const showOverlay = () => {
+            overlay.addClass('is-visible');
             overlay.style.opacity = "1";
             overlay.style.pointerEvents = "auto";
+            this.updateOverlayProgress();
 
-            // Force native controls (bottom bar) to appear
-            if (this.videoEl) {
-                this.videoEl.controls = false;
-                this.videoEl.controls = true;
+            if (this.mobileOverlayHideTimeout !== null) {
+                window.clearTimeout(this.mobileOverlayHideTimeout);
             }
 
-            if (hideTimeout) clearTimeout(hideTimeout);
-            hideTimeout = setTimeout(() => {
+            this.mobileOverlayHideTimeout = window.setTimeout(() => {
+                overlay.removeClass('is-visible');
                 overlay.style.opacity = "0";
                 overlay.style.pointerEvents = "none";
-            }, 3000); // Hide after 3 seconds
+                this.mobileOverlayHideTimeout = null;
+            }, 3000);
         };
 
         const hideOverlay = () => {
+            overlay.removeClass('is-visible');
             overlay.style.opacity = "0";
             overlay.style.pointerEvents = "none";
-            if (hideTimeout) clearTimeout(hideTimeout);
+            if (this.mobileOverlayHideTimeout !== null) {
+                window.clearTimeout(this.mobileOverlayHideTimeout);
+                this.mobileOverlayHideTimeout = null;
+            }
         };
 
-        // Touch handling variables
         let touchStartTime = 0;
         let touchStartX = 0;
         let touchStartY = 0;
@@ -2465,31 +2718,12 @@ class CrossPlayerMainView extends ItemView {
 
         const onTouchEnd = (e: TouchEvent) => {
             if (isScrolling) return;
-            // Short tap check
             if (Date.now() - touchStartTime > 500) return;
 
-            // Handle Tap
             const target = e.target as HTMLElement;
-            // Use changedTouches for touchend
-            const touchY = e.changedTouches[0].clientY;
-            const rect = this.videoEl.getBoundingClientRect();
-
-            // Logic:
             if (overlay.style.opacity === "0") {
-                // Overlay Hidden
-
-                // 1. Check native controls area (approx 50px from bottom of video)
-                const relativeY = touchY - rect.top;
-                if (relativeY > rect.height - 50) {
-                    // Tapped bottom bar - let native controls handle it
-                    return;
-                }
-
-                // 2. Prevent native toggle
                 e.preventDefault();
                 e.stopPropagation();
-
-                // 3. Pause and Show Overlay
                 if (this.plugin.data.settings.pauseOnMobileTap) {
                     if (!this.videoEl.paused) {
                         this.videoEl.pause();
@@ -2498,39 +2732,155 @@ class CrossPlayerMainView extends ItemView {
                     }
                 }
                 showOverlay();
-
             } else {
-                // Overlay Visible
-
-                // 1. Check if tapped on a button
-                if (target.closest('.cross-player-big-btn')) {
-                    // Let button click happen
+                if (target.closest('.cross-player-big-btn') || target.closest('.cross-player-overlay-progress') || target.closest('.cross-player-overlay-progress-wrap')) {
                     return;
                 }
-
-                // 2. Tapped on background -> Hide
-                e.preventDefault(); // Prevent click passthrough to video
+                e.preventDefault();
                 e.stopPropagation();
                 hideOverlay();
             }
         };
 
-        // Add listeners to container (which is wrapper)
-        // Use capture to catch before video
         container.addEventListener('touchstart', onTouchStart, { capture: true });
         container.addEventListener('touchmove', onTouchMove, { capture: true });
         container.addEventListener('touchend', onTouchEnd, { capture: true });
 
-        // Remove previous listeners if any (though we are creating fresh)
-        // We don't need videoEl.onclick anymore as capture on container covers it.
         if (this.videoEl) {
             this.videoEl.onclick = null;
         }
 
-        // Controls Row
+        const progressWrap = overlay.createDiv({ cls: 'cross-player-overlay-progress-wrap' });
+        progressWrap.style.position = "absolute";
+        progressWrap.style.left = "14px";
+        progressWrap.style.right = "14px";
+        progressWrap.style.bottom = "18px";
+        progressWrap.style.zIndex = "11";
+        progressWrap.style.opacity = "1";
+        progressWrap.style.pointerEvents = "auto";
+        progressWrap.style.padding = "10px 12px";
+        progressWrap.style.touchAction = "none";
+        progressWrap.style.display = "flex";
+        progressWrap.style.alignItems = "center";
+        progressWrap.style.gap = "10px";
+        progressWrap.style.background = "var(--interactive-normal)";
+        progressWrap.style.border = "1px solid var(--background-modifier-border)";
+        progressWrap.style.borderRadius = "999px";
+        progressWrap.style.setProperty("backdrop-filter", "blur(10px)");
+        progressWrap.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
+
+        const currentTimeEl = progressWrap.createSpan({ text: "0:00" });
+        currentTimeEl.style.minWidth = "40px";
+        currentTimeEl.style.fontSize = "12px";
+        currentTimeEl.style.fontVariantNumeric = "tabular-nums";
+        currentTimeEl.style.color = "var(--text-normal)";
+        currentTimeEl.style.textAlign = "right";
+        this.overlayCurrentTimeEl = currentTimeEl;
+
+        const progressBarShell = progressWrap.createDiv({ cls: 'cross-player-overlay-progress-shell' });
+        progressBarShell.style.flex = "1";
+        progressBarShell.style.display = "flex";
+        progressBarShell.style.alignItems = "center";
+        progressBarShell.style.minWidth = "0";
+
+        const progressBar = progressBarShell.createEl('input', {
+            type: 'range',
+            cls: 'cross-player-overlay-progress'
+        }) as HTMLInputElement;
+        progressBar.min = '0';
+        progressBar.max = '1000';
+        progressBar.step = '1';
+        progressBar.value = '0';
+        progressBar.style.width = "100%";
+        progressBar.style.margin = "0";
+        progressBar.style.accentColor = "var(--interactive-accent)";
+        progressBar.style.touchAction = "none";
+        this.overlayProgressEl = progressBar;
+
+        const durationEl = progressWrap.createSpan({ text: "0:00" });
+        durationEl.style.minWidth = "40px";
+        durationEl.style.fontSize = "12px";
+        durationEl.style.fontVariantNumeric = "tabular-nums";
+        durationEl.style.color = "var(--text-muted)";
+        durationEl.style.textAlign = "left";
+        this.overlayDurationEl = durationEl;
+
+        const progressFullscreenBtn = progressWrap.createDiv({ cls: 'cross-player-big-btn' });
+        progressFullscreenBtn.style.width = "34px";
+        progressFullscreenBtn.style.height = "34px";
+        progressFullscreenBtn.style.minWidth = "34px";
+        progressFullscreenBtn.style.background = "var(--interactive-normal)";
+        progressFullscreenBtn.style.border = "1px solid var(--background-modifier-border)";
+        progressFullscreenBtn.style.boxShadow = "none";
+        setIcon(progressFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+        this.styleBigButton(progressFullscreenBtn);
+        this.overlayFullscreenBtn = progressFullscreenBtn;
+        progressFullscreenBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.toggleFullscreen();
+            window.setTimeout(() => {
+                if (this.overlayFullscreenBtn) {
+                    setIcon(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+                }
+                showOverlay();
+            }, 80);
+        };
+
+        const seekFromValue = (value: number) => {
+            if (!this.videoEl || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) return;
+
+            const pct = Math.min(1, Math.max(0, value / 1000));
+            this.videoEl.currentTime = this.videoEl.duration * pct;
+            this.updateOverlayProgress();
+            showOverlay();
+        };
+
+        const seekFromClientX = (clientX: number) => {
+            const rect = progressBarShell.getBoundingClientRect();
+            if (rect.width <= 0) return;
+            const pct = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+            const value = Math.round(pct * 1000);
+            progressBar.value = String(value);
+            seekFromValue(value);
+        };
+
+        const stopProgressGesture = (e: Event) => {
+            e.preventDefault();
+            e.stopPropagation();
+        };
+
+        const seekFromProgress = (e: Event) => {
+            stopProgressGesture(e);
+            seekFromValue(Number(progressBar.value));
+        };
+
+        progressBar.addEventListener('input', seekFromProgress);
+        progressBar.addEventListener('change', seekFromProgress);
+
+        progressBarShell.addEventListener('click', (e: MouseEvent) => {
+            stopProgressGesture(e);
+            seekFromClientX(e.clientX);
+        });
+
+        progressBarShell.addEventListener('touchstart', (e: TouchEvent) => {
+            if (e.touches.length === 0) return;
+            stopProgressGesture(e);
+            seekFromClientX(e.touches[0].clientX);
+        }, { passive: false });
+
+        progressBarShell.addEventListener('touchmove', (e: TouchEvent) => {
+            if (e.touches.length === 0) return;
+            stopProgressGesture(e);
+            seekFromClientX(e.touches[0].clientX);
+        }, { passive: false });
+
+        progressBarShell.addEventListener('touchend', (e: TouchEvent) => {
+            stopProgressGesture(e);
+        }, { passive: false });
+
         const controlsRow = overlay.createDiv({ cls: 'cross-player-controls-row' });
         controlsRow.style.display = "flex";
-        controlsRow.style.gap = "15px"; // Reduced gap for mobile
+        controlsRow.style.gap = "15px";
         controlsRow.style.alignItems = "center";
         controlsRow.style.justifyContent = "center";
         controlsRow.style.padding = "0 10px";
@@ -2559,7 +2909,6 @@ class CrossPlayerMainView extends ItemView {
         const playPauseBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn play-btn' });
         setIcon(playPauseBtn, "pause"); // Default to pause as we auto-play usually
         this.styleBigButton(playPauseBtn);
-        // Scale is now handled in CSS
 
         playPauseBtn.onclick = (e) => {
             e.stopPropagation();
@@ -2573,9 +2922,9 @@ class CrossPlayerMainView extends ItemView {
             showOverlay();
         };
 
-        // Update icon on state change
-        this.videoEl.onplay = () => setIcon(playPauseBtn, "pause");
-        this.videoEl.onpause = () => setIcon(playPauseBtn, "play");
+        // Update icon on state change without replacing playback listeners.
+        this.videoEl.addEventListener('play', () => setIcon(playPauseBtn, "pause"));
+        this.videoEl.addEventListener('pause', () => setIcon(playPauseBtn, "play"));
 
         // Seek Forward
         const seekFwdBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
@@ -2596,6 +2945,102 @@ class CrossPlayerMainView extends ItemView {
             this.plugin.playNextItem();
             showOverlay();
         };
+
+        showOverlay();
+    }
+
+    updateOverlayProgress() {
+        if (!this.overlayProgressEl || !this.videoEl || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+            if (this.overlayProgressEl) {
+                this.overlayProgressEl.value = '0';
+            }
+            if (this.overlayCurrentTimeEl) {
+                this.overlayCurrentTimeEl.setText("0:00");
+            }
+            if (this.overlayDurationEl) {
+                this.overlayDurationEl.setText("0:00");
+            }
+            if (this.overlayFullscreenBtn) {
+                setIcon(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+            }
+            return;
+        }
+
+        const pct = Math.min(1, Math.max(0, this.videoEl.currentTime / this.videoEl.duration));
+        this.overlayProgressEl.value = String(Math.round(pct * 1000));
+        if (this.overlayCurrentTimeEl) {
+            this.overlayCurrentTimeEl.setText(this.formatPlaybackTime(this.videoEl.currentTime));
+        }
+        if (this.overlayDurationEl) {
+            this.overlayDurationEl.setText(this.formatPlaybackTime(this.videoEl.duration));
+        }
+        if (this.overlayFullscreenBtn) {
+            setIcon(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+        }
+    }
+
+    formatPlaybackTime(seconds: number): string {
+        if (!isFinite(seconds) || seconds < 0) return "0:00";
+
+        const totalSeconds = Math.floor(seconds);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const secs = totalSeconds % 60;
+
+        if (hours > 0) {
+            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    ensureAudioNodes() {
+        if (!this.videoEl) return;
+        if (!this.audioContext) {
+            const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext;
+            if (!AudioContextCtor) return;
+            this.audioContext = new AudioContextCtor();
+        }
+
+        if (!this.mediaSourceNode) {
+            this.mediaSourceNode = this.audioContext.createMediaElementSource(this.videoEl);
+            this.gainNode = this.audioContext.createGain();
+            this.compressorNode = this.audioContext.createDynamicsCompressor();
+
+            this.compressorNode.threshold.value = -24;
+            this.compressorNode.knee.value = 30;
+            this.compressorNode.ratio.value = 8;
+            this.compressorNode.attack.value = 0.003;
+            this.compressorNode.release.value = 0.25;
+
+            this.mediaSourceNode.connect(this.gainNode);
+            this.gainNode.connect(this.compressorNode);
+            this.compressorNode.connect(this.audioContext.destination);
+        }
+    }
+
+    applyAudioSettings() {
+        try {
+            this.ensureAudioNodes();
+            if (!this.gainNode || !this.compressorNode) return;
+
+            const boost = Math.max(100, this.plugin.data.settings.volumeBoostPercent || 100);
+            this.gainNode.gain.value = boost / 100;
+
+            if (this.plugin.data.settings.soundNormalization) {
+                this.compressorNode.threshold.value = -24;
+                this.compressorNode.ratio.value = 8;
+            } else {
+                this.compressorNode.threshold.value = 0;
+                this.compressorNode.ratio.value = 1;
+            }
+
+            if (this.audioContext && this.audioContext.state === 'suspended') {
+                this.audioContext.resume().catch(() => undefined);
+            }
+        } catch (error) {
+            console.error('Failed to apply audio settings', error);
+        }
     }
 
     styleBigButton(btn: HTMLElement) {
@@ -2638,7 +3083,7 @@ class CrossPlayerMainView extends ItemView {
             // Re-create if missing (unlikely if view is open)
             const container = this.contentEl;
             this.videoEl = container.createEl("video");
-            this.videoEl.controls = true;
+            this.videoEl.controls = !Platform.isMobile;
             this.videoEl.style.maxWidth = "100%";
             this.videoEl.style.maxHeight = "100%";
             this.videoEl.style.width = "100%";
@@ -2675,6 +3120,7 @@ class CrossPlayerMainView extends ItemView {
 
         // Setup listeners BEFORE setting src
         this.videoEl.onloadedmetadata = () => {
+            this.updateOverlayProgress();
             // Logic for embedded subtitles: 
             // If no sidecar was found, we try to enable the first available embedded track.
             if (!sidecarFound && this.videoEl && this.videoEl.textTracks && this.videoEl.textTracks.length > 0) {
@@ -2705,6 +3151,7 @@ class CrossPlayerMainView extends ItemView {
         const resumePosition = item.position > 2 ? item.position - 2 : item.position;
         this.videoEl.currentTime = resumePosition || 0;
         this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1.0;
+        this.applyAudioSettings();
 
         // Handle Audio vs Video UI
         const ext = item.path.split('.').pop()?.toLowerCase();
@@ -2779,6 +3226,7 @@ class CrossPlayerMainView extends ItemView {
 
         // Update overlay visibility based on new item type
         this.refreshMobileOverlay();
+        this.updateOverlayProgress();
 
         return true;
     }
@@ -2814,6 +3262,8 @@ class CrossPlayerMainView extends ItemView {
         } else {
             document.exitFullscreen();
         }
+
+        window.setTimeout(() => this.refreshMobileOverlay(), 50);
     }
 
     toggleSubtitles() {

@@ -2292,7 +2292,10 @@ var DEFAULT_SETTINGS = {
   storageLimitGB: 10,
   autoplayNext: true,
   showProgressColor: true,
-  pauseOnMobileTap: true
+  pauseOnMobileTap: true,
+  wrapQueueText: false,
+  volumeBoostPercent: 100,
+  soundNormalization: false
 };
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
@@ -2384,7 +2387,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.addCommand({
       id: "clean-consumed-media",
       name: "Clean Consumed Media",
-      callback: () => this.cleanConsumedMedia()
+      callback: () => new ConfirmCleanConsumedMediaModal(this.app, this).open()
     });
     this.addCommand({
       id: "open-cross-player",
@@ -2630,9 +2633,71 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       settings,
       queue: [],
       // Initialize playbackSpeed with default if not present
-      playbackSpeed: settings.defaultPlaybackSpeed
+      playbackSpeed: settings.defaultPlaybackSpeed,
+      consumptionStats: {}
     }, loaded);
     this.data.settings = settings;
+    this.data.consumptionStats = this.data.consumptionStats || {};
+  }
+  getTodayStatKey() {
+    return new Date().toISOString().slice(0, 10);
+  }
+  recordConsumption(item) {
+    var _a;
+    if (item.countedAsConsumed)
+      return;
+    const day = this.getTodayStatKey();
+    const bucket = ((_a = this.data.consumptionStats) == null ? void 0 : _a[day]) || {
+      seconds: 0,
+      completedCount: 0
+    };
+    bucket.seconds += Math.max(0, Math.round(item.duration || 0));
+    bucket.completedCount += 1;
+    this.data.consumptionStats = this.data.consumptionStats || {};
+    this.data.consumptionStats[day] = bucket;
+    item.countedAsConsumed = true;
+    item.consumedAt = day;
+  }
+  revertConsumption(item) {
+    if (!item.countedAsConsumed || !item.consumedAt || !this.data.consumptionStats)
+      return;
+    const bucket = this.data.consumptionStats[item.consumedAt];
+    if (bucket) {
+      bucket.seconds = Math.max(0, bucket.seconds - Math.max(0, Math.round(item.duration || 0)));
+      bucket.completedCount = Math.max(0, bucket.completedCount - 1);
+      if (bucket.seconds === 0 && bucket.completedCount === 0) {
+        delete this.data.consumptionStats[item.consumedAt];
+      } else {
+        this.data.consumptionStats[item.consumedAt] = bucket;
+      }
+    }
+    item.countedAsConsumed = false;
+    delete item.consumedAt;
+  }
+  getConsumptionSummary(days) {
+    const stats = this.data.consumptionStats || {};
+    const keys = Object.keys(stats).sort();
+    const now = new Date();
+    let seconds = 0;
+    let completedCount = 0;
+    let activeDays = 0;
+    for (const key of keys) {
+      const bucket = stats[key];
+      if (!bucket)
+        continue;
+      if (typeof days === "number") {
+        const diff = now.getTime() - new Date(`${key}T00:00:00`).getTime();
+        const diffDays = Math.floor(diff / 864e5);
+        if (diffDays < 0 || diffDays >= days)
+          continue;
+      }
+      seconds += bucket.seconds || 0;
+      completedCount += bucket.completedCount || 0;
+      if ((bucket.seconds || 0) > 0 || (bucket.completedCount || 0) > 0) {
+        activeDays += 1;
+      }
+    }
+    return { seconds, completedCount, activeDays, trackedDays: keys.length };
   }
   async saveData(refresh = true) {
     await super.saveData(this.data);
@@ -2719,6 +2784,16 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
     }
     return { totalDuration, totalSize };
+  }
+  formatDuration(seconds) {
+    if (!seconds || isNaN(seconds))
+      return "0s";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor(seconds % 3600 / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0)
+      return `${h}h ${m}m ${s}s`;
+    return `${m}m ${s}s`;
   }
   async handleRename(file, oldPath) {
     const queue = this.data.queue;
@@ -2924,9 +2999,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async updateStatus(id, status) {
     const item = this.data.queue.find((i) => i.id === id);
     if (item && item.status !== status) {
+      const previousStatus = item.status;
       item.status = status;
       if (status === "completed") {
         item.finished = true;
+        this.recordConsumption(item);
+      } else if (previousStatus === "completed") {
       }
       await this.saveData();
     }
@@ -3054,6 +3132,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       this.mainView.videoEl.src = "";
       this.activateListView();
     }
+    this.revertConsumption(queueItem);
     queueItem.status = "pending";
     queueItem.finished = false;
     queueItem.position = 0;
@@ -3415,6 +3494,74 @@ var FolderSuggestModal = class extends import_obsidian.FuzzySuggestModal {
     this.plugin.setWatchedFolder(item.path);
   }
 };
+var ConfirmCleanConsumedMediaModal = class extends import_obsidian.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    const completedCount = this.plugin.data.queue.filter((item) => item.status === "completed").length;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Clean consumed media?" });
+    contentEl.createEl("p", {
+      text: completedCount > 0 ? `This will move ${completedCount} completed media file(s) to the trash and remove them from the queue.` : "There are no completed media files to clean right now."
+    });
+    const actions = contentEl.createDiv({ cls: "cross-player-modal-actions" });
+    const cancelBtn = actions.createEl("button", { text: completedCount > 0 ? "Cancel" : "Close" });
+    cancelBtn.onclick = () => this.close();
+    if (completedCount > 0) {
+      const confirmBtn = actions.createEl("button", { text: "Clean Media", cls: "mod-warning" });
+      confirmBtn.onclick = async () => {
+        this.close();
+        await this.plugin.cleanConsumedMedia();
+      };
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var ConsumptionStatsModal = class extends import_obsidian.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    const today = this.plugin.getConsumptionSummary(1);
+    const week = this.plugin.getConsumptionSummary(7);
+    const month = this.plugin.getConsumptionSummary(30);
+    const allTime = this.plugin.getConsumptionSummary();
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Consumption Statistics" });
+    const summary = contentEl.createDiv({ cls: "cross-player-consumption-summary" });
+    const rows = [
+      ["Today", today],
+      ["Last 7 days", week],
+      ["Last 30 days", month],
+      ["All time", allTime]
+    ];
+    rows.forEach(([label, data]) => {
+      const row = summary.createDiv({ cls: "cross-player-consumption-row" });
+      row.createEl("strong", { text: label });
+      row.createSpan({ text: `${this.plugin.formatDuration(data.seconds)} watched` });
+      row.createSpan({ text: `${data.completedCount} item(s) completed` });
+      if (label === "All time") {
+        row.createSpan({ text: `${data.trackedDays} tracked day(s)` });
+      }
+    });
+    const hint = contentEl.createEl("p", {
+      text: "Stats are stored as small daily buckets, so they stay compact even over long periods."
+    });
+    hint.style.color = "var(--text-muted)";
+    const closeBtn = contentEl.createEl("button", { text: "Close" });
+    closeBtn.onclick = () => this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -3462,6 +3609,30 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Pause on Mobile Tap").setDesc("Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.pauseOnMobileTap).onChange(async (value) => {
       this.plugin.data.settings.pauseOnMobileTap = value;
       await this.plugin.saveData();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Wrap Queue Item Text").setDesc("Show full queue item names on multiple lines instead of truncating them.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.wrapQueueText).onChange(async (value) => {
+      var _a;
+      this.plugin.data.settings.wrapQueueText = value;
+      await this.plugin.saveData();
+      (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
+    }));
+    containerEl.createEl("h3", { text: "Audio Settings" });
+    new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion.").addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).setDynamicTooltip().onChange(async (value) => {
+      var _a;
+      this.plugin.data.settings.volumeBoostPercent = value;
+      await this.plugin.saveData(false);
+      (_a = this.plugin.mainView) == null ? void 0 : _a.applyAudioSettings();
+    }));
+    new import_obsidian.Setting(containerEl).setName("Sound Normalization").setDesc("Apply dynamic range compression to make low-volume media easier to hear.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.soundNormalization).onChange(async (value) => {
+      var _a;
+      this.plugin.data.settings.soundNormalization = value;
+      await this.plugin.saveData(false);
+      (_a = this.plugin.mainView) == null ? void 0 : _a.applyAudioSettings();
+    }));
+    containerEl.createEl("h3", { text: "Consumption Statistics" });
+    const allTime = this.plugin.getConsumptionSummary();
+    new import_obsidian.Setting(containerEl).setName("Usage Summary").setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`).addButton((button) => button.setButtonText("View Statistics").onClick(() => {
+      new ConsumptionStatsModal(this.app, this.plugin).open();
     }));
     containerEl.createEl("h3", { text: "Storage & Download Settings" });
     new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
@@ -3553,6 +3724,12 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       this.refresh();
       new import_obsidian.Notice("Data reloaded.");
     };
+    const cleanBtn = titleRow.createDiv({ cls: "clickable-icon" });
+    (0, import_obsidian.setIcon)(cleanBtn, "trash-2");
+    cleanBtn.ariaLabel = "Clean Consumed Media";
+    cleanBtn.onclick = () => {
+      new ConfirmCleanConsumedMediaModal(this.app, this.plugin).open();
+    };
     const speed = this.plugin.data.playbackSpeed || 1;
     const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
     speedContainer.style.display = "flex";
@@ -3600,7 +3777,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     statsContainer.style.fontSize = "0.8em";
     statsContainer.style.color = "var(--text-muted)";
     statsContainer.style.marginTop = "5px";
-    const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
+    const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
     statsContainer.createSpan({ text: etcText });
     statsContainer.createSpan({ text: " \u2022 " });
     const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
@@ -3654,11 +3831,15 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       }
       const nameEl = itemEl.createDiv({ text: item.name, cls: "cross-player-name" });
       nameEl.style.flexGrow = "1";
-      nameEl.style.overflow = "hidden";
-      nameEl.style.textOverflow = "ellipsis";
-      nameEl.style.whiteSpace = "nowrap";
       nameEl.style.cursor = "pointer";
       nameEl.title = item.path;
+      if (this.plugin.data.settings.wrapQueueText) {
+        nameEl.addClass("is-wrapped");
+      } else {
+        nameEl.style.overflow = "hidden";
+        nameEl.style.textOverflow = "ellipsis";
+        nameEl.style.whiteSpace = "nowrap";
+      }
       nameEl.addEventListener("click", (e) => {
         e.stopPropagation();
         this.plugin.playMedia(item, true);
@@ -3719,7 +3900,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
     const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
     statsContainer.empty();
-    const etcText = `ETC: ${this.formatDuration(adjustedDuration)}`;
+    const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
     statsContainer.createSpan({ text: etcText });
     statsContainer.createSpan({ text: " \u2022 " });
     const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
@@ -3874,26 +4055,25 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       this.refresh();
     }
   }
-  formatDuration(seconds) {
-    if (!seconds || isNaN(seconds))
-      return "0s";
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor(seconds % 3600 / 60);
-    const s = Math.floor(seconds % 60);
-    if (h > 0)
-      return `${h}h ${m}m ${s}s`;
-    return `${m}m ${s}s`;
-  }
 };
 var CrossPlayerMainView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     // Added wrapper property
     this.overlayEl = null;
+    this.overlayProgressEl = null;
+    this.overlayCurrentTimeEl = null;
+    this.overlayDurationEl = null;
+    this.overlayFullscreenBtn = null;
     this.audioPlaceholderEl = null;
     this.currentItem = null;
     this.lastEtcUpdate = 0;
     this.lastProgressUpdate = 0;
+    this.audioContext = null;
+    this.mediaSourceNode = null;
+    this.gainNode = null;
+    this.compressorNode = null;
+    this.mobileOverlayHideTimeout = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -3954,11 +4134,14 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.videoWrapperEl.style.justifyContent = "center";
     this.videoWrapperEl.style.alignItems = "center";
     this.videoEl = this.videoWrapperEl.createEl("video");
-    this.videoEl.controls = true;
+    this.videoEl.controls = !import_obsidian.Platform.isMobile;
     this.videoEl.style.maxWidth = "100%";
     this.videoEl.style.maxHeight = "100%";
     this.videoEl.style.width = "100%";
     this.videoEl.style.height = "100%";
+    this.registerDomEvent(document, "fullscreenchange", () => {
+      window.setTimeout(() => this.refreshMobileOverlay(), 50);
+    });
     this.refreshMobileOverlay();
     this.videoEl.onended = async () => {
       if (this.currentItem) {
@@ -3990,6 +4173,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
             this.plugin.listView.updateItemProgress(this.currentItem.id, pct);
           }
         }
+        this.updateOverlayProgress();
         if (this.currentItem.status !== "completed" && this.videoEl.duration > 0) {
           const progress = this.videoEl.currentTime / this.videoEl.duration;
           if (progress > 0.95) {
@@ -4005,17 +4189,25 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         }
         await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
       }
+      this.updateOverlayProgress();
     };
   }
   refreshMobileOverlay() {
-    const container = this.contentEl;
+    const container = this.videoWrapperEl || this.contentEl;
     const shouldShow = import_obsidian.Platform.isMobile;
     if (!shouldShow) {
       if (this.overlayEl) {
         this.overlayEl.remove();
         this.overlayEl = null;
       }
+      this.overlayProgressEl = null;
+      if (this.videoEl) {
+        this.videoEl.controls = true;
+      }
       return;
+    }
+    if (this.videoEl) {
+      this.videoEl.controls = false;
     }
     if (!this.overlayEl || !container.contains(this.overlayEl)) {
       if (this.overlayEl) {
@@ -4041,26 +4233,29 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     overlay.style.opacity = "0";
     overlay.style.transition = "opacity 0.3s ease";
     overlay.style.pointerEvents = "none";
-    let hideTimeout;
     const showOverlay = () => {
+      overlay.addClass("is-visible");
       overlay.style.opacity = "1";
       overlay.style.pointerEvents = "auto";
-      if (this.videoEl) {
-        this.videoEl.controls = false;
-        this.videoEl.controls = true;
+      this.updateOverlayProgress();
+      if (this.mobileOverlayHideTimeout !== null) {
+        window.clearTimeout(this.mobileOverlayHideTimeout);
       }
-      if (hideTimeout)
-        clearTimeout(hideTimeout);
-      hideTimeout = setTimeout(() => {
+      this.mobileOverlayHideTimeout = window.setTimeout(() => {
+        overlay.removeClass("is-visible");
         overlay.style.opacity = "0";
         overlay.style.pointerEvents = "none";
+        this.mobileOverlayHideTimeout = null;
       }, 3e3);
     };
     const hideOverlay = () => {
+      overlay.removeClass("is-visible");
       overlay.style.opacity = "0";
       overlay.style.pointerEvents = "none";
-      if (hideTimeout)
-        clearTimeout(hideTimeout);
+      if (this.mobileOverlayHideTimeout !== null) {
+        window.clearTimeout(this.mobileOverlayHideTimeout);
+        this.mobileOverlayHideTimeout = null;
+      }
     };
     let touchStartTime = 0;
     let touchStartX = 0;
@@ -4083,13 +4278,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       if (Date.now() - touchStartTime > 500)
         return;
       const target = e.target;
-      const touchY = e.changedTouches[0].clientY;
-      const rect = this.videoEl.getBoundingClientRect();
       if (overlay.style.opacity === "0") {
-        const relativeY = touchY - rect.top;
-        if (relativeY > rect.height - 50) {
-          return;
-        }
         e.preventDefault();
         e.stopPropagation();
         if (this.plugin.data.settings.pauseOnMobileTap) {
@@ -4102,7 +4291,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         }
         showOverlay();
       } else {
-        if (target.closest(".cross-player-big-btn")) {
+        if (target.closest(".cross-player-big-btn") || target.closest(".cross-player-overlay-progress") || target.closest(".cross-player-overlay-progress-wrap")) {
           return;
         }
         e.preventDefault();
@@ -4116,6 +4305,122 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (this.videoEl) {
       this.videoEl.onclick = null;
     }
+    const progressWrap = overlay.createDiv({ cls: "cross-player-overlay-progress-wrap" });
+    progressWrap.style.position = "absolute";
+    progressWrap.style.left = "14px";
+    progressWrap.style.right = "14px";
+    progressWrap.style.bottom = "18px";
+    progressWrap.style.zIndex = "11";
+    progressWrap.style.opacity = "1";
+    progressWrap.style.pointerEvents = "auto";
+    progressWrap.style.padding = "10px 12px";
+    progressWrap.style.touchAction = "none";
+    progressWrap.style.display = "flex";
+    progressWrap.style.alignItems = "center";
+    progressWrap.style.gap = "10px";
+    progressWrap.style.background = "var(--interactive-normal)";
+    progressWrap.style.border = "1px solid var(--background-modifier-border)";
+    progressWrap.style.borderRadius = "999px";
+    progressWrap.style.setProperty("backdrop-filter", "blur(10px)");
+    progressWrap.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
+    const currentTimeEl = progressWrap.createSpan({ text: "0:00" });
+    currentTimeEl.style.minWidth = "40px";
+    currentTimeEl.style.fontSize = "12px";
+    currentTimeEl.style.fontVariantNumeric = "tabular-nums";
+    currentTimeEl.style.color = "var(--text-normal)";
+    currentTimeEl.style.textAlign = "right";
+    this.overlayCurrentTimeEl = currentTimeEl;
+    const progressBarShell = progressWrap.createDiv({ cls: "cross-player-overlay-progress-shell" });
+    progressBarShell.style.flex = "1";
+    progressBarShell.style.display = "flex";
+    progressBarShell.style.alignItems = "center";
+    progressBarShell.style.minWidth = "0";
+    const progressBar = progressBarShell.createEl("input", {
+      type: "range",
+      cls: "cross-player-overlay-progress"
+    });
+    progressBar.min = "0";
+    progressBar.max = "1000";
+    progressBar.step = "1";
+    progressBar.value = "0";
+    progressBar.style.width = "100%";
+    progressBar.style.margin = "0";
+    progressBar.style.accentColor = "var(--interactive-accent)";
+    progressBar.style.touchAction = "none";
+    this.overlayProgressEl = progressBar;
+    const durationEl = progressWrap.createSpan({ text: "0:00" });
+    durationEl.style.minWidth = "40px";
+    durationEl.style.fontSize = "12px";
+    durationEl.style.fontVariantNumeric = "tabular-nums";
+    durationEl.style.color = "var(--text-muted)";
+    durationEl.style.textAlign = "left";
+    this.overlayDurationEl = durationEl;
+    const progressFullscreenBtn = progressWrap.createDiv({ cls: "cross-player-big-btn" });
+    progressFullscreenBtn.style.width = "34px";
+    progressFullscreenBtn.style.height = "34px";
+    progressFullscreenBtn.style.minWidth = "34px";
+    progressFullscreenBtn.style.background = "var(--interactive-normal)";
+    progressFullscreenBtn.style.border = "1px solid var(--background-modifier-border)";
+    progressFullscreenBtn.style.boxShadow = "none";
+    (0, import_obsidian.setIcon)(progressFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+    this.styleBigButton(progressFullscreenBtn);
+    this.overlayFullscreenBtn = progressFullscreenBtn;
+    progressFullscreenBtn.onclick = (e) => {
+      e.stopPropagation();
+      this.toggleFullscreen();
+      window.setTimeout(() => {
+        if (this.overlayFullscreenBtn) {
+          (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+        }
+        showOverlay();
+      }, 80);
+    };
+    const seekFromValue = (value) => {
+      if (!this.videoEl || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0)
+        return;
+      const pct = Math.min(1, Math.max(0, value / 1e3));
+      this.videoEl.currentTime = this.videoEl.duration * pct;
+      this.updateOverlayProgress();
+      showOverlay();
+    };
+    const seekFromClientX = (clientX) => {
+      const rect = progressBarShell.getBoundingClientRect();
+      if (rect.width <= 0)
+        return;
+      const pct = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      const value = Math.round(pct * 1e3);
+      progressBar.value = String(value);
+      seekFromValue(value);
+    };
+    const stopProgressGesture = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const seekFromProgress = (e) => {
+      stopProgressGesture(e);
+      seekFromValue(Number(progressBar.value));
+    };
+    progressBar.addEventListener("input", seekFromProgress);
+    progressBar.addEventListener("change", seekFromProgress);
+    progressBarShell.addEventListener("click", (e) => {
+      stopProgressGesture(e);
+      seekFromClientX(e.clientX);
+    });
+    progressBarShell.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 0)
+        return;
+      stopProgressGesture(e);
+      seekFromClientX(e.touches[0].clientX);
+    }, { passive: false });
+    progressBarShell.addEventListener("touchmove", (e) => {
+      if (e.touches.length === 0)
+        return;
+      stopProgressGesture(e);
+      seekFromClientX(e.touches[0].clientX);
+    }, { passive: false });
+    progressBarShell.addEventListener("touchend", (e) => {
+      stopProgressGesture(e);
+    }, { passive: false });
     const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
     controlsRow.style.display = "flex";
     controlsRow.style.gap = "15px";
@@ -4152,8 +4457,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
       showOverlay();
     };
-    this.videoEl.onplay = () => (0, import_obsidian.setIcon)(playPauseBtn, "pause");
-    this.videoEl.onpause = () => (0, import_obsidian.setIcon)(playPauseBtn, "play");
+    this.videoEl.addEventListener("play", () => (0, import_obsidian.setIcon)(playPauseBtn, "pause"));
+    this.videoEl.addEventListener("pause", () => (0, import_obsidian.setIcon)(playPauseBtn, "play"));
     const seekFwdBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
     (0, import_obsidian.setIcon)(seekFwdBtn, "fast-forward");
     this.styleBigButton(seekFwdBtn);
@@ -4170,6 +4475,91 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.plugin.playNextItem();
       showOverlay();
     };
+    showOverlay();
+  }
+  updateOverlayProgress() {
+    if (!this.overlayProgressEl || !this.videoEl || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+      if (this.overlayProgressEl) {
+        this.overlayProgressEl.value = "0";
+      }
+      if (this.overlayCurrentTimeEl) {
+        this.overlayCurrentTimeEl.setText("0:00");
+      }
+      if (this.overlayDurationEl) {
+        this.overlayDurationEl.setText("0:00");
+      }
+      if (this.overlayFullscreenBtn) {
+        (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+      }
+      return;
+    }
+    const pct = Math.min(1, Math.max(0, this.videoEl.currentTime / this.videoEl.duration));
+    this.overlayProgressEl.value = String(Math.round(pct * 1e3));
+    if (this.overlayCurrentTimeEl) {
+      this.overlayCurrentTimeEl.setText(this.formatPlaybackTime(this.videoEl.currentTime));
+    }
+    if (this.overlayDurationEl) {
+      this.overlayDurationEl.setText(this.formatPlaybackTime(this.videoEl.duration));
+    }
+    if (this.overlayFullscreenBtn) {
+      (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+    }
+  }
+  formatPlaybackTime(seconds) {
+    if (!isFinite(seconds) || seconds < 0)
+      return "0:00";
+    const totalSeconds = Math.floor(seconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor(totalSeconds % 3600 / 60);
+    const secs = totalSeconds % 60;
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+    }
+    return `${minutes}:${secs.toString().padStart(2, "0")}`;
+  }
+  ensureAudioNodes() {
+    if (!this.videoEl)
+      return;
+    if (!this.audioContext) {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor)
+        return;
+      this.audioContext = new AudioContextCtor();
+    }
+    if (!this.mediaSourceNode) {
+      this.mediaSourceNode = this.audioContext.createMediaElementSource(this.videoEl);
+      this.gainNode = this.audioContext.createGain();
+      this.compressorNode = this.audioContext.createDynamicsCompressor();
+      this.compressorNode.threshold.value = -24;
+      this.compressorNode.knee.value = 30;
+      this.compressorNode.ratio.value = 8;
+      this.compressorNode.attack.value = 3e-3;
+      this.compressorNode.release.value = 0.25;
+      this.mediaSourceNode.connect(this.gainNode);
+      this.gainNode.connect(this.compressorNode);
+      this.compressorNode.connect(this.audioContext.destination);
+    }
+  }
+  applyAudioSettings() {
+    try {
+      this.ensureAudioNodes();
+      if (!this.gainNode || !this.compressorNode)
+        return;
+      const boost = Math.max(100, this.plugin.data.settings.volumeBoostPercent || 100);
+      this.gainNode.gain.value = boost / 100;
+      if (this.plugin.data.settings.soundNormalization) {
+        this.compressorNode.threshold.value = -24;
+        this.compressorNode.ratio.value = 8;
+      } else {
+        this.compressorNode.threshold.value = 0;
+        this.compressorNode.ratio.value = 1;
+      }
+      if (this.audioContext && this.audioContext.state === "suspended") {
+        this.audioContext.resume().catch(() => void 0);
+      }
+    } catch (error) {
+      console.error("Failed to apply audio settings", error);
+    }
   }
   styleBigButton(btn) {
     btn.addClass("cross-player-overlay-btn");
@@ -4198,7 +4588,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (!this.videoEl) {
       const container = this.contentEl;
       this.videoEl = container.createEl("video");
-      this.videoEl.controls = true;
+      this.videoEl.controls = !import_obsidian.Platform.isMobile;
       this.videoEl.style.maxWidth = "100%";
       this.videoEl.style.maxHeight = "100%";
       this.videoEl.style.width = "100%";
@@ -4228,6 +4618,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
     }
     this.videoEl.onloadedmetadata = () => {
+      this.updateOverlayProgress();
       if (!sidecarFound && this.videoEl && this.videoEl.textTracks && this.videoEl.textTracks.length > 0) {
         for (let i = 0; i < this.videoEl.textTracks.length; i++) {
           const track = this.videoEl.textTracks[i];
@@ -4253,6 +4644,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const resumePosition = item.position > 2 ? item.position - 2 : item.position;
     this.videoEl.currentTime = resumePosition || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
+    this.applyAudioSettings();
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
     const isAudio = ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac"].includes(ext || "");
     if (isAudio) {
@@ -4308,6 +4700,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
     }
     this.refreshMobileOverlay();
+    this.updateOverlayProgress();
     return true;
   }
   async changePlaybackSpeed(delta) {
@@ -4337,6 +4730,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     } else {
       document.exitFullscreen();
     }
+    window.setTimeout(() => this.refreshMobileOverlay(), 50);
   }
   toggleSubtitles() {
     var _a, _b;

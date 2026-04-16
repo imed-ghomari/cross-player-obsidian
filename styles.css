@@ -4,6 +4,10 @@
     padding: 10px;
 }
 
+.cross-player-header {
+    container-type: inline-size;
+}
+
 .cross-player-item {
     position: relative;
     display: flex;
@@ -48,6 +52,15 @@
     white-space: nowrap;
     cursor: pointer;
     font-size: 0.9em;
+}
+
+.cross-player-name.is-wrapped {
+    overflow: visible;
+    text-overflow: initial;
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.3;
+    padding: 2px 0;
 }
 
 .cross-player-controls {
@@ -121,6 +134,61 @@
     height: 24px;
 }
 
+.cross-player-overlay {
+    gap: 18px;
+}
+
+.cross-player-overlay-progress-wrap {
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 18px;
+    z-index: 11;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+}
+
+.cross-player-overlay.is-visible .cross-player-overlay-progress-wrap {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.cross-player-overlay-progress {
+    width: 100%;
+    accent-color: var(--interactive-accent);
+}
+
+.cross-player-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 18px;
+}
+
+.cross-player-consumption-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 14px 0 18px;
+}
+
+.cross-player-consumption-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 10px;
+    background: var(--background-secondary);
+}
+
+.cross-player-title-row,
+.cross-player-speed-container,
+.cross-player-stats {
+    min-width: 0;
+}
+
 /* Hide native play button on video to avoid conflict with overlay */
 video::-webkit-media-controls-overlay-play-button {
     display: none !important;
@@ -146,4 +214,35 @@ video::-webkit-media-controls-start-playback-button {
 /* Reset for tablet if not needed (user said tablet is fine) */
 .is-tablet .cross-player-main-view {
     padding-bottom: 0;
+}
+
+@media (orientation: landscape) {
+    .is-mobile .cross-player-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        text-align: left;
+        flex-wrap: nowrap;
+    }
+
+    .is-mobile .cross-player-title-row,
+    .is-mobile .cross-player-speed-container,
+    .is-mobile .cross-player-stats {
+        margin-top: 0 !important;
+        flex: 1 1 0;
+        justify-content: flex-start !important;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .is-mobile .cross-player-title-row {
+        min-width: 0;
+    }
+
+    .is-mobile .cross-player-stats {
+        text-align: right;
+        justify-self: flex-end;
+    }
 }

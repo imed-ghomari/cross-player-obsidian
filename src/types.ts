@@ -7,6 +7,13 @@ export interface MediaItem {
     position: number;
     duration: number;
     size?: number; // in bytes
+    countedAsConsumed?: boolean;
+    consumedAt?: string;
+}
+
+export interface ConsumptionStatBucket {
+    seconds: number;
+    completedCount: number;
 }
 
 export interface CrossPlayerSettings {
@@ -24,6 +31,9 @@ export interface CrossPlayerSettings {
     autoplayNext: boolean;
     showProgressColor: boolean;
     pauseOnMobileTap: boolean;
+    wrapQueueText: boolean;
+    volumeBoostPercent: number;
+    soundNormalization: boolean;
 }
 
 export interface DownloadStatus {
@@ -46,4 +56,5 @@ export interface CrossPlayerData {
     queue: MediaItem[];
     playbackSpeed: number;
     queueScrollTop?: number;
+    consumptionStats?: Record<string, ConsumptionStatBucket>;
 }
