@@ -2297,6 +2297,8 @@ var DEFAULT_SETTINGS = {
   volumeBoostPercent: 100,
   soundNormalization: false
 };
+var LAST_WATCHED_FOLDER_KEY = "cross-player:last-good-watched-folder";
+var REQUIRED_PLUGIN_FILES = ["manifest.json", "main.js"];
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -2310,9 +2312,113 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.dynamicStorageLimit = 0;
     // bytes
     this.limitingDevice = "";
+    this.lastSyncIssueKey = "";
+  }
+  getLastGoodWatchedFolder() {
+    try {
+      return window.localStorage.getItem(LAST_WATCHED_FOLDER_KEY) || "";
+    } catch (error) {
+      console.warn("[Cross Player] Failed to read watched folder backup", error);
+      return "";
+    }
+  }
+  setLastGoodWatchedFolder(path) {
+    try {
+      if (path) {
+        window.localStorage.setItem(LAST_WATCHED_FOLDER_KEY, path);
+      } else {
+        window.localStorage.removeItem(LAST_WATCHED_FOLDER_KEY);
+      }
+    } catch (error) {
+      console.warn("[Cross Player] Failed to store watched folder backup", error);
+    }
+  }
+  isPathInsideWatchedFolder(path, watchedFolder = ((_c) => (_c = ((_b) => (_b = ((_a) => (_a = this.data) == null ? void 0 : _a.settings)()) == null ? void 0 : _b.watchedFolder)()) != null ? _c : "")()) {
+    if (!watchedFolder)
+      return true;
+    return path === watchedFolder || path.startsWith(watchedFolder + "/");
+  }
+  rememberQueueScrollPosition() {
+    var _a;
+    (_a = this.listView) == null ? void 0 : _a.captureScrollPosition();
+  }
+  async reportSyncIssue(issueKey, message) {
+    if (this.lastSyncIssueKey === issueKey)
+      return;
+    this.lastSyncIssueKey = issueKey;
+    new import_obsidian.Notice(message, 9e3);
+  }
+  clearSyncIssue(issueKey) {
+    if (!issueKey || this.lastSyncIssueKey === issueKey) {
+      this.lastSyncIssueKey = "";
+    }
+  }
+  async validatePluginSyncHealth() {
+    var _a, _b, _c, _d;
+    try {
+      const adapter = this.app.vault.adapter;
+      const pluginDir = this.manifest.dir;
+      for (const fileName of REQUIRED_PLUGIN_FILES) {
+        const filePath = `${pluginDir}/${fileName}`;
+        if (!await adapter.exists(filePath)) {
+          await this.reportSyncIssue(
+            `missing:${fileName}`,
+            `Cross Player sync issue: ${fileName} is missing. The plugin may not be fully synced on this device.`
+          );
+          return;
+        }
+      }
+      const manifestText = await adapter.read(`${pluginDir}/manifest.json`);
+      const manifest = JSON.parse(manifestText);
+      if (!(manifest == null ? void 0 : manifest.id) || !(manifest == null ? void 0 : manifest.version)) {
+        await this.reportSyncIssue(
+          "invalid:manifest",
+          "Cross Player sync issue: manifest.json looks incomplete. The plugin may not be fully synced on this device."
+        );
+        return;
+      }
+      const dataPath = `${pluginDir}/data.json`;
+      const hasDataFile = await adapter.exists(dataPath);
+      const backupWatchedFolder = this.getLastGoodWatchedFolder();
+      if (!hasDataFile) {
+        if (backupWatchedFolder || ((_c = (_b = (_a = this.data) == null ? void 0 : _a.queue) == null ? void 0 : _b.length) != null ? _c : 0) > 0) {
+          await this.reportSyncIssue(
+            "missing:data",
+            "Cross Player sync issue: data.json is missing, so synced settings may be incomplete on this device."
+          );
+          return;
+        }
+        this.clearSyncIssue("missing:data");
+        return;
+      }
+      const dataText = await adapter.read(dataPath);
+      const parsed = dataText.trim() ? JSON.parse(dataText) : {};
+      if (typeof parsed !== "object" || parsed === null) {
+        await this.reportSyncIssue(
+          "invalid:data",
+          "Cross Player sync issue: data.json could not be read correctly. Settings may be partially synced."
+        );
+        return;
+      }
+      if (backupWatchedFolder && !((_d = parsed.settings) == null ? void 0 : _d.watchedFolder)) {
+        await this.reportSyncIssue(
+          "incomplete:data",
+          "Cross Player sync issue: data.json is missing the watched folder. A local backup was restored on this device."
+        );
+        return;
+      }
+      this.clearSyncIssue();
+    } catch (error) {
+      console.error("[Cross Player] Failed to validate plugin sync health", error);
+      await this.reportSyncIssue(
+        "check:failed",
+        "Cross Player could not verify its synced files. This device may have an incomplete plugin sync."
+      );
+    }
   }
   async onload() {
     await this.loadData();
+    await this.validatePluginSyncHealth();
     this.calculateDynamicLimit();
     this.debouncedUpdateDeviceStatus = (0, import_obsidian.debounce)(async () => {
       await this.updateDeviceStatus();
@@ -2522,6 +2628,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     if (import_obsidian.Platform.isDesktop) {
       this.debouncedReload = (0, import_obsidian.debounce)(async () => {
         await this.loadData();
+        await this.validatePluginSyncHealth();
         if (this.listView)
           this.listView.refresh();
       }, 1e3, true);
@@ -2629,6 +2736,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async loadData() {
     const loaded = await super.loadData();
     const settings = Object.assign({}, DEFAULT_SETTINGS, loaded ? loaded.settings : {});
+    if (!settings.watchedFolder) {
+      const backupWatchedFolder = this.getLastGoodWatchedFolder();
+      if (backupWatchedFolder) {
+        settings.watchedFolder = backupWatchedFolder;
+      }
+    }
     this.data = Object.assign({
       settings,
       queue: [],
@@ -2638,6 +2751,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }, loaded);
     this.data.settings = settings;
     this.data.consumptionStats = this.data.consumptionStats || {};
+    if (settings.watchedFolder) {
+      this.setLastGoodWatchedFolder(settings.watchedFolder);
+    }
   }
   getTodayStatKey() {
     return new Date().toISOString().slice(0, 10);
@@ -2700,6 +2816,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     return { seconds, completedCount, activeDays, trackedDays: keys.length };
   }
   async saveData(refresh = true) {
+    this.rememberQueueScrollPosition();
     await super.saveData(this.data);
     if (refresh && this.listView)
       this.listView.refresh();
@@ -2732,10 +2849,31 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     );
   }
   async setWatchedFolder(path) {
-    this.data.settings.watchedFolder = path;
-    await this.saveData();
-    new import_obsidian.Notice(`Watched folder set to: ${path}`);
-    this.scanFolder(path);
+    var _a;
+    const normalizedPath = path.trim();
+    const folder = this.app.vault.getAbstractFileByPath(normalizedPath);
+    if (!(folder instanceof import_obsidian.TFolder)) {
+      new import_obsidian.Notice(`Folder not found: ${normalizedPath}`);
+      return;
+    }
+    this.data.settings.watchedFolder = normalizedPath;
+    this.setLastGoodWatchedFolder(normalizedPath);
+    this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, normalizedPath));
+    if (((_a = this.mainView) == null ? void 0 : _a.currentItem) && !this.isPathInsideWatchedFolder(this.mainView.currentItem.path, normalizedPath)) {
+      this.mainView.videoEl.pause();
+      this.mainView.videoEl.src = "";
+      this.mainView.currentItem = null;
+      if (this.mainView.leaf.view.headerTitleEl)
+        this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+    }
+    try {
+      await this.saveData();
+      new import_obsidian.Notice(`Watched folder set to: ${normalizedPath}`);
+      this.scanFolder(normalizedPath);
+    } catch (error) {
+      console.error("[Cross Player] Failed to save watched folder", error);
+      new import_obsidian.Notice("Failed to save watched folder. Check disk space and sync state.");
+    }
   }
   async scanFolder(folderPath) {
     const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
@@ -2803,15 +2941,13 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         const newPath = item.path.replace(oldPath, file.path);
         item.path = newPath;
         const watchedFolder2 = this.data.settings.watchedFolder;
-        if (watchedFolder2 && !newPath.startsWith(watchedFolder2 + "/") && newPath !== watchedFolder2) {
+        if (watchedFolder2 && !this.isPathInsideWatchedFolder(newPath, watchedFolder2)) {
           item.status = "completed";
         }
       }
       const watchedFolder = this.data.settings.watchedFolder;
       if (watchedFolder) {
-        this.data.queue = this.data.queue.filter((item) => {
-          return item.path.startsWith(watchedFolder + "/") || item.path === watchedFolder;
-        });
+        this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, watchedFolder));
       }
       await this.saveData();
     }
@@ -2850,7 +2986,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     if (!(file instanceof import_obsidian.TFile))
       return;
-    if (folderPath !== "" && !file.path.startsWith(folderPath + "/"))
+    if (!this.isPathInsideWatchedFolder(file.path, folderPath))
       return;
     console.log(`[Cross Player] processing: ${file.path}`);
     const ext = file.extension.toLowerCase();
@@ -3680,6 +3816,31 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
   async onOpen() {
     this.refresh();
   }
+  captureScrollPosition() {
+    const list = this.contentEl.querySelector(".cross-player-list");
+    if (!list)
+      return;
+    this.savedScrollTop = list.scrollTop;
+    this.plugin.data.queueScrollTop = this.savedScrollTop;
+  }
+  updateStatsDisplay() {
+    const stats = this.plugin.getQueueStats();
+    const speed = this.plugin.data.playbackSpeed || 1;
+    const adjustedDuration = stats.totalDuration / speed;
+    const limitBytes = this.plugin.dynamicStorageLimit;
+    const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
+    const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
+    const etcEl = this.contentEl.querySelector(".cross-player-etc");
+    if (etcEl) {
+      etcEl.setText(`ETC: ${this.plugin.formatDuration(adjustedDuration)}`);
+    }
+    const sizeEl = this.contentEl.querySelector(".cross-player-size");
+    if (sizeEl) {
+      sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
+      sizeEl.style.color = sizeInGB > limitGB ? "var(--text-error)" : "";
+      sizeEl.style.fontWeight = sizeInGB > limitGB ? "bold" : "";
+    }
+  }
   refresh() {
     const container = this.contentEl;
     const oldList = container.querySelector(".cross-player-list");
@@ -3740,13 +3901,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(minusBtn, "minus-circle");
     minusBtn.ariaLabel = "Decrease Speed";
-    minusBtn.onclick = () => {
+    minusBtn.onclick = async () => {
+      this.captureScrollPosition();
       if (this.plugin.mainView) {
-        this.plugin.mainView.changePlaybackSpeed(-0.1);
+        await this.plugin.mainView.changePlaybackSpeed(-0.1);
       } else {
         const newSpeed = Math.max(0.1, (this.plugin.data.playbackSpeed || 1) - 0.1);
         this.plugin.data.playbackSpeed = newSpeed;
-        this.plugin.saveData();
+        await this.plugin.saveData(false);
         this.updateSpeedDisplay();
       }
     };
@@ -3758,13 +3920,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const plusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(plusBtn, "plus-circle");
     plusBtn.ariaLabel = "Increase Speed";
-    plusBtn.onclick = () => {
+    plusBtn.onclick = async () => {
+      this.captureScrollPosition();
       if (this.plugin.mainView) {
-        this.plugin.mainView.changePlaybackSpeed(0.1);
+        await this.plugin.mainView.changePlaybackSpeed(0.1);
       } else {
         const newSpeed = Math.min(10, (this.plugin.data.playbackSpeed || 1) + 0.1);
         this.plugin.data.playbackSpeed = newSpeed;
-        this.plugin.saveData();
+        await this.plugin.saveData(false);
         this.updateSpeedDisplay();
       }
     };
@@ -3778,9 +3941,9 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     statsContainer.style.color = "var(--text-muted)";
     statsContainer.style.marginTop = "5px";
     const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
-    statsContainer.createSpan({ text: etcText });
+    statsContainer.createSpan({ text: etcText, cls: "cross-player-etc" });
     statsContainer.createSpan({ text: " \u2022 " });
-    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
+    const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`, cls: "cross-player-size" });
     if (sizeInGB > limitGB) {
       sizeSpan.style.color = "var(--text-error)";
       sizeSpan.style.fontWeight = "bold";
@@ -4052,7 +4215,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     if (speedEl) {
       const speed = this.plugin.data.playbackSpeed || 1;
       speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
-      this.refresh();
+      this.updateStatsDisplay();
     }
   }
 };
@@ -4815,7 +4978,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const newSpeed = Math.max(0.1, this.videoEl.playbackRate + delta);
     this.videoEl.playbackRate = newSpeed;
     this.plugin.data.playbackSpeed = newSpeed;
-    await this.plugin.saveData();
+    await this.plugin.saveData(false);
     if (this.plugin.listView) {
       this.plugin.listView.updateSpeedDisplay();
     }

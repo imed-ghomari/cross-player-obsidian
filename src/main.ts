@@ -40,6 +40,9 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     soundNormalization: false
 }
 
+const LAST_WATCHED_FOLDER_KEY = 'cross-player:last-good-watched-folder';
+const REQUIRED_PLUGIN_FILES = ['manifest.json', 'main.js'];
+
 export default class CrossPlayerPlugin extends Plugin {
     data: CrossPlayerData;
     // No more fs watcher, we use Obsidian events
@@ -55,9 +58,124 @@ export default class CrossPlayerPlugin extends Plugin {
     limitingDevice: string = '';
 
     debouncedUpdateDeviceStatus: any;
+    lastSyncIssueKey: string = '';
+
+    getLastGoodWatchedFolder(): string {
+        try {
+            return window.localStorage.getItem(LAST_WATCHED_FOLDER_KEY) || '';
+        } catch (error) {
+            console.warn('[Cross Player] Failed to read watched folder backup', error);
+            return '';
+        }
+    }
+
+    setLastGoodWatchedFolder(path: string) {
+        try {
+            if (path) {
+                window.localStorage.setItem(LAST_WATCHED_FOLDER_KEY, path);
+            } else {
+                window.localStorage.removeItem(LAST_WATCHED_FOLDER_KEY);
+            }
+        } catch (error) {
+            console.warn('[Cross Player] Failed to store watched folder backup', error);
+        }
+    }
+
+    isPathInsideWatchedFolder(path: string, watchedFolder: string = this.data?.settings?.watchedFolder ?? ''): boolean {
+        if (!watchedFolder) return true;
+        return path === watchedFolder || path.startsWith(watchedFolder + '/');
+    }
+
+    rememberQueueScrollPosition() {
+        this.listView?.captureScrollPosition();
+    }
+
+    async reportSyncIssue(issueKey: string, message: string) {
+        if (this.lastSyncIssueKey === issueKey) return;
+        this.lastSyncIssueKey = issueKey;
+        new Notice(message, 9000);
+    }
+
+    clearSyncIssue(issueKey?: string) {
+        if (!issueKey || this.lastSyncIssueKey === issueKey) {
+            this.lastSyncIssueKey = '';
+        }
+    }
+
+    async validatePluginSyncHealth() {
+        try {
+            const adapter = this.app.vault.adapter;
+            const pluginDir = this.manifest.dir;
+
+            for (const fileName of REQUIRED_PLUGIN_FILES) {
+                const filePath = `${pluginDir}/${fileName}`;
+                if (!(await adapter.exists(filePath))) {
+                    await this.reportSyncIssue(
+                        `missing:${fileName}`,
+                        `Cross Player sync issue: ${fileName} is missing. The plugin may not be fully synced on this device.`
+                    );
+                    return;
+                }
+            }
+
+            const manifestText = await adapter.read(`${pluginDir}/manifest.json`);
+            const manifest = JSON.parse(manifestText);
+            if (!manifest?.id || !manifest?.version) {
+                await this.reportSyncIssue(
+                    'invalid:manifest',
+                    'Cross Player sync issue: manifest.json looks incomplete. The plugin may not be fully synced on this device.'
+                );
+                return;
+            }
+
+            const dataPath = `${pluginDir}/data.json`;
+            const hasDataFile = await adapter.exists(dataPath);
+            const backupWatchedFolder = this.getLastGoodWatchedFolder();
+
+            if (!hasDataFile) {
+                if (backupWatchedFolder || (this.data?.queue?.length ?? 0) > 0) {
+                    await this.reportSyncIssue(
+                        'missing:data',
+                        'Cross Player sync issue: data.json is missing, so synced settings may be incomplete on this device.'
+                    );
+                    return;
+                }
+
+                this.clearSyncIssue('missing:data');
+                return;
+            }
+
+            const dataText = await adapter.read(dataPath);
+            const parsed = dataText.trim() ? JSON.parse(dataText) : {};
+            if (typeof parsed !== 'object' || parsed === null) {
+                await this.reportSyncIssue(
+                    'invalid:data',
+                    'Cross Player sync issue: data.json could not be read correctly. Settings may be partially synced.'
+                );
+                return;
+            }
+
+            if (backupWatchedFolder && !parsed.settings?.watchedFolder) {
+                await this.reportSyncIssue(
+                    'incomplete:data',
+                    'Cross Player sync issue: data.json is missing the watched folder. A local backup was restored on this device.'
+                );
+                return;
+            }
+
+            this.clearSyncIssue();
+        } catch (error) {
+            console.error('[Cross Player] Failed to validate plugin sync health', error);
+            await this.reportSyncIssue(
+                'check:failed',
+                'Cross Player could not verify its synced files. This device may have an incomplete plugin sync.'
+            );
+        }
+    }
 
     async onload() {
         await this.loadData();
+        await this.validatePluginSyncHealth();
         this.calculateDynamicLimit();
 
         // ffmpeg-static is removed because it causes issues on mobile (bundling Node-only code).
@@ -304,6 +422,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (Platform.isDesktop) {
             this.debouncedReload = debounce(async () => {
                 await this.loadData();
+                await this.validatePluginSyncHealth();
                 if (this.listView) this.listView.refresh();
             }, 1000, true);
 
@@ -447,6 +566,15 @@ export default class CrossPlayerPlugin extends Plugin {
         // Ensure settings are merged with defaults
         const settings = Object.assign({}, DEFAULT_SETTINGS, loaded ? loaded.settings : {});
 
+        // Recover from partial sync / overwritten data.json by restoring the last valid
+        // per-device watched folder when synced settings arrive blank.
+        if (!settings.watchedFolder) {
+            const backupWatchedFolder = this.getLastGoodWatchedFolder();
+            if (backupWatchedFolder) {
+                settings.watchedFolder = backupWatchedFolder;
+            }
+        }
+
         this.data = Object.assign({
             settings: settings,
             queue: [],
@@ -458,6 +586,9 @@ export default class CrossPlayerPlugin extends Plugin {
         // Ensure settings are definitely correct in data object
         this.data.settings = settings;
         this.data.consumptionStats = this.data.consumptionStats || {};
+        if (settings.watchedFolder) {
+            this.setLastGoodWatchedFolder(settings.watchedFolder);
+        }
 
         // Force playbackSpeed to respect default if it's the old default (1.0) and new default is different (2.0)
         // Or if it was never set (which the above assignment handles for new users).
@@ -539,6 +670,7 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async saveData(refresh: boolean = true) {
+        this.rememberQueueScrollPosition();
         await super.saveData(this.data);
         if (refresh && this.listView) this.listView.refresh();
     }
@@ -581,12 +713,38 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async setWatchedFolder(path: string) {
-        this.data.settings.watchedFolder = path;
-        await this.saveData();
-        new Notice(`Watched folder set to: ${path}`);
+        const normalizedPath = path.trim();
+        const folder = this.app.vault.getAbstractFileByPath(normalizedPath);
 
-        // Just scan new folder.
-        this.scanFolder(path);
+        if (!(folder instanceof TFolder)) {
+            new Notice(`Folder not found: ${normalizedPath}`);
+            return;
+        }
+
+        this.data.settings.watchedFolder = normalizedPath;
+        this.setLastGoodWatchedFolder(normalizedPath);
+
+        // Remove stale queue items that were added while watching a different folder.
+        this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, normalizedPath));
+
+        if (this.mainView?.currentItem && !this.isPathInsideWatchedFolder(this.mainView.currentItem.path, normalizedPath)) {
+            this.mainView.videoEl.pause();
+            this.mainView.videoEl.src = "";
+            this.mainView.currentItem = null;
+            // @ts-ignore
+            if (this.mainView.leaf.view.headerTitleEl) this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+        }
+
+        try {
+            await this.saveData();
+            new Notice(`Watched folder set to: ${normalizedPath}`);
+
+            // Just scan new folder.
+            this.scanFolder(normalizedPath);
+        } catch (error) {
+            console.error('[Cross Player] Failed to save watched folder', error);
+            new Notice('Failed to save watched folder. Check disk space and sync state.');
+        }
     }
 
     async scanFolder(folderPath: string) {
@@ -695,7 +853,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
                 // Check if new path is still inside watched folder
                 const watchedFolder = this.data.settings.watchedFolder;
-                if (watchedFolder && !newPath.startsWith(watchedFolder + "/") && newPath !== watchedFolder) {
+                if (watchedFolder && !this.isPathInsideWatchedFolder(newPath, watchedFolder)) {
                     // Moved OUT of watched folder -> Delete
                     item.status = 'completed'; // Mark for cleanup or delete immediately
                     // Let's delete immediately from queue to be clean
@@ -708,10 +866,7 @@ export default class CrossPlayerPlugin extends Plugin {
             // Remove items that moved out
             const watchedFolder = this.data.settings.watchedFolder;
             if (watchedFolder) {
-                this.data.queue = this.data.queue.filter(item => {
-                    // Keep if inside watched folder
-                    return item.path.startsWith(watchedFolder + "/") || item.path === watchedFolder;
-                });
+                this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, watchedFolder));
             }
 
             await this.saveData();
@@ -769,7 +924,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (!(file instanceof TFile)) return;
 
         // Double check it is in the folder
-        if (folderPath !== "" && !file.path.startsWith(folderPath + "/")) return;
+        if (!this.isPathInsideWatchedFolder(file.path, folderPath)) return;
 
         console.log(`[Cross Player] processing: ${file.path}`);
 
@@ -1920,6 +2075,35 @@ class CrossPlayerListView extends ItemView {
         this.refresh();
     }
 
+    captureScrollPosition() {
+        const list = this.contentEl.querySelector(".cross-player-list") as HTMLElement | null;
+        if (!list) return;
+
+        this.savedScrollTop = list.scrollTop;
+        this.plugin.data.queueScrollTop = this.savedScrollTop;
+    }
+
+    updateStatsDisplay() {
+        const stats = this.plugin.getQueueStats();
+        const speed = this.plugin.data.playbackSpeed || 1.0;
+        const adjustedDuration = stats.totalDuration / speed;
+        const limitBytes = this.plugin.dynamicStorageLimit;
+        const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
+        const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
+
+        const etcEl = this.contentEl.querySelector(".cross-player-etc") as HTMLElement | null;
+        if (etcEl) {
+            etcEl.setText(`ETC: ${this.plugin.formatDuration(adjustedDuration)}`);
+        }
+
+        const sizeEl = this.contentEl.querySelector(".cross-player-size") as HTMLElement | null;
+        if (sizeEl) {
+            sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
+            sizeEl.style.color = sizeInGB > limitGB ? "var(--text-error)" : "";
+            sizeEl.style.fontWeight = sizeInGB > limitGB ? "bold" : "";
+        }
+    }
+
     refresh() {
         const container = this.contentEl;
 
@@ -2020,14 +2204,15 @@ class CrossPlayerListView extends ItemView {
         const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
         setIcon(minusBtn, "minus-circle");
         minusBtn.ariaLabel = "Decrease Speed";
-        minusBtn.onclick = () => {
+        minusBtn.onclick = async () => {
+            this.captureScrollPosition();
             if (this.plugin.mainView) {
-                this.plugin.mainView.changePlaybackSpeed(-0.1);
+                await this.plugin.mainView.changePlaybackSpeed(-0.1);
             } else {
                 // Fallback if main view isn't open but we want to change default
                 const newSpeed = Math.max(0.1, (this.plugin.data.playbackSpeed || 1.0) - 0.1);
                 this.plugin.data.playbackSpeed = newSpeed;
-                this.plugin.saveData();
+                await this.plugin.saveData(false);
                 this.updateSpeedDisplay();
             }
         };
@@ -2041,13 +2226,14 @@ class CrossPlayerListView extends ItemView {
         const plusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
         setIcon(plusBtn, "plus-circle");
         plusBtn.ariaLabel = "Increase Speed";
-        plusBtn.onclick = () => {
+        plusBtn.onclick = async () => {
+            this.captureScrollPosition();
             if (this.plugin.mainView) {
-                this.plugin.mainView.changePlaybackSpeed(0.1);
+                await this.plugin.mainView.changePlaybackSpeed(0.1);
             } else {
                 const newSpeed = Math.min(10.0, (this.plugin.data.playbackSpeed || 1.0) + 0.1);
                 this.plugin.data.playbackSpeed = newSpeed;
-                this.plugin.saveData();
+                await this.plugin.saveData(false);
                 this.updateSpeedDisplay();
             }
         };
@@ -2067,11 +2253,11 @@ class CrossPlayerListView extends ItemView {
         statsContainer.style.marginTop = "5px";
 
         const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
-        statsContainer.createSpan({ text: etcText });
+        statsContainer.createSpan({ text: etcText, cls: 'cross-player-etc' });
 
         statsContainer.createSpan({ text: " • " });
 
-        const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
+        const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`, cls: 'cross-player-size' });
         if (sizeInGB > limitGB) {
             sizeSpan.style.color = "var(--text-error)";
             sizeSpan.style.fontWeight = "bold";
@@ -2442,7 +2628,7 @@ class CrossPlayerListView extends ItemView {
         if (speedEl) {
             const speed = this.plugin.data.playbackSpeed || 1.0;
             speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
-            this.refresh(); // Refresh to update stats based on new speed
+            this.updateStatsDisplay();
         }
     }
 
@@ -3353,7 +3539,7 @@ class CrossPlayerMainView extends ItemView {
 
         // Update persistent data
         this.plugin.data.playbackSpeed = newSpeed;
-        await this.plugin.saveData();
+        await this.plugin.saveData(false);
 
         // No Notice, update UI in list view
         if (this.plugin.listView) {
