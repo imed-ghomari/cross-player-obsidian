@@ -1024,6 +1024,8 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async playMedia(item: MediaItem, autoPlay: boolean = false) {
+        this.rememberQueueScrollPosition();
+
         // 1. Prepare Main View and stop any current playback immediately
         await this.activateMainView();
         if (this.mainView) {
@@ -1060,6 +1062,8 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async playNextUnread() {
+        this.rememberQueueScrollPosition();
+
         // Find the index of the last played item (which might be completed now)
         let currentIndex = -1;
         if (this.mainView && this.mainView.currentItem) {
@@ -1076,11 +1080,13 @@ export default class CrossPlayerPlugin extends Plugin {
         const nextItem = this.data.queue.find((item, index) => index > currentIndex && item.status === 'pending');
 
         if (nextItem) {
-            this.playMedia(nextItem, true);
+            await this.playMedia(nextItem, true);
         }
     }
 
     async playNextItem() {
+        this.rememberQueueScrollPosition();
+
         let currentIndex = -1;
         if (this.mainView && this.mainView.currentItem) {
             currentIndex = this.data.queue.findIndex(i => i.id === this.mainView!.currentItem!.id);
@@ -1088,11 +1094,13 @@ export default class CrossPlayerPlugin extends Plugin {
 
         const nextIndex = currentIndex + 1;
         if (nextIndex < this.data.queue.length) {
-            this.playMedia(this.data.queue[nextIndex], true);
+            await this.playMedia(this.data.queue[nextIndex], true);
         }
     }
 
     async playPreviousItem() {
+        this.rememberQueueScrollPosition();
+
         let currentIndex = -1;
         if (this.mainView && this.mainView.currentItem) {
             currentIndex = this.data.queue.findIndex(i => i.id === this.mainView!.currentItem!.id);
@@ -1102,7 +1110,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         const prevIndex = currentIndex - 1;
         if (prevIndex >= 0) {
-            this.playMedia(this.data.queue[prevIndex], true);
+            await this.playMedia(this.data.queue[prevIndex], true);
         }
     }
 
@@ -2072,6 +2080,7 @@ class CrossPlayerListView extends ItemView {
     }
 
     async onOpen() {
+        this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
         this.refresh();
     }
 
@@ -2111,6 +2120,7 @@ class CrossPlayerListView extends ItemView {
         const oldList = container.querySelector(".cross-player-list");
         if (oldList) {
             this.savedScrollTop = oldList.scrollTop;
+            this.plugin.data.queueScrollTop = this.savedScrollTop;
         }
 
         container.empty();
@@ -2270,10 +2280,11 @@ class CrossPlayerListView extends ItemView {
         list.style.overflowX = "hidden";
 
         // Restore scroll position
-        if (this.savedScrollTop > 0) {
+        const scrollTopToRestore = this.plugin.data.queueScrollTop ?? this.savedScrollTop;
+        if (scrollTopToRestore > 0) {
             // Use requestAnimationFrame to ensure the list is rendered before scrolling
             requestAnimationFrame(() => {
-                list.scrollTop = this.savedScrollTop;
+                list.scrollTop = scrollTopToRestore;
             });
         }
 
@@ -2715,15 +2726,25 @@ class CrossPlayerMainView extends ItemView {
         container.style.flexDirection = "column";
         container.style.justifyContent = "center";
         container.style.alignItems = "center";
+        container.style.width = "100%";
         container.style.height = "100%";
+        container.style.paddingTop = "0";
+        container.style.paddingLeft = "0";
+        container.style.paddingRight = "0";
+        container.style.margin = "0";
+        container.style.boxSizing = "border-box";
+        container.style.overflow = "hidden";
         container.style.backgroundColor = "#000";
         container.style.position = "relative"; // Needed for overlay
 
         // Wrapper for video and overlay to manage events cleanly
         this.videoWrapperEl = container.createDiv({ cls: 'cross-player-video-wrapper' });
         this.videoWrapperEl.style.position = "relative";
+        this.videoWrapperEl.style.flex = "1";
         this.videoWrapperEl.style.width = "100%";
         this.videoWrapperEl.style.height = "100%";
+        this.videoWrapperEl.style.minWidth = "0";
+        this.videoWrapperEl.style.minHeight = "0";
         this.videoWrapperEl.style.display = "flex";
         this.videoWrapperEl.style.justifyContent = "center";
         this.videoWrapperEl.style.alignItems = "center";
@@ -2856,10 +2877,31 @@ class CrossPlayerMainView extends ItemView {
         overlay.style.transition = "opacity 0.3s ease";
         overlay.style.pointerEvents = "none";
 
+        let suppressControlTapUntil = 0;
+
+        const setOverlayVisibility = (visible: boolean) => {
+            if (visible) {
+                overlay.addClass('is-visible');
+                overlay.style.opacity = "1";
+                overlay.style.pointerEvents = "auto";
+            } else {
+                overlay.removeClass('is-visible');
+                overlay.style.opacity = "0";
+                overlay.style.pointerEvents = "none";
+            }
+        };
+
+        const shouldSuppressControlAction = (event?: Event) => {
+            if (Date.now() < suppressControlTapUntil) {
+                event?.preventDefault();
+                event?.stopPropagation();
+                return true;
+            }
+            return false;
+        };
+
         const showOverlay = () => {
-            overlay.addClass('is-visible');
-            overlay.style.opacity = "1";
-            overlay.style.pointerEvents = "auto";
+            setOverlayVisibility(true);
             this.updateOverlayProgress();
 
             if (this.mobileOverlayHideTimeout !== null) {
@@ -2867,17 +2909,13 @@ class CrossPlayerMainView extends ItemView {
             }
 
             this.mobileOverlayHideTimeout = window.setTimeout(() => {
-                overlay.removeClass('is-visible');
-                overlay.style.opacity = "0";
-                overlay.style.pointerEvents = "none";
+                setOverlayVisibility(false);
                 this.mobileOverlayHideTimeout = null;
             }, 3000);
         };
 
         const hideOverlay = () => {
-            overlay.removeClass('is-visible');
-            overlay.style.opacity = "0";
-            overlay.style.pointerEvents = "none";
+            setOverlayVisibility(false);
             if (this.mobileOverlayHideTimeout !== null) {
                 window.clearTimeout(this.mobileOverlayHideTimeout);
                 this.mobileOverlayHideTimeout = null;
@@ -2902,6 +2940,7 @@ class CrossPlayerMainView extends ItemView {
             if (overlay.style.opacity === "0") {
                 event.preventDefault();
                 event.stopPropagation();
+                suppressControlTapUntil = Date.now() + 400;
                 if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
                     this.videoEl.pause();
                     const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
@@ -3026,6 +3065,7 @@ class CrossPlayerMainView extends ItemView {
         this.styleBigButton(progressFullscreenBtn);
         this.overlayFullscreenBtn = progressFullscreenBtn;
         progressFullscreenBtn.onclick = (e) => {
+            if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
             this.toggleFullscreen();
             window.setTimeout(() => {
@@ -3060,6 +3100,7 @@ class CrossPlayerMainView extends ItemView {
         };
 
         const seekFromProgress = (e: Event) => {
+            if (shouldSuppressControlAction(e)) return;
             stopProgressGesture(e);
             seekFromValue(Number(progressBar.value));
         };
@@ -3068,23 +3109,27 @@ class CrossPlayerMainView extends ItemView {
         progressBar.addEventListener('change', seekFromProgress);
 
         progressBarShell.addEventListener('click', (e: MouseEvent) => {
+            if (shouldSuppressControlAction(e)) return;
             stopProgressGesture(e);
             seekFromClientX(e.clientX);
         });
 
         progressBarShell.addEventListener('touchstart', (e: TouchEvent) => {
+            if (shouldSuppressControlAction(e)) return;
             if (e.touches.length === 0) return;
             stopProgressGesture(e);
             seekFromClientX(e.touches[0].clientX);
         }, { passive: false });
 
         progressBarShell.addEventListener('touchmove', (e: TouchEvent) => {
+            if (shouldSuppressControlAction(e)) return;
             if (e.touches.length === 0) return;
             stopProgressGesture(e);
             seekFromClientX(e.touches[0].clientX);
         }, { passive: false });
 
         progressBarShell.addEventListener('touchend', (e: TouchEvent) => {
+            if (shouldSuppressControlAction(e)) return;
             stopProgressGesture(e);
         }, { passive: false });
 
@@ -3099,9 +3144,10 @@ class CrossPlayerMainView extends ItemView {
         const prevBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
         setIcon(prevBtn, "skip-back");
         this.styleBigButton(prevBtn);
-        prevBtn.onclick = (e) => {
+        prevBtn.onclick = async (e) => {
+            if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
-            this.plugin.playPreviousItem();
+            await this.plugin.playPreviousItem();
             showOverlay();
         };
 
@@ -3110,6 +3156,7 @@ class CrossPlayerMainView extends ItemView {
         setIcon(seekBackBtn, "rewind");
         this.styleBigButton(seekBackBtn);
         seekBackBtn.onclick = (e) => {
+            if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
             this.seek(-this.plugin.data.settings.seekSecondsBackward);
             showOverlay();
@@ -3121,6 +3168,7 @@ class CrossPlayerMainView extends ItemView {
         this.styleBigButton(playPauseBtn);
 
         playPauseBtn.onclick = (e) => {
+            if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
             if (this.videoEl.paused) {
                 this.videoEl.play();
@@ -3141,6 +3189,7 @@ class CrossPlayerMainView extends ItemView {
         setIcon(seekFwdBtn, "fast-forward");
         this.styleBigButton(seekFwdBtn);
         seekFwdBtn.onclick = (e) => {
+            if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
             this.seek(this.plugin.data.settings.seekSecondsForward);
             showOverlay();
@@ -3150,9 +3199,10 @@ class CrossPlayerMainView extends ItemView {
         const nextBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
         setIcon(nextBtn, "skip-forward");
         this.styleBigButton(nextBtn);
-        nextBtn.onclick = (e) => {
+        nextBtn.onclick = async (e) => {
+            if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
-            this.plugin.playNextItem();
+            await this.plugin.playNextItem();
             showOverlay();
         };
 

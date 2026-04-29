@@ -3071,6 +3071,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async playMedia(item, autoPlay = false) {
+    this.rememberQueueScrollPosition();
     await this.activateMainView();
     if (this.mainView) {
       await this.mainView.stop();
@@ -3098,6 +3099,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async playNextUnread() {
+    this.rememberQueueScrollPosition();
     let currentIndex = -1;
     if (this.mainView && this.mainView.currentItem) {
       currentIndex = this.data.queue.findIndex((i) => i.id === this.mainView.currentItem.id);
@@ -3107,20 +3109,22 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     const nextItem = this.data.queue.find((item, index2) => index2 > currentIndex && item.status === "pending");
     if (nextItem) {
-      this.playMedia(nextItem, true);
+      await this.playMedia(nextItem, true);
     }
   }
   async playNextItem() {
+    this.rememberQueueScrollPosition();
     let currentIndex = -1;
     if (this.mainView && this.mainView.currentItem) {
       currentIndex = this.data.queue.findIndex((i) => i.id === this.mainView.currentItem.id);
     }
     const nextIndex = currentIndex + 1;
     if (nextIndex < this.data.queue.length) {
-      this.playMedia(this.data.queue[nextIndex], true);
+      await this.playMedia(this.data.queue[nextIndex], true);
     }
   }
   async playPreviousItem() {
+    this.rememberQueueScrollPosition();
     let currentIndex = -1;
     if (this.mainView && this.mainView.currentItem) {
       currentIndex = this.data.queue.findIndex((i) => i.id === this.mainView.currentItem.id);
@@ -3129,7 +3133,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return;
     const prevIndex = currentIndex - 1;
     if (prevIndex >= 0) {
-      this.playMedia(this.data.queue[prevIndex], true);
+      await this.playMedia(this.data.queue[prevIndex], true);
     }
   }
   async updateStatus(id, status) {
@@ -3814,6 +3818,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     return "list-video";
   }
   async onOpen() {
+    this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
     this.refresh();
   }
   captureScrollPosition() {
@@ -3842,10 +3847,12 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     }
   }
   refresh() {
+    var _a;
     const container = this.contentEl;
     const oldList = container.querySelector(".cross-player-list");
     if (oldList) {
       this.savedScrollTop = oldList.scrollTop;
+      this.plugin.data.queueScrollTop = this.savedScrollTop;
     }
     container.empty();
     container.style.display = "flex";
@@ -3952,9 +3959,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     list.style.flexGrow = "1";
     list.style.overflowY = "auto";
     list.style.overflowX = "hidden";
-    if (this.savedScrollTop > 0) {
+    const scrollTopToRestore = (_a = this.plugin.data.queueScrollTop) != null ? _a : this.savedScrollTop;
+    if (scrollTopToRestore > 0) {
       requestAnimationFrame(() => {
-        list.scrollTop = this.savedScrollTop;
+        list.scrollTop = scrollTopToRestore;
       });
     }
     list.addEventListener("scroll", () => {
@@ -3962,7 +3970,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       this.plugin.data.queueScrollTop = this.savedScrollTop;
     });
     this.plugin.data.queue.forEach((item) => {
-      var _a;
+      var _a2;
       const itemEl = list.createDiv({ cls: "cross-player-item" });
       itemEl.dataset.id = item.id;
       const isPlaying = item.status === "playing" || this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id;
@@ -3986,7 +3994,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       statusIcon.style.marginRight = "5px";
       if (this.plugin.data.settings.showMediaIndicator) {
         const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
-        const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
+        const ext = (_a2 = item.path.split(".").pop()) == null ? void 0 : _a2.toLowerCase();
         const isAudio = ["mp3", "wav", "ogg", "opus", "m4a", "aac", "flac"].includes(ext || "");
         (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
         typeIcon.style.marginRight = "10px";
@@ -4286,13 +4294,23 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     container.style.flexDirection = "column";
     container.style.justifyContent = "center";
     container.style.alignItems = "center";
+    container.style.width = "100%";
     container.style.height = "100%";
+    container.style.paddingTop = "0";
+    container.style.paddingLeft = "0";
+    container.style.paddingRight = "0";
+    container.style.margin = "0";
+    container.style.boxSizing = "border-box";
+    container.style.overflow = "hidden";
     container.style.backgroundColor = "#000";
     container.style.position = "relative";
     this.videoWrapperEl = container.createDiv({ cls: "cross-player-video-wrapper" });
     this.videoWrapperEl.style.position = "relative";
+    this.videoWrapperEl.style.flex = "1";
     this.videoWrapperEl.style.width = "100%";
     this.videoWrapperEl.style.height = "100%";
+    this.videoWrapperEl.style.minWidth = "0";
+    this.videoWrapperEl.style.minHeight = "0";
     this.videoWrapperEl.style.display = "flex";
     this.videoWrapperEl.style.justifyContent = "center";
     this.videoWrapperEl.style.alignItems = "center";
@@ -4397,25 +4415,39 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     overlay.style.opacity = "0";
     overlay.style.transition = "opacity 0.3s ease";
     overlay.style.pointerEvents = "none";
+    let suppressControlTapUntil = 0;
+    const setOverlayVisibility = (visible) => {
+      if (visible) {
+        overlay.addClass("is-visible");
+        overlay.style.opacity = "1";
+        overlay.style.pointerEvents = "auto";
+      } else {
+        overlay.removeClass("is-visible");
+        overlay.style.opacity = "0";
+        overlay.style.pointerEvents = "none";
+      }
+    };
+    const shouldSuppressControlAction = (event) => {
+      if (Date.now() < suppressControlTapUntil) {
+        event == null ? void 0 : event.preventDefault();
+        event == null ? void 0 : event.stopPropagation();
+        return true;
+      }
+      return false;
+    };
     const showOverlay = () => {
-      overlay.addClass("is-visible");
-      overlay.style.opacity = "1";
-      overlay.style.pointerEvents = "auto";
+      setOverlayVisibility(true);
       this.updateOverlayProgress();
       if (this.mobileOverlayHideTimeout !== null) {
         window.clearTimeout(this.mobileOverlayHideTimeout);
       }
       this.mobileOverlayHideTimeout = window.setTimeout(() => {
-        overlay.removeClass("is-visible");
-        overlay.style.opacity = "0";
-        overlay.style.pointerEvents = "none";
+        setOverlayVisibility(false);
         this.mobileOverlayHideTimeout = null;
       }, 3e3);
     };
     const hideOverlay = () => {
-      overlay.removeClass("is-visible");
-      overlay.style.opacity = "0";
-      overlay.style.pointerEvents = "none";
+      setOverlayVisibility(false);
       if (this.mobileOverlayHideTimeout !== null) {
         window.clearTimeout(this.mobileOverlayHideTimeout);
         this.mobileOverlayHideTimeout = null;
@@ -4436,6 +4468,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       if (overlay.style.opacity === "0") {
         event.preventDefault();
         event.stopPropagation();
+        suppressControlTapUntil = Date.now() + 400;
         if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
           this.videoEl.pause();
           const playBtn = overlay.querySelector(".play-btn");
@@ -4551,6 +4584,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.styleBigButton(progressFullscreenBtn);
     this.overlayFullscreenBtn = progressFullscreenBtn;
     progressFullscreenBtn.onclick = (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       e.stopPropagation();
       this.toggleFullscreen();
       window.setTimeout(() => {
@@ -4582,28 +4617,38 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       e.stopPropagation();
     };
     const seekFromProgress = (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       stopProgressGesture(e);
       seekFromValue(Number(progressBar.value));
     };
     progressBar.addEventListener("input", seekFromProgress);
     progressBar.addEventListener("change", seekFromProgress);
     progressBarShell.addEventListener("click", (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       stopProgressGesture(e);
       seekFromClientX(e.clientX);
     });
     progressBarShell.addEventListener("touchstart", (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       if (e.touches.length === 0)
         return;
       stopProgressGesture(e);
       seekFromClientX(e.touches[0].clientX);
     }, { passive: false });
     progressBarShell.addEventListener("touchmove", (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       if (e.touches.length === 0)
         return;
       stopProgressGesture(e);
       seekFromClientX(e.touches[0].clientX);
     }, { passive: false });
     progressBarShell.addEventListener("touchend", (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       stopProgressGesture(e);
     }, { passive: false });
     const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
@@ -4615,15 +4660,19 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const prevBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
     (0, import_obsidian.setIcon)(prevBtn, "skip-back");
     this.styleBigButton(prevBtn);
-    prevBtn.onclick = (e) => {
+    prevBtn.onclick = async (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       e.stopPropagation();
-      this.plugin.playPreviousItem();
+      await this.plugin.playPreviousItem();
       showOverlay();
     };
     const seekBackBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
     (0, import_obsidian.setIcon)(seekBackBtn, "rewind");
     this.styleBigButton(seekBackBtn);
     seekBackBtn.onclick = (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       e.stopPropagation();
       this.seek(-this.plugin.data.settings.seekSecondsBackward);
       showOverlay();
@@ -4632,6 +4681,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     (0, import_obsidian.setIcon)(playPauseBtn, "pause");
     this.styleBigButton(playPauseBtn);
     playPauseBtn.onclick = (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       e.stopPropagation();
       if (this.videoEl.paused) {
         this.videoEl.play();
@@ -4648,6 +4699,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     (0, import_obsidian.setIcon)(seekFwdBtn, "fast-forward");
     this.styleBigButton(seekFwdBtn);
     seekFwdBtn.onclick = (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       e.stopPropagation();
       this.seek(this.plugin.data.settings.seekSecondsForward);
       showOverlay();
@@ -4655,9 +4708,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const nextBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
     (0, import_obsidian.setIcon)(nextBtn, "skip-forward");
     this.styleBigButton(nextBtn);
-    nextBtn.onclick = (e) => {
+    nextBtn.onclick = async (e) => {
+      if (shouldSuppressControlAction(e))
+        return;
       e.stopPropagation();
-      this.plugin.playNextItem();
+      await this.plugin.playNextItem();
       showOverlay();
     };
     showOverlay();

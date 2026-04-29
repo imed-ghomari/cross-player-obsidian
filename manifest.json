@@ -1,7 +1,7 @@
 {
 	"id": "cross-player",
 	"name": "Cross Player",
-	"version": "1.1.4",
+	"version": "1.2.0",
 	"minAppVersion": "0.15.0",
 	"description": "A media player plugin that watches a folder and plays media.",
 	"author": "Imed Ghomari",
