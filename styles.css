@@ -207,9 +207,18 @@ video::-webkit-media-controls-start-playback-button {
 }
 
 /* Mobile padding for main view to avoid overlap with Obsidian toolbar */
+.workspace-leaf-content[data-type="cross-player-main-view"] .view-content {
+    padding: 0 !important;
+    overflow: hidden;
+}
+
 .cross-player-main-view {
     width: 100%;
     height: 100%;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
     padding: 0;
     margin: 0;
     overflow: hidden;
@@ -218,15 +227,13 @@ video::-webkit-media-controls-start-playback-button {
 }
 
 .cross-player-video-wrapper {
+    flex: 1 1 auto;
     width: 100%;
     height: 100%;
     min-width: 0;
     min-height: 0;
     background: var(--background-primary);
-}
-
-.is-mobile .cross-player-main-view {
-    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+    overflow: hidden;
 }
 
 .is-mobile .cross-player-main-view:fullscreen,
@@ -245,6 +252,16 @@ video::-webkit-media-controls-start-playback-button {
 /* Reset for tablet if not needed (user said tablet is fine) */
 .is-tablet .cross-player-main-view {
     padding-bottom: 0;
+}
+
+.is-mobile .cross-player-overlay-progress-wrap {
+    bottom: max(56px, calc(env(safe-area-inset-bottom, 0px) + 12px));
+}
+
+.is-tablet .cross-player-overlay-progress-wrap,
+.is-mobile .cross-player-main-view:fullscreen .cross-player-overlay-progress-wrap,
+.is-mobile .cross-player-main-view:-webkit-full-screen .cross-player-overlay-progress-wrap {
+    bottom: 18px;
 }
 
 .cross-player-main-view.is-media-active .cross-player-video-wrapper.is-video-active {

@@ -2689,6 +2689,22 @@ class CrossPlayerMainView extends ItemView {
         this.plugin = plugin;
     }
 
+    getOverlayProgressBottomOffset(): string {
+        if (document.fullscreenElement) {
+            return "18px";
+        }
+
+        if (Platform.isTablet) {
+            return "18px";
+        }
+
+        if (Platform.isMobile) {
+            return "max(56px, calc(env(safe-area-inset-bottom, 0px) + 12px))";
+        }
+
+        return "18px";
+    }
+
     getViewType() {
         return VIEW_TYPE_CROSS_PLAYER_MAIN;
     }
@@ -2744,10 +2760,12 @@ class CrossPlayerMainView extends ItemView {
 
         container.style.display = "flex";
         container.style.flexDirection = "column";
-        container.style.justifyContent = "center";
-        container.style.alignItems = "center";
+        container.style.justifyContent = "flex-start";
+        container.style.alignItems = "stretch";
         container.style.width = "100%";
         container.style.height = "100%";
+        container.style.minWidth = "0";
+        container.style.minHeight = "0";
         container.style.paddingTop = "0";
         container.style.paddingLeft = "0";
         container.style.paddingRight = "0";
@@ -2760,7 +2778,7 @@ class CrossPlayerMainView extends ItemView {
         // Wrapper for video and overlay to manage events cleanly
         this.videoWrapperEl = container.createDiv({ cls: 'cross-player-video-wrapper' });
         this.videoWrapperEl.style.position = "relative";
-        this.videoWrapperEl.style.flex = "1";
+        this.videoWrapperEl.style.flex = "1 1 auto";
         this.videoWrapperEl.style.width = "100%";
         this.videoWrapperEl.style.height = "100%";
         this.videoWrapperEl.style.minWidth = "0";
@@ -2769,16 +2787,24 @@ class CrossPlayerMainView extends ItemView {
         this.videoWrapperEl.style.justifyContent = "center";
         this.videoWrapperEl.style.alignItems = "center";
         this.videoWrapperEl.style.background = "var(--background-primary)";
+        this.videoWrapperEl.style.overflow = "hidden";
 
         this.videoEl = this.videoWrapperEl.createEl("video");
         this.videoEl.controls = !this.shouldUseTouchOverlay();
         this.videoEl.style.maxWidth = "100%";
         this.videoEl.style.maxHeight = "100%";
         this.videoEl.style.width = "100%";
-        this.videoEl.style.height = "100%";
+        this.videoEl.style.height = "auto";
+        this.videoEl.style.display = "block";
+        this.videoEl.style.objectFit = "contain";
 
         this.registerDomEvent(document, 'fullscreenchange', () => {
-            window.setTimeout(() => this.refreshMobileOverlay(), 50);
+            window.setTimeout(() => {
+                this.refreshMobileOverlay();
+                if (this.overlayProgressWrapEl) {
+                    this.overlayProgressWrapEl.style.bottom = this.getOverlayProgressBottomOffset();
+                }
+            }, 50);
         });
 
         this.showIdlePlaceholder();
@@ -2959,17 +2985,37 @@ class CrossPlayerMainView extends ItemView {
         let pointerStartY = 0;
         let pointerMoved = false;
 
-        const isOverlayControlTarget = (target: HTMLElement | null) => {
-            if (!target) return false;
+        const isOverlayVisible = () => overlay.style.opacity !== "0";
+
+        const isProgressWrapInteractive = () => {
+            const progressWrapEl = this.overlayProgressWrapEl;
             return Boolean(
-                target.closest('.cross-player-big-btn') ||
+                progressWrapEl &&
+                isOverlayVisible() &&
+                progressWrapEl.style.visibility !== "hidden" &&
+                progressWrapEl.style.pointerEvents !== "none"
+            );
+        };
+
+        const isOverlayControlTarget = (target: HTMLElement | null) => {
+            if (!target || !isOverlayVisible()) return false;
+
+            if (target.closest('.cross-player-big-btn')) {
+                return true;
+            }
+
+            if (!isProgressWrapInteractive()) {
+                return false;
+            }
+
+            return Boolean(
                 target.closest('.cross-player-overlay-progress') ||
                 target.closest('.cross-player-overlay-progress-wrap')
             );
         };
 
         const handlePlayerTap = (target: HTMLElement | null, event: Event) => {
-            if (overlay.style.opacity === "0") {
+            if (!isOverlayVisible()) {
                 event.preventDefault();
                 event.stopPropagation();
                 suppressControlTapUntil = Date.now() + 400;
@@ -3030,7 +3076,7 @@ class CrossPlayerMainView extends ItemView {
         progressWrap.style.position = "absolute";
         progressWrap.style.left = "14px";
         progressWrap.style.right = "14px";
-        progressWrap.style.bottom = "18px";
+        progressWrap.style.bottom = this.getOverlayProgressBottomOffset();
         progressWrap.style.zIndex = "11";
         progressWrap.style.opacity = "0";
         progressWrap.style.visibility = "hidden";
@@ -3134,6 +3180,7 @@ class CrossPlayerMainView extends ItemView {
         };
 
         const seekFromProgress = (e: Event) => {
+            if (!isProgressWrapInteractive()) return;
             if (shouldSuppressControlAction(e)) return;
             stopProgressGesture(e);
             seekFromValue(Number(progressBar.value));
@@ -3143,12 +3190,14 @@ class CrossPlayerMainView extends ItemView {
         progressBar.addEventListener('change', seekFromProgress);
 
         progressBarShell.addEventListener('click', (e: MouseEvent) => {
+            if (!isProgressWrapInteractive()) return;
             if (shouldSuppressControlAction(e)) return;
             stopProgressGesture(e);
             seekFromClientX(e.clientX);
         });
 
         progressBarShell.addEventListener('touchstart', (e: TouchEvent) => {
+            if (!isProgressWrapInteractive()) return;
             if (shouldSuppressControlAction(e)) return;
             if (e.touches.length === 0) return;
             stopProgressGesture(e);
@@ -3156,6 +3205,7 @@ class CrossPlayerMainView extends ItemView {
         }, { passive: false });
 
         progressBarShell.addEventListener('touchmove', (e: TouchEvent) => {
+            if (!isProgressWrapInteractive()) return;
             if (shouldSuppressControlAction(e)) return;
             if (e.touches.length === 0) return;
             stopProgressGesture(e);
@@ -3163,6 +3213,7 @@ class CrossPlayerMainView extends ItemView {
         }, { passive: false });
 
         progressBarShell.addEventListener('touchend', (e: TouchEvent) => {
+            if (!isProgressWrapInteractive()) return;
             if (shouldSuppressControlAction(e)) return;
             stopProgressGesture(e);
         }, { passive: false });
@@ -3395,6 +3446,9 @@ class CrossPlayerMainView extends ItemView {
         if (!this.audioPlaceholderEl || !this.videoEl) return;
         this.contentEl.removeClass('is-media-active');
         this.videoWrapperEl?.removeClass('is-video-active');
+        if (this.videoWrapperEl) {
+            this.videoWrapperEl.style.justifyContent = "center";
+        }
 
         const badge = this.audioPlaceholderEl.createDiv();
         badge.style.width = "96px";
@@ -3440,6 +3494,9 @@ class CrossPlayerMainView extends ItemView {
         if (!this.audioPlaceholderEl || !this.videoEl) return;
         this.contentEl.addClass('is-media-active');
         this.videoWrapperEl?.removeClass('is-video-active');
+        if (this.videoWrapperEl) {
+            this.videoWrapperEl.style.justifyContent = "center";
+        }
 
         const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: 'cross-player-music-icon' });
         setIcon(musicIconEl, "music");
@@ -3511,7 +3568,7 @@ class CrossPlayerMainView extends ItemView {
             this.videoEl.style.maxWidth = "100%";
             this.videoEl.style.maxHeight = "100%";
             this.videoEl.style.width = "100%";
-            this.videoEl.style.height = "100%";
+            this.videoEl.style.height = "auto";
         }
 
         // --- Subtitle Support Preparation ---
@@ -3586,6 +3643,7 @@ class CrossPlayerMainView extends ItemView {
         if (isAudio) {
             this.showAudioPlaceholder();
             this.videoWrapperEl.removeClass('is-video-active');
+            this.videoWrapperEl.style.justifyContent = "center";
 
             // Adjust video element to be minimal (just controls)
             // But we can't easily make it "just controls". 
@@ -3601,10 +3659,12 @@ class CrossPlayerMainView extends ItemView {
             // Video
             this.hidePlaceholder();
             this.videoWrapperEl.addClass('is-video-active');
+            this.videoWrapperEl.style.justifyContent = "flex-end";
             // Reset video properties
             this.videoEl.poster = "";
             this.videoEl.style.background = "";
-            this.videoEl.style.height = "100%";
+            this.videoEl.style.width = "100%";
+            this.videoEl.style.height = "auto";
             this.videoEl.style.position = "static"; // Default
             this.videoEl.style.zIndex = "auto";
         }
