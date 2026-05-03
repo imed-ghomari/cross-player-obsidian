@@ -3204,35 +3204,52 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("No completed media to clean.");
       return;
     }
+    const removedIds = /* @__PURE__ */ new Set();
     let count = 0;
+    let failedCount = 0;
     for (const item of toRemove) {
       try {
         const file = this.app.vault.getAbstractFileByPath(item.path);
         if (file instanceof import_obsidian.TFile) {
-          await this.app.vault.trash(file, true);
+          await this.app.vault.delete(file);
           count++;
+          removedIds.add(item.id);
+        } else if (!file) {
+          removedIds.add(item.id);
         }
       } catch (e) {
         console.error("Failed to delete", item.path, e);
+        failedCount++;
       }
     }
-    this.data.queue = this.data.queue.filter((item) => item.status !== "completed");
+    this.data.queue = this.data.queue.filter((item) => item.status !== "completed" || !removedIds.has(item.id));
     await this.saveData();
-    new import_obsidian.Notice(`Cleaned ${count} media files.`);
+    if (failedCount > 0) {
+      new import_obsidian.Notice(`Permanently deleted ${count} media file(s). ${failedCount} item(s) stayed in the queue because deletion failed.`);
+      return;
+    }
+    new import_obsidian.Notice(`Permanently deleted ${count} media file(s).`);
   }
   async deleteMediaItem(item) {
     const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
-    if (isCurrent && this.mainView) {
-      this.mainView.videoEl.pause();
-    }
+    let deletedFromDisk = false;
     try {
       const file = this.app.vault.getAbstractFileByPath(item.path);
       if (file instanceof import_obsidian.TFile) {
-        await this.app.vault.trash(file, true);
+        await this.app.vault.delete(file);
+        deletedFromDisk = true;
+      } else if (!file) {
+        deletedFromDisk = true;
       }
     } catch (e) {
       console.error("Error deleting file:", e);
-      new import_obsidian.Notice("Error deleting file.");
+    }
+    if (!deletedFromDisk) {
+      new import_obsidian.Notice("Could not permanently delete the file. It was left in the queue.");
+      return;
+    }
+    if (isCurrent && this.mainView) {
+      this.mainView.videoEl.pause();
     }
     let nextItem;
     if (isCurrent) {
@@ -3241,7 +3258,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     this.data.queue = this.data.queue.filter((i) => i.id !== item.id);
     await this.saveData();
-    new import_obsidian.Notice(`Deleted: ${item.name}`);
+    new import_obsidian.Notice(`Permanently deleted: ${item.name}`);
     if (isCurrent) {
       if (nextItem) {
         await this.playMedia(nextItem, true);
@@ -3647,7 +3664,7 @@ var ConfirmCleanConsumedMediaModal = class extends import_obsidian.Modal {
     contentEl.empty();
     contentEl.createEl("h3", { text: "Clean consumed media?" });
     contentEl.createEl("p", {
-      text: completedCount > 0 ? `This will move ${completedCount} completed media file(s) to the trash and remove them from the queue.` : "There are no completed media files to clean right now."
+      text: completedCount > 0 ? `This will permanently delete ${completedCount} completed media file(s) and remove them from the queue.` : "There are no completed media files to clean right now."
     });
     const actions = contentEl.createDiv({ cls: "cross-player-modal-actions" });
     const cancelBtn = actions.createEl("button", { text: completedCount > 0 ? "Cancel" : "Close" });

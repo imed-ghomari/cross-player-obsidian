@@ -46,7 +46,7 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 > For Android users, please note that you should use [Seal](https://github.com/JunkFood02/Seal) for downloading YouTube videos, as this feature does not work on mobile.
 
 ### 🧹 Maintenance
-- **Clean Consumed**: One-click command to delete all completed files from disk to free up space.
+- **Clean Consumed**: One-click command to permanently delete all completed files from disk to free up space.
 - **Storage Limits**: Set a maximum storage limit (GB) to get visual warnings when your queue gets too big.
 
 ## Usage
@@ -67,13 +67,13 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 
 - `Open Cross Player`: Opens the queue view.
 - `Download YouTube Video`: Opens the modal to paste YouTube links.
-- `Clean Consumed Media`: Deletes all files marked as "completed".
+- `Clean Consumed Media`: Permanently deletes all files marked as "completed".
 - `Reload Data from Disk`: Manually re-loads data and scans the folder for new files.
 - `Set Watched Folder`: Picker to select a folder via UI.
 - `Increase/Decrease Playback Speed`: Adjust speed by 0.1x steps.
 - `Seek Forward/Backward`: Jump by configured seconds.
 - `Go to Next/Previous File`: Skip through your queue.
-- `Delete Current File`: Delete the currently playing file immediately.
+- `Delete Current File`: Permanently delete the currently playing file immediately.
 - `Set Current File as Unread`: Reset status to pending.
 - `Toggle Fullscreen`: Enter or exit fullscreen mode.
 - `Toggle Subtitles`: Enable/disable subtitle tracks.
