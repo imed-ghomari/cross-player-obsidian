@@ -6,7 +6,7 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 
 ### 📺 Media Playback
 - **Universal Player**: Supports a wide range of formats.
-  - **Audio**: mp3, wav, ogg, opus, m4a, flac, aac.
+  - **Audio**: mp3, wav, ogg, opus, m4a, m4b, weba, flac, aac, aif, aiff, caf.
   - **Video**: mp4, webm, ogv, mkv, 3gp.
 - **Enhanced Audio Experience**: Audio files feature a dedicated placeholder with a music icon and file name, keeping the interface clean and informative.
 - **Smart Resume**: Automatically resumes where you left off. New files start paused; in-progress files auto-play.
@@ -23,7 +23,7 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 - **Smart Gestures**:
   - **Tap Video**: Pauses playback and reveals the control overlay.
   - **Tap Background**: Hides the overlay immediately.
-  - **Safety Zone**: The bottom 50px allows interaction with native scrubbing and fullscreen controls.
+  - **Safe Progress Strip**: Hidden mobile controls no longer capture taps until the overlay is visible again.
 - **Theme Adaptive**: Overlay buttons automatically switch between Light and Dark modes to match your system/app theme.
 - **Conflict Free**: Native play buttons are hidden on mobile to prevent accidental double-triggering and visual clutter.
 

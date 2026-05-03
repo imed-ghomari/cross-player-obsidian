@@ -214,6 +214,7 @@ video::-webkit-media-controls-start-playback-button {
     margin: 0;
     overflow: hidden;
     box-sizing: border-box;
+    background: var(--background-primary);
 }
 
 .cross-player-video-wrapper {
@@ -221,10 +222,11 @@ video::-webkit-media-controls-start-playback-button {
     height: 100%;
     min-width: 0;
     min-height: 0;
+    background: var(--background-primary);
 }
 
 .is-mobile .cross-player-main-view {
-    padding-bottom: 60px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
 }
 
 .is-mobile .cross-player-main-view:fullscreen,
@@ -243,6 +245,10 @@ video::-webkit-media-controls-start-playback-button {
 /* Reset for tablet if not needed (user said tablet is fine) */
 .is-tablet .cross-player-main-view {
     padding-bottom: 0;
+}
+
+.cross-player-main-view.is-media-active .cross-player-video-wrapper.is-video-active {
+    background: #000;
 }
 
 @media (orientation: landscape) {

@@ -42,6 +42,9 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
 
 const LAST_WATCHED_FOLDER_KEY = 'cross-player:last-good-watched-folder';
 const REQUIRED_PLUGIN_FILES = ['manifest.json', 'main.js'];
+const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'm4b', 'weba', 'aac', 'flac', 'aif', 'aiff', 'caf'];
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mkv', '3gp'];
+const SUPPORTED_MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS];
 
 export default class CrossPlayerPlugin extends Plugin {
     data: CrossPlayerData;
@@ -929,9 +932,7 @@ export default class CrossPlayerPlugin extends Plugin {
         console.log(`[Cross Player] processing: ${file.path}`);
 
         const ext = file.extension.toLowerCase();
-        const validExtensions = ['mp4', 'webm', 'ogv', 'mp3', 'wav', 'ogg', 'opus', 'mkv', 'm4a', '3gp', 'flac', 'aac'];
-
-        if (!validExtensions.includes(ext)) return;
+        if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return;
 
         // Check if already in queue
         let existing = this.data.queue.find(item => item.path === file.path);
@@ -2328,7 +2329,7 @@ class CrossPlayerListView extends ItemView {
             if (this.plugin.data.settings.showMediaIndicator) {
                 const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
                 const ext = item.path.split('.').pop()?.toLowerCase();
-                const isAudio = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'aac', 'flac'].includes(ext || '');
+                const isAudio = AUDIO_EXTENSIONS.includes(ext || '');
                 setIcon(typeIcon, isAudio ? "headphones" : "film");
                 typeIcon.style.marginRight = "10px";
                 typeIcon.style.color = "var(--text-muted)";
@@ -2651,6 +2652,7 @@ class CrossPlayerMainView extends ItemView {
     videoWrapperEl: HTMLDivElement; // Added wrapper property
     overlayEl: HTMLElement | null = null;
     overlayProgressEl: HTMLInputElement | null = null;
+    overlayProgressWrapEl: HTMLElement | null = null;
     overlayCurrentTimeEl: HTMLElement | null = null;
     overlayDurationEl: HTMLElement | null = null;
     overlayFullscreenBtn: HTMLElement | null = null;
@@ -2734,7 +2736,7 @@ class CrossPlayerMainView extends ItemView {
         container.style.margin = "0";
         container.style.boxSizing = "border-box";
         container.style.overflow = "hidden";
-        container.style.backgroundColor = "#000";
+        container.style.backgroundColor = "var(--background-primary)";
         container.style.position = "relative"; // Needed for overlay
 
         // Wrapper for video and overlay to manage events cleanly
@@ -2748,6 +2750,7 @@ class CrossPlayerMainView extends ItemView {
         this.videoWrapperEl.style.display = "flex";
         this.videoWrapperEl.style.justifyContent = "center";
         this.videoWrapperEl.style.alignItems = "center";
+        this.videoWrapperEl.style.background = "var(--background-primary)";
 
         this.videoEl = this.videoWrapperEl.createEl("video");
         this.videoEl.controls = !this.shouldUseTouchOverlay();
@@ -2841,6 +2844,7 @@ class CrossPlayerMainView extends ItemView {
                 this.overlayEl = null;
             }
             this.overlayProgressEl = null;
+            this.overlayProgressWrapEl = null;
             if (this.videoEl) {
                 this.videoEl.controls = true;
             }
@@ -2884,10 +2888,20 @@ class CrossPlayerMainView extends ItemView {
                 overlay.addClass('is-visible');
                 overlay.style.opacity = "1";
                 overlay.style.pointerEvents = "auto";
+                if (this.overlayProgressWrapEl) {
+                    this.overlayProgressWrapEl.style.opacity = "1";
+                    this.overlayProgressWrapEl.style.visibility = "visible";
+                    this.overlayProgressWrapEl.style.pointerEvents = "auto";
+                }
             } else {
                 overlay.removeClass('is-visible');
                 overlay.style.opacity = "0";
                 overlay.style.pointerEvents = "none";
+                if (this.overlayProgressWrapEl) {
+                    this.overlayProgressWrapEl.style.opacity = "0";
+                    this.overlayProgressWrapEl.style.visibility = "hidden";
+                    this.overlayProgressWrapEl.style.pointerEvents = "none";
+                }
             }
         };
 
@@ -2994,13 +3008,15 @@ class CrossPlayerMainView extends ItemView {
         }
 
         const progressWrap = overlay.createDiv({ cls: 'cross-player-overlay-progress-wrap' });
+        this.overlayProgressWrapEl = progressWrap;
         progressWrap.style.position = "absolute";
         progressWrap.style.left = "14px";
         progressWrap.style.right = "14px";
         progressWrap.style.bottom = "18px";
         progressWrap.style.zIndex = "11";
-        progressWrap.style.opacity = "1";
-        progressWrap.style.pointerEvents = "auto";
+        progressWrap.style.opacity = "0";
+        progressWrap.style.visibility = "hidden";
+        progressWrap.style.pointerEvents = "none";
         progressWrap.style.padding = "10px 12px";
         progressWrap.style.touchAction = "none";
         progressWrap.style.display = "flex";
@@ -3359,6 +3375,8 @@ class CrossPlayerMainView extends ItemView {
     showIdlePlaceholder() {
         this.ensurePlaceholderContainer();
         if (!this.audioPlaceholderEl || !this.videoEl) return;
+        this.contentEl.removeClass('is-media-active');
+        this.videoWrapperEl?.removeClass('is-video-active');
 
         const badge = this.audioPlaceholderEl.createDiv();
         badge.style.width = "96px";
@@ -3402,6 +3420,8 @@ class CrossPlayerMainView extends ItemView {
     showAudioPlaceholder() {
         this.ensurePlaceholderContainer();
         if (!this.audioPlaceholderEl || !this.videoEl) return;
+        this.contentEl.addClass('is-media-active');
+        this.videoWrapperEl?.removeClass('is-video-active');
 
         const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: 'cross-player-music-icon' });
         setIcon(musicIconEl, "music");
@@ -3429,6 +3449,7 @@ class CrossPlayerMainView extends ItemView {
             this.videoEl.style.opacity = "1";
             this.videoEl.style.pointerEvents = "auto";
         }
+        this.contentEl.addClass('is-media-active');
     }
 
     async stop() {
@@ -3541,10 +3562,12 @@ class CrossPlayerMainView extends ItemView {
 
         // Handle Audio vs Video UI
         const ext = item.path.split('.').pop()?.toLowerCase();
-        const isAudio = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'aac', 'flac'].includes(ext || '');
+        const isAudio = AUDIO_EXTENSIONS.includes(ext || '');
+        this.contentEl.toggleClass('is-media-active', true);
 
         if (isAudio) {
             this.showAudioPlaceholder();
+            this.videoWrapperEl.removeClass('is-video-active');
 
             // Adjust video element to be minimal (just controls)
             // But we can't easily make it "just controls". 
@@ -3559,6 +3582,7 @@ class CrossPlayerMainView extends ItemView {
         } else {
             // Video
             this.hidePlaceholder();
+            this.videoWrapperEl.addClass('is-video-active');
             // Reset video properties
             this.videoEl.poster = "";
             this.videoEl.style.background = "";
