@@ -4265,6 +4265,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.gainNode = null;
     this.compressorNode = null;
     this.mobileOverlayHideTimeout = null;
+    this.activeMediaSrc = null;
+    this.lastPositionPersist = 0;
     this.plugin = plugin;
   }
   getOverlayProgressBottomOffset() {
@@ -4287,6 +4289,42 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   }
   getIcon() {
     return "play";
+  }
+  isCurrentPlaybackSource() {
+    if (!this.videoEl || !this.currentItem || !this.activeMediaSrc)
+      return false;
+    const currentSrc = this.videoEl.currentSrc || this.videoEl.src;
+    return currentSrc === this.activeMediaSrc;
+  }
+  async syncCurrentItemDuration() {
+    if (!this.videoEl || !this.currentItem || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+      return;
+    }
+    const actualDuration = this.videoEl.duration;
+    if (Math.abs((this.currentItem.duration || 0) - actualDuration) <= 1) {
+      return;
+    }
+    this.currentItem.duration = actualDuration;
+    await this.plugin.saveData(false);
+    if (this.plugin.listView) {
+      this.plugin.listView.updateStats();
+    }
+  }
+  async persistCurrentPlaybackPosition(force = false) {
+    if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || !isFinite(this.videoEl.currentTime)) {
+      return;
+    }
+    this.currentItem.position = this.videoEl.currentTime;
+    await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
+  }
+  async syncCompletionStatusFromPlayback() {
+    if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || this.currentItem.status === "completed" || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+      return;
+    }
+    const progress = this.videoEl.currentTime / this.videoEl.duration;
+    if (progress > 0.95) {
+      await this.plugin.updateStatus(this.currentItem.id, "completed");
+    }
   }
   async onOpen() {
     const container = this.contentEl;
@@ -4369,7 +4407,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.showIdlePlaceholder();
     this.refreshMobileOverlay();
     this.videoEl.onended = async () => {
-      if (this.currentItem) {
+      if (this.currentItem && this.isCurrentPlaybackSource()) {
+        await this.persistCurrentPlaybackPosition(true);
+        await this.syncCompletionStatusFromPlayback();
         if (this.currentItem.status !== "completed") {
           await this.plugin.updateStatus(this.currentItem.id, "completed");
         }
@@ -4379,10 +4419,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
     };
     this.videoEl.ontimeupdate = async () => {
-      if (this.currentItem) {
-        if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
-          return;
-        }
+      if (this.currentItem && this.isCurrentPlaybackSource()) {
         this.currentItem.position = this.videoEl.currentTime;
         const now = Date.now();
         if (now - this.lastEtcUpdate > 5e3) {
@@ -4390,6 +4427,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           if (this.plugin.listView) {
             this.plugin.listView.updateStats();
           }
+        }
+        if (now - this.lastPositionPersist > 5e3) {
+          this.lastPositionPersist = now;
+          await this.persistCurrentPlaybackPosition();
         }
         if (now - this.lastProgressUpdate > 1e3) {
           this.lastProgressUpdate = now;
@@ -4399,23 +4440,41 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           }
         }
         this.updateOverlayProgress();
-        if (this.currentItem.status !== "completed" && this.videoEl.duration > 0) {
-          const progress = this.videoEl.currentTime / this.videoEl.duration;
-          if (progress > 0.95) {
-            await this.plugin.updateStatus(this.currentItem.id, "completed");
-          }
-        }
+        await this.syncCompletionStatusFromPlayback();
       }
     };
     this.videoEl.onpause = async () => {
-      if (this.currentItem) {
-        if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
-          return;
-        }
-        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
+      if (this.currentItem && this.isCurrentPlaybackSource()) {
+        await this.persistCurrentPlaybackPosition(true);
       }
       this.updateOverlayProgress();
     };
+  }
+  async onClose() {
+    const closingItem = this.currentItem;
+    const shouldResetStatus = (closingItem == null ? void 0 : closingItem.status) === "playing";
+    if (this.videoEl) {
+      this.videoEl.pause();
+      await this.syncCurrentItemDuration();
+      await this.persistCurrentPlaybackPosition(true);
+      await this.syncCompletionStatusFromPlayback();
+      this.videoEl.removeAttribute("src");
+      this.videoEl.load();
+    }
+    if (closingItem && shouldResetStatus) {
+      if (closingItem.finished) {
+        await this.plugin.updateStatus(closingItem.id, "completed");
+      } else {
+        await this.plugin.updateStatus(closingItem.id, "pending");
+      }
+    }
+    this.activeMediaSrc = null;
+    this.currentItem = null;
+    this.lastPositionPersist = 0;
+    if (this.plugin.mainView === this) {
+      this.plugin.mainView = null;
+    }
+    this.contentEl.empty();
   }
   refreshMobileOverlay() {
     const container = this.videoWrapperEl || this.contentEl;
@@ -5012,13 +5071,16 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (this.videoEl) {
       this.videoEl.pause();
       if (this.currentItem) {
-        this.currentItem.position = this.videoEl.currentTime;
-        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
+        await this.syncCurrentItemDuration();
+        await this.persistCurrentPlaybackPosition(true);
+        await this.syncCompletionStatusFromPlayback();
       }
       this.videoEl.removeAttribute("src");
       this.videoEl.load();
     }
+    this.activeMediaSrc = null;
     this.currentItem = null;
+    this.lastPositionPersist = 0;
     this.showIdlePlaceholder();
   }
   async play(item, autoPlay = false) {
@@ -5063,6 +5125,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
     }
     this.videoEl.onloadedmetadata = () => {
+      void this.syncCurrentItemDuration();
       this.updateOverlayProgress();
       if (!sidecarFound && this.videoEl && this.videoEl.textTracks && this.videoEl.textTracks.length > 0) {
         for (let i = 0; i < this.videoEl.textTracks.length; i++) {
@@ -5074,6 +5137,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         }
       }
     };
+    this.videoEl.ondurationchange = () => {
+      void this.syncCurrentItemDuration();
+      this.updateOverlayProgress();
+    };
     this.videoEl.onerror = () => {
       var _a2;
       console.error("Video playback error", (_a2 = this.videoEl) == null ? void 0 : _a2.error);
@@ -5081,7 +5148,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
     const file = this.plugin.app.vault.getAbstractFileByPath(item.path);
     if (file instanceof import_obsidian.TFile) {
-      this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
+      const resourcePath = this.plugin.app.vault.getResourcePath(file);
+      this.activeMediaSrc = resourcePath;
+      this.videoEl.src = resourcePath;
     } else {
       console.error("File not found for playback:", item.path);
       this.showIdlePlaceholder();
@@ -5090,6 +5159,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const resumePosition = item.position > 2 ? item.position - 2 : item.position;
     this.videoEl.currentTime = resumePosition || 0;
     this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1;
+    this.lastPositionPersist = 0;
     this.applyAudioSettings();
     const ext = (_a = item.path.split(".").pop()) == null ? void 0 : _a.toLowerCase();
     const isAudio = AUDIO_EXTENSIONS.includes(ext || "");

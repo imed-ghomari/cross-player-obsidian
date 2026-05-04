@@ -2683,6 +2683,8 @@ class CrossPlayerMainView extends ItemView {
     gainNode: GainNode | null = null;
     compressorNode: DynamicsCompressorNode | null = null;
     mobileOverlayHideTimeout: number | null = null;
+    activeMediaSrc: string | null = null;
+    lastPositionPersist: number = 0;
 
     constructor(leaf: WorkspaceLeaf, plugin: CrossPlayerPlugin) {
         super(leaf);
@@ -2715,6 +2717,57 @@ class CrossPlayerMainView extends ItemView {
 
     getIcon() {
         return "play";
+    }
+
+    isCurrentPlaybackSource() {
+        if (!this.videoEl || !this.currentItem || !this.activeMediaSrc) return false;
+        const currentSrc = this.videoEl.currentSrc || this.videoEl.src;
+        return currentSrc === this.activeMediaSrc;
+    }
+
+    async syncCurrentItemDuration() {
+        if (!this.videoEl || !this.currentItem || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+            return;
+        }
+
+        const actualDuration = this.videoEl.duration;
+        if (Math.abs((this.currentItem.duration || 0) - actualDuration) <= 1) {
+            return;
+        }
+
+        this.currentItem.duration = actualDuration;
+        await this.plugin.saveData(false);
+
+        if (this.plugin.listView) {
+            this.plugin.listView.updateStats();
+        }
+    }
+
+    async persistCurrentPlaybackPosition(force: boolean = false) {
+        if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || !isFinite(this.videoEl.currentTime)) {
+            return;
+        }
+
+        this.currentItem.position = this.videoEl.currentTime;
+        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
+    }
+
+    async syncCompletionStatusFromPlayback() {
+        if (
+            !this.videoEl ||
+            !this.currentItem ||
+            !this.isCurrentPlaybackSource() ||
+            this.currentItem.status === 'completed' ||
+            !isFinite(this.videoEl.duration) ||
+            this.videoEl.duration <= 0
+        ) {
+            return;
+        }
+
+        const progress = this.videoEl.currentTime / this.videoEl.duration;
+        if (progress > 0.95) {
+            await this.plugin.updateStatus(this.currentItem.id, 'completed');
+        }
     }
 
     async onOpen() {
@@ -2811,7 +2864,10 @@ class CrossPlayerMainView extends ItemView {
         this.refreshMobileOverlay();
 
         this.videoEl.onended = async () => {
-            if (this.currentItem) {
+            if (this.currentItem && this.isCurrentPlaybackSource()) {
+                await this.persistCurrentPlaybackPosition(true);
+                await this.syncCompletionStatusFromPlayback();
+
                 // If onended fires, it's definitely completed
                 if (this.currentItem.status !== 'completed') {
                     await this.plugin.updateStatus(this.currentItem.id, 'completed');
@@ -2825,14 +2881,7 @@ class CrossPlayerMainView extends ItemView {
         };
 
         this.videoEl.ontimeupdate = async () => {
-            if (this.currentItem) {
-                // Check if the current video source duration matches the expected metadata
-                // This helps prevent "jumps" during source switches
-                if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
-                    // Metadata mismatch - probably transitioning source
-                    return;
-                }
-
+            if (this.currentItem && this.isCurrentPlaybackSource()) {
                 this.currentItem.position = this.videoEl.currentTime;
 
                 // Throttled ETC update in List View
@@ -2843,6 +2892,11 @@ class CrossPlayerMainView extends ItemView {
                     if (this.plugin.listView) {
                         this.plugin.listView.updateStats();
                     }
+                }
+
+                if (now - this.lastPositionPersist > 5000) {
+                    this.lastPositionPersist = now;
+                    await this.persistCurrentPlaybackPosition();
                 }
 
                 // Throttled Progress Bar update (every 1s)
@@ -2857,25 +2911,46 @@ class CrossPlayerMainView extends ItemView {
                 this.updateOverlayProgress();
 
                 // Mark as completed if > 95% watched
-                if (this.currentItem.status !== 'completed' && this.videoEl.duration > 0) {
-                    const progress = this.videoEl.currentTime / this.videoEl.duration;
-                    if (progress > 0.95) {
-                        await this.plugin.updateStatus(this.currentItem.id, 'completed');
-                    }
-                }
+                await this.syncCompletionStatusFromPlayback();
             }
         };
 
         this.videoEl.onpause = async () => {
-            if (this.currentItem) {
-                // Check if the current video source duration matches the expected metadata
-                if (this.videoEl.duration > 0 && Math.abs(this.videoEl.duration - this.currentItem.duration) > 5) {
-                    return;
-                }
-                await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
+            if (this.currentItem && this.isCurrentPlaybackSource()) {
+                await this.persistCurrentPlaybackPosition(true);
             }
             this.updateOverlayProgress();
         }
+    }
+
+    async onClose() {
+        const closingItem = this.currentItem;
+        const shouldResetStatus = closingItem?.status === 'playing';
+
+        if (this.videoEl) {
+            this.videoEl.pause();
+            await this.syncCurrentItemDuration();
+            await this.persistCurrentPlaybackPosition(true);
+            await this.syncCompletionStatusFromPlayback();
+            this.videoEl.removeAttribute('src');
+            this.videoEl.load();
+        }
+
+        if (closingItem && shouldResetStatus) {
+            if (closingItem.finished) {
+                await this.plugin.updateStatus(closingItem.id, 'completed');
+            } else {
+                await this.plugin.updateStatus(closingItem.id, 'pending');
+            }
+        }
+
+        this.activeMediaSrc = null;
+        this.currentItem = null;
+        this.lastPositionPersist = 0;
+        if (this.plugin.mainView === this) {
+            this.plugin.mainView = null;
+        }
+        this.contentEl.empty();
     }
 
     refreshMobileOverlay() {
@@ -3534,15 +3609,18 @@ class CrossPlayerMainView extends ItemView {
 
             // 2. Save current position if we have an active item
             if (this.currentItem) {
-                this.currentItem.position = this.videoEl.currentTime;
-                await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, true);
+                await this.syncCurrentItemDuration();
+                await this.persistCurrentPlaybackPosition(true);
+                await this.syncCompletionStatusFromPlayback();
             }
 
             // 3. Clear sources and listeners
             this.videoEl.removeAttribute('src');
             this.videoEl.load();
         }
+        this.activeMediaSrc = null;
         this.currentItem = null;
+        this.lastPositionPersist = 0;
         this.showIdlePlaceholder();
     }
 
@@ -3601,6 +3679,7 @@ class CrossPlayerMainView extends ItemView {
 
         // Setup listeners BEFORE setting src
         this.videoEl.onloadedmetadata = () => {
+            void this.syncCurrentItemDuration();
             this.updateOverlayProgress();
             // Logic for embedded subtitles: 
             // If no sidecar was found, we try to enable the first available embedded track.
@@ -3614,6 +3693,10 @@ class CrossPlayerMainView extends ItemView {
                 }
             }
         };
+        this.videoEl.ondurationchange = () => {
+            void this.syncCurrentItemDuration();
+            this.updateOverlayProgress();
+        };
 
         this.videoEl.onerror = () => {
             console.error("Video playback error", this.videoEl?.error);
@@ -3622,7 +3705,9 @@ class CrossPlayerMainView extends ItemView {
 
         const file = this.plugin.app.vault.getAbstractFileByPath(item.path);
         if (file instanceof TFile) {
-            this.videoEl.src = this.plugin.app.vault.getResourcePath(file);
+            const resourcePath = this.plugin.app.vault.getResourcePath(file);
+            this.activeMediaSrc = resourcePath;
+            this.videoEl.src = resourcePath;
         } else {
             console.error("File not found for playback:", item.path);
             this.showIdlePlaceholder();
@@ -3633,6 +3718,7 @@ class CrossPlayerMainView extends ItemView {
         const resumePosition = item.position > 2 ? item.position - 2 : item.position;
         this.videoEl.currentTime = resumePosition || 0;
         this.videoEl.playbackRate = this.plugin.data.playbackSpeed || 1.0;
+        this.lastPositionPersist = 0;
         this.applyAudioSettings();
 
         // Handle Audio vs Video UI
