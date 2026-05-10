@@ -62,6 +62,9 @@ export default class CrossPlayerPlugin extends Plugin {
 
     debouncedUpdateDeviceStatus: any;
     lastSyncIssueKey: string = '';
+    lastKnownDataMtime: number = 0;
+    lastKnownDataSize: number = 0;
+    isReloadingSyncedData: boolean = false;
 
     getLastGoodWatchedFolder(): string {
         try {
@@ -102,6 +105,53 @@ export default class CrossPlayerPlugin extends Plugin {
     clearSyncIssue(issueKey?: string) {
         if (!issueKey || this.lastSyncIssueKey === issueKey) {
             this.lastSyncIssueKey = '';
+        }
+    }
+
+    getPluginDataPath() {
+        return `${this.manifest.dir}/data.json`;
+    }
+
+    async getPluginDataStat() {
+        try {
+            return await this.app.vault.adapter.stat(this.getPluginDataPath());
+        } catch (error) {
+            console.warn('[Cross Player] Failed to stat data.json', error);
+            return null;
+        }
+    }
+
+    async refreshTrackedDataFileState() {
+        const stat = await this.getPluginDataStat();
+        this.lastKnownDataMtime = stat?.mtime ?? 0;
+        this.lastKnownDataSize = stat?.size ?? 0;
+    }
+
+    async reloadSyncedDataIfChanged(force: boolean = false) {
+        if (this.isReloadingSyncedData) return;
+
+        const stat = await this.getPluginDataStat();
+        const nextMtime = stat?.mtime ?? 0;
+        const nextSize = stat?.size ?? 0;
+        const changed = force || nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
+
+        if (!changed) return;
+
+        this.isReloadingSyncedData = true;
+        try {
+            await this.loadData();
+            await this.validatePluginSyncHealth();
+            await this.refreshTrackedDataFileState();
+
+            if (this.mainView) {
+                this.mainView.handleSyncedDataReload();
+            }
+
+            if (this.listView) {
+                this.listView.refresh();
+            }
+        } finally {
+            this.isReloadingSyncedData = false;
         }
     }
 
@@ -178,6 +228,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async onload() {
         await this.loadData();
+        await this.refreshTrackedDataFileState();
         await this.validatePluginSyncHealth();
         this.calculateDynamicLimit();
 
@@ -379,8 +430,7 @@ export default class CrossPlayerPlugin extends Plugin {
             id: 'reload-data',
             name: 'Reload Data from Disk',
             callback: async () => {
-                await this.loadData();
-                if (this.listView) this.listView.refresh();
+                await this.reloadSyncedDataIfChanged(true);
                 new Notice("Data reloaded.");
             }
         });
@@ -421,14 +471,12 @@ export default class CrossPlayerPlugin extends Plugin {
             }
         });
 
+        this.debouncedReload = debounce(async () => {
+            await this.reloadSyncedDataIfChanged();
+        }, 1000, true);
+
         // Setup auto-reload for Desktop (handle Sync)
         if (Platform.isDesktop) {
-            this.debouncedReload = debounce(async () => {
-                await this.loadData();
-                await this.validatePluginSyncHealth();
-                if (this.listView) this.listView.refresh();
-            }, 1000, true);
-
             try {
                 const path = require('path');
                 const fs = require('fs');
@@ -457,6 +505,14 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerDomEvent(window, 'focus', () => {
             this.debouncedReload();
         });
+        this.registerDomEvent(document, 'visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                this.debouncedReload();
+            }
+        });
+        this.registerInterval(window.setInterval(() => {
+            this.debouncedReload();
+        }, 5000));
 
         this.registerWatchers();
 
@@ -600,6 +656,7 @@ export default class CrossPlayerPlugin extends Plugin {
         // If I just rely on DEFAULT_SETTINGS, existing users won't see a change if they have saved data.
         // I will trust that `loaded.playbackSpeed` is what the user *last used*.
         // If it's missing, it defaults to settings.defaultPlaybackSpeed.
+        await this.refreshTrackedDataFileState();
     }
 
     getTodayStatKey(): string {
@@ -675,6 +732,7 @@ export default class CrossPlayerPlugin extends Plugin {
     async saveData(refresh: boolean = true) {
         this.rememberQueueScrollPosition();
         await super.saveData(this.data);
+        await this.refreshTrackedDataFileState();
         if (refresh && this.listView) this.listView.refresh();
     }
 
@@ -2210,8 +2268,7 @@ class CrossPlayerListView extends ItemView {
         setIcon(refreshBtn, "refresh-cw");
         refreshBtn.ariaLabel = "Refresh Data";
         refreshBtn.onclick = async () => {
-            await this.plugin.loadData();
-            this.refresh();
+            await this.plugin.reloadSyncedDataIfChanged(true);
             new Notice("Data reloaded.");
         };
 
@@ -2770,6 +2827,67 @@ class CrossPlayerMainView extends ItemView {
         }
     }
 
+    async persistPlaybackSnapshotOnClose() {
+        if (!this.currentItem) return;
+
+        const queueItem = this.plugin.data.queue.find(item => item.id === this.currentItem?.id)
+            || this.plugin.data.queue.find(item => item.path === this.currentItem?.path);
+        if (!queueItem) return;
+
+        const currentTime = this.videoEl && isFinite(this.videoEl.currentTime)
+            ? this.videoEl.currentTime
+            : (queueItem.position || 0);
+        const duration = this.videoEl && isFinite(this.videoEl.duration) && this.videoEl.duration > 0
+            ? this.videoEl.duration
+            : (queueItem.duration || 0);
+
+        queueItem.position = currentTime;
+        this.currentItem.position = currentTime;
+
+        if (duration > 0 && Math.abs((queueItem.duration || 0) - duration) > 1) {
+            queueItem.duration = duration;
+        }
+        this.currentItem.duration = queueItem.duration;
+
+        const progress = duration > 0 ? currentTime / duration : 0;
+        if (progress > 0.95) {
+            queueItem.status = 'completed';
+            queueItem.finished = true;
+            this.plugin.recordConsumption(queueItem);
+            this.currentItem.status = 'completed';
+            this.currentItem.finished = true;
+        } else if (queueItem.status === 'playing') {
+            queueItem.status = queueItem.finished ? 'completed' : 'pending';
+            this.currentItem.status = queueItem.status;
+        }
+
+        await this.plugin.saveData();
+    }
+
+    handleSyncedDataReload() {
+        if (!this.currentItem) return;
+
+        const syncedItem = this.plugin.data.queue.find(item => item.id === this.currentItem?.id)
+            || this.plugin.data.queue.find(item => item.path === this.currentItem?.path);
+        if (!syncedItem) return;
+
+        const isActivelyPlayingLocally = !!this.videoEl && this.isCurrentPlaybackSource() && !this.videoEl.paused && !this.videoEl.ended;
+        this.currentItem = syncedItem;
+
+        // When this device is not actively playing, trust the synced position.
+        if (this.videoEl && !isActivelyPlayingLocally && isFinite(this.videoEl.duration) && this.videoEl.duration > 0) {
+            const targetPosition = Math.max(0, Math.min(this.videoEl.duration, syncedItem.position || 0));
+            if (Math.abs(this.videoEl.currentTime - targetPosition) > 1) {
+                this.videoEl.currentTime = targetPosition;
+            }
+        }
+
+        this.updateOverlayProgress();
+        if (this.plugin.listView) {
+            this.plugin.listView.updateStats();
+        }
+    }
+
     async onOpen() {
         const container = this.contentEl;
         container.empty();
@@ -2924,24 +3042,11 @@ class CrossPlayerMainView extends ItemView {
     }
 
     async onClose() {
-        const closingItem = this.currentItem;
-        const shouldResetStatus = closingItem?.status === 'playing';
-
         if (this.videoEl) {
             this.videoEl.pause();
-            await this.syncCurrentItemDuration();
-            await this.persistCurrentPlaybackPosition(true);
-            await this.syncCompletionStatusFromPlayback();
+            await this.persistPlaybackSnapshotOnClose();
             this.videoEl.removeAttribute('src');
             this.videoEl.load();
-        }
-
-        if (closingItem && shouldResetStatus) {
-            if (closingItem.finished) {
-                await this.plugin.updateStatus(closingItem.id, 'completed');
-            } else {
-                await this.plugin.updateStatus(closingItem.id, 'pending');
-            }
         }
 
         this.activeMediaSrc = null;

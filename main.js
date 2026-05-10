@@ -2316,6 +2316,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     // bytes
     this.limitingDevice = "";
     this.lastSyncIssueKey = "";
+    this.lastKnownDataMtime = 0;
+    this.lastKnownDataSize = 0;
+    this.isReloadingSyncedData = false;
   }
   getLastGoodWatchedFolder() {
     try {
@@ -2354,6 +2357,48 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   clearSyncIssue(issueKey) {
     if (!issueKey || this.lastSyncIssueKey === issueKey) {
       this.lastSyncIssueKey = "";
+    }
+  }
+  getPluginDataPath() {
+    return `${this.manifest.dir}/data.json`;
+  }
+  async getPluginDataStat() {
+    try {
+      return await this.app.vault.adapter.stat(this.getPluginDataPath());
+    } catch (error) {
+      console.warn("[Cross Player] Failed to stat data.json", error);
+      return null;
+    }
+  }
+  async refreshTrackedDataFileState() {
+    var _a, _b;
+    const stat = await this.getPluginDataStat();
+    this.lastKnownDataMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
+    this.lastKnownDataSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
+  }
+  async reloadSyncedDataIfChanged(force = false) {
+    var _a, _b;
+    if (this.isReloadingSyncedData)
+      return;
+    const stat = await this.getPluginDataStat();
+    const nextMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
+    const nextSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
+    const changed = force || nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
+    if (!changed)
+      return;
+    this.isReloadingSyncedData = true;
+    try {
+      await this.loadData();
+      await this.validatePluginSyncHealth();
+      await this.refreshTrackedDataFileState();
+      if (this.mainView) {
+        this.mainView.handleSyncedDataReload();
+      }
+      if (this.listView) {
+        this.listView.refresh();
+      }
+    } finally {
+      this.isReloadingSyncedData = false;
     }
   }
   async validatePluginSyncHealth() {
@@ -2421,6 +2466,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async onload() {
     await this.loadData();
+    await this.refreshTrackedDataFileState();
     await this.validatePluginSyncHealth();
     this.calculateDynamicLimit();
     this.debouncedUpdateDeviceStatus = (0, import_obsidian.debounce)(async () => {
@@ -2589,9 +2635,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       id: "reload-data",
       name: "Reload Data from Disk",
       callback: async () => {
-        await this.loadData();
-        if (this.listView)
-          this.listView.refresh();
+        await this.reloadSyncedDataIfChanged(true);
         new import_obsidian.Notice("Data reloaded.");
       }
     });
@@ -2628,13 +2672,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         }
       }
     });
+    this.debouncedReload = (0, import_obsidian.debounce)(async () => {
+      await this.reloadSyncedDataIfChanged();
+    }, 1e3, true);
     if (import_obsidian.Platform.isDesktop) {
-      this.debouncedReload = (0, import_obsidian.debounce)(async () => {
-        await this.loadData();
-        await this.validatePluginSyncHealth();
-        if (this.listView)
-          this.listView.refresh();
-      }, 1e3, true);
       try {
         const path = require("path");
         const fs = require("fs");
@@ -2656,6 +2697,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.registerDomEvent(window, "focus", () => {
       this.debouncedReload();
     });
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        this.debouncedReload();
+      }
+    });
+    this.registerInterval(window.setInterval(() => {
+      this.debouncedReload();
+    }, 5e3));
     this.registerWatchers();
     if (this.data.settings.watchedFolder) {
       this.scanFolder(this.data.settings.watchedFolder);
@@ -2757,6 +2806,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     if (settings.watchedFolder) {
       this.setLastGoodWatchedFolder(settings.watchedFolder);
     }
+    await this.refreshTrackedDataFileState();
   }
   getTodayStatKey() {
     return new Date().toISOString().slice(0, 10);
@@ -2821,6 +2871,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async saveData(refresh = true) {
     this.rememberQueueScrollPosition();
     await super.saveData(this.data);
+    await this.refreshTrackedDataFileState();
     if (refresh && this.listView)
       this.listView.refresh();
   }
@@ -3907,8 +3958,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
     refreshBtn.ariaLabel = "Refresh Data";
     refreshBtn.onclick = async () => {
-      await this.plugin.loadData();
-      this.refresh();
+      await this.plugin.reloadSyncedDataIfChanged(true);
       new import_obsidian.Notice("Data reloaded.");
     };
     const cleanBtn = titleRow.createDiv({ cls: "clickable-icon" });
@@ -4326,6 +4376,64 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       await this.plugin.updateStatus(this.currentItem.id, "completed");
     }
   }
+  async persistPlaybackSnapshotOnClose() {
+    if (!this.currentItem)
+      return;
+    const queueItem = this.plugin.data.queue.find((item) => {
+      var _a;
+      return item.id === ((_a = this.currentItem) == null ? void 0 : _a.id);
+    }) || this.plugin.data.queue.find((item) => {
+      var _a;
+      return item.path === ((_a = this.currentItem) == null ? void 0 : _a.path);
+    });
+    if (!queueItem)
+      return;
+    const currentTime = this.videoEl && isFinite(this.videoEl.currentTime) ? this.videoEl.currentTime : queueItem.position || 0;
+    const duration = this.videoEl && isFinite(this.videoEl.duration) && this.videoEl.duration > 0 ? this.videoEl.duration : queueItem.duration || 0;
+    queueItem.position = currentTime;
+    this.currentItem.position = currentTime;
+    if (duration > 0 && Math.abs((queueItem.duration || 0) - duration) > 1) {
+      queueItem.duration = duration;
+    }
+    this.currentItem.duration = queueItem.duration;
+    const progress = duration > 0 ? currentTime / duration : 0;
+    if (progress > 0.95) {
+      queueItem.status = "completed";
+      queueItem.finished = true;
+      this.plugin.recordConsumption(queueItem);
+      this.currentItem.status = "completed";
+      this.currentItem.finished = true;
+    } else if (queueItem.status === "playing") {
+      queueItem.status = queueItem.finished ? "completed" : "pending";
+      this.currentItem.status = queueItem.status;
+    }
+    await this.plugin.saveData();
+  }
+  handleSyncedDataReload() {
+    if (!this.currentItem)
+      return;
+    const syncedItem = this.plugin.data.queue.find((item) => {
+      var _a;
+      return item.id === ((_a = this.currentItem) == null ? void 0 : _a.id);
+    }) || this.plugin.data.queue.find((item) => {
+      var _a;
+      return item.path === ((_a = this.currentItem) == null ? void 0 : _a.path);
+    });
+    if (!syncedItem)
+      return;
+    const isActivelyPlayingLocally = !!this.videoEl && this.isCurrentPlaybackSource() && !this.videoEl.paused && !this.videoEl.ended;
+    this.currentItem = syncedItem;
+    if (this.videoEl && !isActivelyPlayingLocally && isFinite(this.videoEl.duration) && this.videoEl.duration > 0) {
+      const targetPosition = Math.max(0, Math.min(this.videoEl.duration, syncedItem.position || 0));
+      if (Math.abs(this.videoEl.currentTime - targetPosition) > 1) {
+        this.videoEl.currentTime = targetPosition;
+      }
+    }
+    this.updateOverlayProgress();
+    if (this.plugin.listView) {
+      this.plugin.listView.updateStats();
+    }
+  }
   async onOpen() {
     const container = this.contentEl;
     container.empty();
@@ -4451,22 +4559,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
   }
   async onClose() {
-    const closingItem = this.currentItem;
-    const shouldResetStatus = (closingItem == null ? void 0 : closingItem.status) === "playing";
     if (this.videoEl) {
       this.videoEl.pause();
-      await this.syncCurrentItemDuration();
-      await this.persistCurrentPlaybackPosition(true);
-      await this.syncCompletionStatusFromPlayback();
+      await this.persistPlaybackSnapshotOnClose();
       this.videoEl.removeAttribute("src");
       this.videoEl.load();
-    }
-    if (closingItem && shouldResetStatus) {
-      if (closingItem.finished) {
-        await this.plugin.updateStatus(closingItem.id, "completed");
-      } else {
-        await this.plugin.updateStatus(closingItem.id, "pending");
-      }
     }
     this.activeMediaSrc = null;
     this.currentItem = null;
