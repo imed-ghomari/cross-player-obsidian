@@ -407,7 +407,7 @@ export default class CrossPlayerPlugin extends Plugin {
         );
 
         this.addRibbonIcon('play-circle', 'Open Cross Player', () => {
-            this.activateListView();
+            void this.activateListView();
         });
 
         this.addCommand({
@@ -420,7 +420,7 @@ export default class CrossPlayerPlugin extends Plugin {
             id: 'open-player',
             name: 'Open Player',
             callback: () => {
-                this.activateListView();
+                void this.activateListView();
             }
         });
 
@@ -436,7 +436,7 @@ export default class CrossPlayerPlugin extends Plugin {
             id: 'increase-playback-speed',
             name: 'Increase Playback Speed',
             callback: () => {
-                if (this.mainView) this.mainView.changePlaybackSpeed(0.1);
+                if (this.mainView) void this.mainView.changePlaybackSpeed(0.1);
             }
         });
 
@@ -444,7 +444,7 @@ export default class CrossPlayerPlugin extends Plugin {
             id: 'decrease-playback-speed',
             name: 'Decrease Playback Speed',
             callback: () => {
-                if (this.mainView) this.mainView.changePlaybackSpeed(-0.1);
+                if (this.mainView) void this.mainView.changePlaybackSpeed(-0.1);
             }
         });
 
@@ -789,7 +789,7 @@ export default class CrossPlayerPlugin extends Plugin {
         // Register event
         this.registerEvent(
             this.app.vault.on('create', (file) => {
-                this.handleFileChange(file);
+                void this.handleFileChange(file);
                 // Update device status if file added
                 this.debouncedUpdateDeviceStatus();
             })
@@ -798,13 +798,13 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerEvent(
             this.app.vault.on('rename', (file, oldPath) => {
                 // Handle rename/move
-                this.handleRename(file, oldPath);
+                void this.handleRename(file, oldPath);
             })
         );
 
         this.registerEvent(
             this.app.vault.on('delete', (file) => {
-                this.handleDelete(file);
+                void this.handleDelete(file);
                 // Update device status if file deleted
                 this.debouncedUpdateDeviceStatus();
             })
@@ -981,7 +981,7 @@ export default class CrossPlayerPlugin extends Plugin {
         // 2. Check if the new location is inside watched folder (Move In)
         // Even if we updated paths, we might have moved a NEW folder IN.
         // If we just renamed inside, handleFileChange will check if it's already in queue.
-        this.handleFileChange(file);
+        void this.handleFileChange(file);
     }
 
     async handleDelete(file: TAbstractFile) {
@@ -1167,7 +1167,7 @@ export default class CrossPlayerPlugin extends Plugin {
         // Find the index of the last played item (which might be completed now)
         let currentIndex = -1;
         if (this.mainView && this.mainView.currentItem) {
-            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView!.currentItem!.id);
+            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView.currentItem?.id);
         }
 
         // If not found, fallback to searching from beginning
@@ -1189,7 +1189,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         let currentIndex = -1;
         if (this.mainView && this.mainView.currentItem) {
-            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView!.currentItem!.id);
+            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView.currentItem?.id);
         }
 
         const nextIndex = currentIndex + 1;
@@ -1203,7 +1203,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         let currentIndex = -1;
         if (this.mainView && this.mainView.currentItem) {
-            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView!.currentItem!.id);
+            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView.currentItem?.id);
         }
 
         if (currentIndex === -1) return;
@@ -1358,7 +1358,7 @@ export default class CrossPlayerPlugin extends Plugin {
             if (nextItem) {
                 await this.playMedia(nextItem, true);
             } else {
-                this.activateListView();
+                void this.activateListView();
             }
         }
     }
@@ -1388,7 +1388,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (isCurrent && this.mainView) {
             // Stop playback without re-persisting the item we're resetting.
             this.mainView.clearCurrentMedia();
-            this.activateListView();
+            void this.activateListView();
         }
 
         // Update state on the queue item
@@ -1419,7 +1419,7 @@ export default class CrossPlayerPlugin extends Plugin {
             new Notice("Downloading is only supported on Desktop.");
             return;
         }
-        const { youtubeDlpPath, downloadFolder, watchedFolder } = this.data.settings;
+        const { downloadFolder, watchedFolder } = this.data.settings;
         const targetFolder = downloadFolder || watchedFolder;
 
         if (!targetFolder) {
@@ -1755,8 +1755,7 @@ class YouTubeDownloadModal extends Modal {
         // Style the video textarea
         const textareas = contentEl.querySelectorAll('textarea');
         if (textareas.length > 0) {
-            const videoArea = textareas[0] as HTMLTextAreaElement;
-            videoArea.addClass('cross-player-download-textarea');
+            textareas[0].addClass('cross-player-download-textarea');
         }
 
         new Setting(contentEl)
@@ -1777,7 +1776,7 @@ class YouTubeDownloadModal extends Modal {
         // Let's re-query to be safe and clear
         const allTextareas = contentEl.querySelectorAll('textarea');
         allTextareas.forEach(ta => {
-            (ta as HTMLTextAreaElement).addClass('cross-player-download-textarea');
+            ta.addClass('cross-player-download-textarea');
         });
 
         new Setting(contentEl)
@@ -1807,11 +1806,11 @@ class YouTubeDownloadModal extends Modal {
                     }
 
                     if (videoList.length > 0) {
-                        this.plugin.downloadVideos(videoList, this.quality, 'video');
+                        void this.plugin.downloadVideos(videoList, this.quality, 'video');
                     }
 
                     if (audioList.length > 0) {
-                        this.plugin.downloadVideos(audioList, this.quality, 'audio');
+                        void this.plugin.downloadVideos(audioList, this.quality, 'audio');
                     }
 
                     this.close();
@@ -1842,7 +1841,7 @@ class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
     }
 
     onChooseItem(item: TFolder): void {
-        this.plugin.setWatchedFolder(item.path);
+        void this.plugin.setWatchedFolder(item.path);
     }
 }
 
@@ -2185,7 +2184,7 @@ class CrossPlayerListView extends ItemView {
     }
 
     captureScrollPosition() {
-        const list = this.contentEl.querySelector(".cross-player-list") as HTMLElement | null;
+        const list = this.contentEl.querySelector<HTMLElement>(".cross-player-list");
         if (!list) return;
 
         this.savedScrollTop = list.scrollTop;
@@ -2200,12 +2199,12 @@ class CrossPlayerListView extends ItemView {
         const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
         const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
 
-        const etcEl = this.contentEl.querySelector(".cross-player-etc") as HTMLElement | null;
+        const etcEl = this.contentEl.querySelector<HTMLElement>(".cross-player-etc");
         if (etcEl) {
             etcEl.setText(`ETC: ${this.plugin.formatDuration(adjustedDuration)}`);
         }
 
-        const sizeEl = this.contentEl.querySelector(".cross-player-size") as HTMLElement | null;
+        const sizeEl = this.contentEl.querySelector<HTMLElement>(".cross-player-size");
         if (sizeEl) {
             sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
             sizeEl.toggleClass('is-over-limit', sizeInGB > limitGB);
@@ -2430,7 +2429,7 @@ class CrossPlayerListView extends ItemView {
             nameEl.addEventListener("click", (e) => {
                 e.stopPropagation();
                 // Always auto-play when user clicks
-                this.plugin.playMedia(item, true);
+                void this.plugin.playMedia(item, true);
             });
 
             // Context Menu
@@ -2448,7 +2447,7 @@ class CrossPlayerListView extends ItemView {
                         .setIcon("trash")
                         .onClick(() => {
                             this.captureScrollPosition();
-                            this.plugin.deleteMediaItem(item);
+                            void this.plugin.deleteMediaItem(item);
                         })
                 );
 
@@ -2458,7 +2457,7 @@ class CrossPlayerListView extends ItemView {
                         .setIcon("undo")
                         .onClick(() => {
                             this.captureScrollPosition();
-                            this.plugin.setMediaItemAsUnread(item);
+                            void this.plugin.setMediaItemAsUnread(item);
                         })
                 );
 
@@ -2533,9 +2532,9 @@ class CrossPlayerListView extends ItemView {
     }
 
     updateItemProgress(id: string, percentage: number) {
-        const itemEl = this.contentEl.querySelector(`.cross-player-item[data-id="${id}"]`) as HTMLElement;
+        const itemEl = this.contentEl.querySelector<HTMLElement>(`.cross-player-item[data-id="${id}"]`);
         if (itemEl) {
-            const progressEl = itemEl.querySelector(".cross-player-item-progress") as HTMLElement;
+            const progressEl = itemEl.querySelector<HTMLElement>(".cross-player-item-progress");
             if (progressEl) {
                 if (!this.plugin.data.settings.showProgressColor) {
                     progressEl.setCssProps({ width: "0%" });
@@ -2553,7 +2552,7 @@ class CrossPlayerListView extends ItemView {
 
         let container = parentContainer;
         if (!container) {
-            container = this.contentEl.querySelector('.cross-player-download-container') as HTMLElement;
+            container = this.contentEl.querySelector<HTMLElement>('.cross-player-download-container') ?? undefined;
         }
 
         if (!container) return; // Should exist if view is open
@@ -2590,8 +2589,8 @@ class CrossPlayerListView extends ItemView {
         content.toggleClass('is-collapsed', isCollapsed);
 
         header.onclick = () => {
-            const collapsed = container!.dataset.collapsed === 'true';
-            container!.dataset.collapsed = String(!collapsed);
+            const collapsed = container.dataset.collapsed === 'true';
+            container.dataset.collapsed = String(!collapsed);
             content.toggleClass('is-collapsed', !collapsed);
             setIcon(toggleIcon, collapsed ? "chevron-down" : "chevron-up");
         };
@@ -2684,7 +2683,7 @@ class CrossPlayerListView extends ItemView {
     }
 
     updateSpeedDisplay() {
-        const speedEl = this.contentEl.querySelector(".cross-player-speed-display") as HTMLElement;
+        const speedEl = this.contentEl.querySelector<HTMLElement>(".cross-player-speed-display");
         if (speedEl) {
             const speed = this.plugin.data.playbackSpeed || 1.0;
             speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
@@ -2890,7 +2889,7 @@ class CrossPlayerMainView extends ItemView {
             if (activeDocument.activeElement === this.videoEl) return;
 
             // Ignore if user is typing in an input (unlikely here but good practice)
-            if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
+            if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
 
             const { seekSecondsForward, seekSecondsBackward } = this.plugin.data.settings;
 
@@ -2899,7 +2898,7 @@ class CrossPlayerMainView extends ItemView {
                 case 'Spacebar':
                     e.preventDefault();
                     if (this.videoEl.paused) {
-                        this.videoEl.play();
+                        void this.videoEl.play();
                     } else {
                         this.videoEl.pause();
                     }
@@ -2946,7 +2945,7 @@ class CrossPlayerMainView extends ItemView {
 
                 // Check autoplay regardless of whether it was already marked completed
                 if (this.plugin.data.settings.autoplayNext) {
-                    this.plugin.playNextUnread();
+                    void this.plugin.playNextUnread();
                 }
             }
         };
@@ -3126,7 +3125,7 @@ class CrossPlayerMainView extends ItemView {
                 suppressControlTapUntil = Date.now() + 400;
                 if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
                     this.videoEl.pause();
-                    const playBtn = overlay.querySelector('.play-btn') as HTMLElement;
+                    const playBtn = overlay.querySelector<HTMLElement>('.play-btn');
                     if (playBtn) setIcon(playBtn, "play");
                 }
                 showOverlay();
@@ -3160,7 +3159,7 @@ class CrossPlayerMainView extends ItemView {
         const onPointerUp = (e: PointerEvent) => {
             if (!e.isPrimary || pointerMoved) return;
             if (Date.now() - pointerStartTime > 500) return;
-            handlePlayerTap(e.target as HTMLElement, e);
+            handlePlayerTap(e.target instanceof HTMLElement ? e.target : null, e);
         };
 
         const onPointerCancel = () => {
@@ -3188,7 +3187,7 @@ class CrossPlayerMainView extends ItemView {
         const progressBar = progressBarShell.createEl('input', {
             type: 'range',
             cls: 'cross-player-overlay-progress'
-        }) as HTMLInputElement;
+        });
         progressBar.min = '0';
         progressBar.max = '1000';
         progressBar.step = '1';
@@ -3310,7 +3309,7 @@ class CrossPlayerMainView extends ItemView {
             if (shouldSuppressControlAction(e)) return;
             e.stopPropagation();
             if (this.videoEl.paused) {
-                this.videoEl.play();
+                void this.videoEl.play();
                 setIcon(playPauseBtn, "pause");
             } else {
                 this.videoEl.pause();
@@ -3717,8 +3716,11 @@ class CrossPlayerMainView extends ItemView {
         if (!this.videoEl) return;
 
         if (!activeDocument.fullscreenElement) {
-            this.contentEl.requestFullscreen().catch(err => {
-                new Notice(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+            this.contentEl.requestFullscreen().catch((error: unknown) => {
+                const message = error instanceof Error
+                    ? `${error.message} (${error.name})`
+                    : 'Unknown fullscreen error';
+                new Notice(`Error attempting to enable full-screen mode: ${message}`);
             });
         } else {
             void activeDocument.exitFullscreen();

@@ -1,10 +1,11 @@
 # Cross Player for Obsidian
 
-A powerful media player plugin for Obsidian that transforms a local folder into a managed playback queue. Designed for efficient learning and media consumption, it supports video and audio files with advanced playback controls, YouTube downloading, and storage management.
+A powerful media player plugin for Obsidian focused on seamless playback across desktop and mobile devices. It transforms a local folder into a managed playback queue so you can keep watching and listening wherever you are, with support for video and audio files, advanced playback controls, YouTube downloading, and storage management.
 
 ## Features
 
 ### 📺 Media Playback
+- **Cross-Device Focus**: Built first and foremost to let you keep playback flowing across desktop and mobile devices inside the same vault.
 - **Universal Player**: Supports a wide range of formats.
   - **Audio**: mp3, wav, ogg, opus, m4a, m4b, weba, flac, aac, aif, aiff, caf.
   - **Video**: mp4, webm, ogv, mkv, 3gp.
@@ -61,6 +62,7 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 3. **Playback**:
    - Click an item to play it in the main view.
    - Use the player controls or commands to seek and change speed.
+   - Move between desktop and mobile with the same vault to continue playback with synced queue state and progress.
    - On mobile, tap the video area to pause and show large overlay controls.
 
 ## Commands
@@ -101,4 +103,4 @@ A powerful media player plugin for Obsidian that transforms a local folder into 
 - **yt-dlp**: Required only for YouTube downloading features. Ensure it is installed and accessible in your path or specified in settings.
 
 ---
-*Created for personal productivity and media consumption.*
+*Created for personal productivity and cross-device media consumption.*

@@ -350,25 +350,25 @@
 }
 
 /* Hide native play button on video to avoid conflict with overlay */
-video::-webkit-media-controls-overlay-play-button {
-    display: none !important;
+.workspace-leaf-content[data-type="cross-player-main-view"] video::-webkit-media-controls-overlay-play-button {
+    display: none;
     -webkit-appearance: none;
 }
 
-video::-webkit-media-controls-start-playback-button {
-    display: none !important;
+.workspace-leaf-content[data-type="cross-player-main-view"] video::-webkit-media-controls-start-playback-button {
+    display: none;
     -webkit-appearance: none;
 }
 
 /* Hide native play button in the bottom control bar on mobile (for both audio/video) */
-.is-mobile video::-webkit-media-controls-play-button {
-    display: none !important;
+.is-mobile .workspace-leaf-content[data-type="cross-player-main-view"] video::-webkit-media-controls-play-button {
+    display: none;
     -webkit-appearance: none;
 }
 
 /* Mobile padding for main view to avoid overlap with Obsidian toolbar */
 .workspace-leaf-content[data-type="cross-player-main-view"] .view-content {
-    padding: 0 !important;
+    padding: 0;
     overflow: hidden;
 }
 
@@ -593,7 +593,7 @@ video::-webkit-media-controls-start-playback-button {
 }
 
 .cross-player-main-view.is-media-active .cross-player-video-wrapper.is-video-active {
-    background: #000;
+    background: #000000;
     justify-content: flex-end;
 }
 
@@ -610,9 +610,9 @@ video::-webkit-media-controls-start-playback-button {
     .is-mobile .cross-player-title-row,
     .is-mobile .cross-player-speed-container,
     .is-mobile .cross-player-stats {
-        margin-top: 0 !important;
+        margin-top: 0;
         flex: 1 1 0;
-        justify-content: flex-start !important;
+        justify-content: flex-start;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
