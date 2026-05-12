@@ -68,7 +68,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     getLastGoodWatchedFolder(): string {
         try {
-            return window.localStorage.getItem(LAST_WATCHED_FOLDER_KEY) || '';
+            return this.app.loadLocalStorage(LAST_WATCHED_FOLDER_KEY) || '';
         } catch (error) {
             console.warn('[Cross Player] Failed to read watched folder backup', error);
             return '';
@@ -78,9 +78,9 @@ export default class CrossPlayerPlugin extends Plugin {
     setLastGoodWatchedFolder(path: string) {
         try {
             if (path) {
-                window.localStorage.setItem(LAST_WATCHED_FOLDER_KEY, path);
+                this.app.saveLocalStorage(LAST_WATCHED_FOLDER_KEY, path);
             } else {
-                window.localStorage.removeItem(LAST_WATCHED_FOLDER_KEY);
+                this.app.saveLocalStorage(LAST_WATCHED_FOLDER_KEY, null);
             }
         } catch (error) {
             console.warn('[Cross Player] Failed to store watched folder backup', error);
@@ -311,12 +311,12 @@ export default class CrossPlayerPlugin extends Plugin {
 
         this.registerView(
             VIEW_TYPE_CROSS_PLAYER_LIST,
-            (leaf) => (this.listView = new CrossPlayerListView(leaf, this))
+            (leaf) => new CrossPlayerListView(leaf, this)
         );
 
         this.registerView(
             VIEW_TYPE_CROSS_PLAYER_MAIN,
-            (leaf) => (this.mainView = new CrossPlayerMainView(leaf, this))
+            (leaf) => new CrossPlayerMainView(leaf, this)
         );
 
         this.addRibbonIcon('play-circle', 'Open Cross Player', () => {
@@ -330,8 +330,8 @@ export default class CrossPlayerPlugin extends Plugin {
         });
 
         this.addCommand({
-            id: 'open-cross-player',
-            name: 'Open Cross Player',
+            id: 'open-player',
+            name: 'Open Player',
             callback: () => {
                 this.activateListView();
             }
@@ -505,8 +505,8 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerDomEvent(window, 'focus', () => {
             this.debouncedReload();
         });
-        this.registerDomEvent(document, 'visibilitychange', () => {
-            if (document.visibilityState === 'visible') {
+        this.registerDomEvent(activeDocument, 'visibilitychange', () => {
+            if (activeDocument.visibilityState === 'visible') {
                 this.debouncedReload();
             }
         });
@@ -536,10 +536,10 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async loadDeviceId() {
         // Try to load from localStorage
-        let id = localStorage.getItem('cross-player-device-id');
+        let id = this.app.loadLocalStorage('cross-player-device-id');
         if (!id) {
             id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-            localStorage.setItem('cross-player-device-id', id);
+            this.app.saveLocalStorage('cross-player-device-id', id);
         }
         this.deviceId = id;
 
@@ -826,7 +826,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async getMediaDuration(file: TFile): Promise<number> {
         return new Promise((resolve) => {
-            const video = document.createElement('video');
+            const video = activeDocument.createElement('video');
             video.preload = 'metadata';
             video.onloadedmetadata = () => {
                 resolve(video.duration);
@@ -1039,7 +1039,8 @@ export default class CrossPlayerPlugin extends Plugin {
             leaf = workspace.getLeftLeaf(false);
             await leaf.setViewState({ type: VIEW_TYPE_CROSS_PLAYER_LIST, active: true });
         }
-        workspace.revealLeaf(leaf);
+        this.listView = leaf.view instanceof CrossPlayerListView ? leaf.view : null;
+        await workspace.revealLeaf(leaf);
     }
 
     async activateMainView() {
@@ -1054,7 +1055,7 @@ export default class CrossPlayerPlugin extends Plugin {
             leaf = workspace.getLeaf(false);
             await leaf.setViewState({ type: VIEW_TYPE_CROSS_PLAYER_MAIN, active: true });
         }
-        workspace.revealLeaf(leaf);
+        await workspace.revealLeaf(leaf);
         workspace.setActiveLeaf(leaf, { focus: true });
 
         // Ensure we get the view instance
@@ -1062,7 +1063,7 @@ export default class CrossPlayerPlugin extends Plugin {
             this.mainView = leaf.view;
             // Force focus on the container element
             // We need a slight delay to ensure the view is fully active and DOM is ready
-            setTimeout(() => {
+            window.setTimeout(() => {
                 if (this.mainView) {
                     this.mainView.contentEl.focus();
                     if (this.mainView.videoEl) {
@@ -1249,7 +1250,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
                 const file = this.app.vault.getAbstractFileByPath(item.path);
                 if (file instanceof TFile) {
-                    await this.app.vault.delete(file);
+                    await this.app.fileManager.trashFile(file);
                     count++;
                     removedIds.add(item.id);
                 } else if (!file) {
@@ -1289,7 +1290,7 @@ export default class CrossPlayerPlugin extends Plugin {
         try {
             const file = this.app.vault.getAbstractFileByPath(item.path);
             if (file instanceof TFile) {
-                await this.app.vault.delete(file);
+                await this.app.fileManager.trashFile(file);
                 deletedFromDisk = true;
             } else if (!file) {
                 deletedFromDisk = true;
@@ -1598,7 +1599,7 @@ export default class CrossPlayerPlugin extends Plugin {
                     // Refresh watched folder after a slight delay to let Obsidian see the file
                     const { watchedFolder } = this.data.settings;
                     if (watchedFolder) {
-                        setTimeout(() => {
+                        window.setTimeout(() => {
                             this.scanFolder(watchedFolder);
                         }, 2000);
                     }
@@ -1613,7 +1614,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 this.listView?.updateDownloadProgress();
 
                 if (downloadStatus.status === 'completed') {
-                    setTimeout(() => {
+                    window.setTimeout(() => {
                         this.activeDownloads = this.activeDownloads.filter(d => d.id !== downloadId);
                         this.listView?.updateDownloadProgress();
                     }, 5000);
@@ -1730,8 +1731,7 @@ class YouTubeDownloadModal extends Modal {
         const textareas = contentEl.querySelectorAll('textarea');
         if (textareas.length > 0) {
             const videoArea = textareas[0] as HTMLTextAreaElement;
-            videoArea.style.height = '100px';
-            videoArea.style.width = '100%';
+            videoArea.addClass('cross-player-download-textarea');
         }
 
         new Setting(contentEl)
@@ -1752,8 +1752,7 @@ class YouTubeDownloadModal extends Modal {
         // Let's re-query to be safe and clear
         const allTextareas = contentEl.querySelectorAll('textarea');
         allTextareas.forEach(ta => {
-            (ta as HTMLTextAreaElement).style.height = '100px';
-            (ta as HTMLTextAreaElement).style.width = '100%';
+            (ta as HTMLTextAreaElement).addClass('cross-player-download-textarea');
         });
 
         new Setting(contentEl)
@@ -1900,7 +1899,7 @@ class ConsumptionStatsModal extends Modal {
         const hint = contentEl.createEl('p', {
             text: 'Stats are stored as small daily buckets, so they stay compact even over long periods.'
         });
-        hint.style.color = 'var(--text-muted)';
+        hint.addClass('cross-player-muted-text');
 
         const closeBtn = contentEl.createEl('button', { text: 'Close' });
         closeBtn.onclick = () => this.close();
@@ -1923,7 +1922,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
-        containerEl.createEl('h3', { text: 'General Settings' });
+        new Setting(containerEl).setName('General Settings').setHeading();
 
         new Setting(containerEl)
             .setName('Watched Folder')
@@ -2028,7 +2027,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     this.plugin.listView?.refresh();
                 }));
 
-        containerEl.createEl('h3', { text: 'Audio Settings' });
+        new Setting(containerEl).setName('Audio Settings').setHeading();
 
         new Setting(containerEl)
             .setName('Volume Boost')
@@ -2054,7 +2053,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     this.plugin.mainView?.applyAudioSettings();
                 }));
 
-        containerEl.createEl('h3', { text: 'Consumption Statistics' });
+        new Setting(containerEl).setName('Consumption Statistics').setHeading();
 
         const allTime = this.plugin.getConsumptionSummary();
         new Setting(containerEl)
@@ -2066,7 +2065,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     new ConsumptionStatsModal(this.app, this.plugin).open();
                 }));
 
-        containerEl.createEl('h3', { text: 'Storage & Download Settings' });
+        new Setting(containerEl).setName('Storage & Download Settings').setHeading();
 
         new Setting(containerEl)
             .setName('yt-dlp Binary Path')
@@ -2149,8 +2148,15 @@ class CrossPlayerListView extends ItemView {
     }
 
     async onOpen() {
+        this.plugin.listView = this;
         this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
         this.refresh();
+    }
+
+    async onClose() {
+        if (this.plugin.listView === this) {
+            this.plugin.listView = null;
+        }
     }
 
     captureScrollPosition() {
@@ -2177,8 +2183,7 @@ class CrossPlayerListView extends ItemView {
         const sizeEl = this.contentEl.querySelector(".cross-player-size") as HTMLElement | null;
         if (sizeEl) {
             sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
-            sizeEl.style.color = sizeInGB > limitGB ? "var(--text-error)" : "";
-            sizeEl.style.fontWeight = sizeInGB > limitGB ? "bold" : "";
+            sizeEl.toggleClass('is-over-limit', sizeInGB > limitGB);
         }
     }
 
@@ -2205,24 +2210,14 @@ class CrossPlayerListView extends ItemView {
         }
 
         container.empty();
-        container.style.display = "flex";
-        container.style.flexDirection = "column";
-        container.style.height = "100%";
-        container.style.overflow = "hidden";
+        container.addClass('cross-player-list-view');
 
         // --- Header (Speed and Stats) ---
         const headerContainer = container.createDiv({ cls: "cross-player-header" });
-        headerContainer.style.textAlign = "center";
-        headerContainer.style.marginBottom = "10px";
-        headerContainer.style.flexShrink = "0"; // Don't shrink
+        headerContainer.addClass('cross-player-header-layout');
 
         // Title Row with Sort Button
         const titleRow = headerContainer.createDiv({ cls: "cross-player-title-row" });
-        titleRow.style.display = "flex";
-        titleRow.style.justifyContent = "center";
-        titleRow.style.alignItems = "center";
-        titleRow.style.gap = "8px";
-
         titleRow.createEl("h4", { text: "Media Queue", cls: "cross-player-title", attr: { style: "margin: 0;" } });
 
         const sortBtn = titleRow.createDiv({ cls: "clickable-icon" });
@@ -2285,12 +2280,6 @@ class CrossPlayerListView extends ItemView {
 
         const speed = this.plugin.data.playbackSpeed || 1.0;
         const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
-        speedContainer.style.display = "flex";
-        speedContainer.style.justifyContent = "center";
-        speedContainer.style.alignItems = "center";
-        speedContainer.style.gap = "10px";
-        speedContainer.style.marginTop = "5px";
-
         const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
         setIcon(minusBtn, "minus-circle");
         minusBtn.ariaLabel = "Decrease Speed";
@@ -2309,9 +2298,6 @@ class CrossPlayerListView extends ItemView {
 
         const speedEl = speedContainer.createDiv({ cls: "cross-player-speed-display" });
         speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
-        speedEl.style.fontSize = "0.8em";
-        speedEl.style.color = "var(--text-muted)";
-        speedEl.style.fontWeight = "bold";
 
         const plusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
         setIcon(plusBtn, "plus-circle");
@@ -2338,26 +2324,16 @@ class CrossPlayerListView extends ItemView {
         const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
 
         const statsContainer = headerContainer.createDiv({ cls: "cross-player-stats" });
-        statsContainer.style.fontSize = "0.8em";
-        statsContainer.style.color = "var(--text-muted)";
-        statsContainer.style.marginTop = "5px";
-
         const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
         statsContainer.createSpan({ text: etcText, cls: 'cross-player-etc' });
 
         statsContainer.createSpan({ text: " • " });
 
         const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`, cls: 'cross-player-size' });
-        if (sizeInGB > limitGB) {
-            sizeSpan.style.color = "var(--text-error)";
-            sizeSpan.style.fontWeight = "bold";
-        }
+        sizeSpan.toggleClass('is-over-limit', sizeInGB > limitGB);
 
         // --- List (Scrollable) ---
-        const list = container.createDiv({ cls: "cross-player-list" });
-        list.style.flexGrow = "1";
-        list.style.overflowY = "auto";
-        list.style.overflowX = "hidden";
+        const list = container.createDiv({ cls: "cross-player-list cross-player-list-scroll" });
 
         // Save scroll position on scroll
         list.addEventListener('scroll', () => {
@@ -2376,16 +2352,16 @@ class CrossPlayerListView extends ItemView {
             const isPlaying = item.status === 'playing' || (this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id);
 
             if (isPlaying) {
-                itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
+                itemEl.addClass('is-playing');
             }
 
             // Progress Highlight
             const progressEl = itemEl.createDiv({ cls: "cross-player-item-progress" });
             if (this.plugin.data.settings.showProgressColor && item.duration > 0 && (item.position > 0 || item.status === 'completed')) {
                 const pct = item.status === 'completed' ? 100 : Math.min(100, (item.position / item.duration) * 100);
-                progressEl.style.width = `${pct}%`;
+                progressEl.setCssProps({ width: `${pct}%` });
             } else {
-                progressEl.style.width = "0%";
+                progressEl.setCssProps({ width: "0%" });
             }
 
             // Status Icon
@@ -2393,7 +2369,7 @@ class CrossPlayerListView extends ItemView {
             if (item.status === 'completed') setIcon(statusIcon, "check-circle");
             else if (item.status === 'playing') setIcon(statusIcon, "play-circle");
             else setIcon(statusIcon, "circle");
-            statusIcon.style.marginRight = "5px";
+            statusIcon.addClass('cross-player-status-icon-compact');
 
             // Type Icon
             if (this.plugin.data.settings.showMediaIndicator) {
@@ -2401,8 +2377,7 @@ class CrossPlayerListView extends ItemView {
                 const ext = item.path.split('.').pop()?.toLowerCase();
                 const isAudio = AUDIO_EXTENSIONS.includes(ext || '');
                 setIcon(typeIcon, isAudio ? "headphones" : "film");
-                typeIcon.style.marginRight = "10px";
-                typeIcon.style.color = "var(--text-muted)";
+                typeIcon.addClass('cross-player-type-icon-muted');
             }
             // typeIcon.style.fontSize = "0.8em"; // Icon size is usually handled by setIcon/svg, might need scaling if too big, but default is usually fine for rows.
             // setIcon produces an svg. Obsidian icons are standard size.
@@ -2415,15 +2390,9 @@ class CrossPlayerListView extends ItemView {
 
             // Name
             const nameEl = itemEl.createDiv({ cls: "cross-player-name" });
-            nameEl.style.flexGrow = "1";
-            nameEl.style.cursor = "pointer";
             nameEl.title = item.path;
             if (this.plugin.data.settings.wrapQueueText) {
                 nameEl.addClass("is-wrapped");
-            } else {
-                nameEl.style.overflow = "hidden";
-                nameEl.style.textOverflow = "ellipsis";
-                nameEl.style.whiteSpace = "nowrap";
             }
 
             const { title, extension } = this.getDisplayNameParts(item.name);
@@ -2471,14 +2440,11 @@ class CrossPlayerListView extends ItemView {
             });
 
             // Controls
-            const controls = itemEl.createDiv({ cls: "cross-player-controls" });
-            controls.style.display = "flex";
-            controls.style.gap = "5px";
+            const controls = itemEl.createDiv({ cls: "cross-player-controls cross-player-controls-compact" });
 
             // Drag Handle
             const handle = controls.createDiv({ cls: "clickable-icon sortable-handle" });
             setIcon(handle, "grip-horizontal");
-            handle.style.cursor = "grab";
         });
 
         Sortable.create(list, {
@@ -2505,16 +2471,13 @@ class CrossPlayerListView extends ItemView {
         // --- Download Area (Collapsible, Bottom) ---
         // Create container for download area
         const downloadContainer = container.createDiv({ cls: 'cross-player-download-container' });
-        downloadContainer.style.flexShrink = "0";
-        downloadContainer.style.borderTop = "1px solid var(--background-modifier-border)";
-        downloadContainer.style.backgroundColor = "var(--background-secondary)";
 
         this.updateDownloadProgress(downloadContainer);
 
         const scrollTopToRestore = this.plugin.data.queueScrollTop ?? this.savedScrollTop;
         if (scrollTopToRestore > 0) {
             list.scrollTop = scrollTopToRestore;
-            requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
                 list.scrollTop = scrollTopToRestore;
             });
         }
@@ -2540,10 +2503,7 @@ class CrossPlayerListView extends ItemView {
         statsContainer.createSpan({ text: " • " });
 
         const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
-        if (sizeInGB > limitGB) {
-            sizeSpan.style.color = "var(--text-error)";
-            sizeSpan.style.fontWeight = "bold";
-        }
+        sizeSpan.toggleClass('is-over-limit', sizeInGB > limitGB);
     }
 
     updateItemProgress(id: string, percentage: number) {
@@ -2552,11 +2512,11 @@ class CrossPlayerListView extends ItemView {
             const progressEl = itemEl.querySelector(".cross-player-item-progress") as HTMLElement;
             if (progressEl) {
                 if (!this.plugin.data.settings.showProgressColor) {
-                    progressEl.style.width = "0%";
+                    progressEl.setCssProps({ width: "0%" });
                     return;
                 }
                 const pct = Math.min(100, Math.max(0, percentage));
-                progressEl.style.width = `${pct}%`;
+                progressEl.setCssProps({ width: `${pct}%` });
             }
         }
     }
@@ -2580,20 +2540,14 @@ class CrossPlayerListView extends ItemView {
             // If empty, maybe just hide content but keep header? 
             // Or hide completely? User said "collapsible towards the bottom". 
             // If no downloads, usually hidden.
-            container.style.display = 'none';
+            container.addClass('is-hidden');
             return;
         } else {
-            container.style.display = 'block';
+            container.removeClass('is-hidden');
         }
 
         // Header / Toggle
         const header = container.createDiv({ cls: 'download-header' });
-        header.style.padding = "5px 10px";
-        header.style.cursor = "pointer";
-        header.style.display = "flex";
-        header.style.justifyContent = "space-between";
-        header.style.alignItems = "center";
-        header.style.backgroundColor = "var(--background-secondary-alt)";
 
         header.createSpan({ text: `Downloads (${activeDownloads.length})`, attr: { style: "font-weight: bold; font-size: 0.9em;" } });
         const toggleIcon = header.createDiv();
@@ -2607,21 +2561,13 @@ class CrossPlayerListView extends ItemView {
         setIcon(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
 
         const content = container.createDiv({ cls: 'download-content' });
-        content.style.padding = "10px";
-        content.style.maxHeight = "30vh";
-        content.style.overflowY = "auto";
-        if (isCollapsed) content.style.display = "none";
+        content.toggleClass('is-collapsed', isCollapsed);
 
         header.onclick = () => {
             const collapsed = container!.dataset.collapsed === 'true';
             container!.dataset.collapsed = String(!collapsed);
-            if (!collapsed) {
-                content.style.display = "none";
-                setIcon(toggleIcon, "chevron-up");
-            } else {
-                content.style.display = "block";
-                setIcon(toggleIcon, "chevron-down");
-            }
+            content.toggleClass('is-collapsed', !collapsed);
+            setIcon(toggleIcon, collapsed ? "chevron-down" : "chevron-up");
         };
 
         // Global Progress Bar
@@ -2645,18 +2591,13 @@ class CrossPlayerListView extends ItemView {
             const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
             globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
             const globalBar = globalProgressContainer.createEl("progress");
-            globalBar.style.width = "100%";
-            globalBar.style.height = "8px";
+            globalBar.addClass('cross-player-global-progress');
             globalBar.value = avgProgress;
             globalBar.max = 100;
         }
 
         activeDownloads.forEach(dl => {
             const dlItem = content.createDiv({ cls: 'download-item' });
-            dlItem.style.marginBottom = "8px";
-            dlItem.style.fontSize = "0.8em";
-            dlItem.style.borderBottom = "1px solid var(--background-modifier-border)";
-            dlItem.style.paddingBottom = "5px";
 
             // 1. Name
             const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
@@ -2671,8 +2612,7 @@ class CrossPlayerListView extends ItemView {
 
             // 2. Progress Bar
             const progressBar = dlItem.createEl("progress");
-            progressBar.style.width = "100%";
-            progressBar.style.height = "6px";
+            progressBar.addClass('cross-player-download-progress');
             if (dl.progress.includes('%')) {
                 progressBar.value = parseFloat(dl.progress) || 0;
             } else {
@@ -2690,7 +2630,7 @@ class CrossPlayerListView extends ItemView {
                 info.setText('Processing media...');
             } else if (dl.status === 'error') {
                 info.setText(dl.error || "Unknown Error");
-                info.style.color = "var(--text-error)";
+                info.addClass('cross-player-download-error');
             }
 
             const btnGroup = controlsRow.createDiv({ attr: { style: "display: flex; gap: 5px;" } });
@@ -2698,25 +2638,21 @@ class CrossPlayerListView extends ItemView {
             // Pause/Resume Button
             if (dl.status === 'downloading') {
                 const pauseBtn = btnGroup.createEl("button", { text: "Pause" });
-                pauseBtn.style.fontSize = "0.8em";
-                pauseBtn.style.padding = "2px 5px";
+                pauseBtn.addClass('cross-player-download-button');
                 pauseBtn.onclick = () => this.plugin.pauseDownload(dl.id);
             } else if (dl.status === 'paused') {
                 const resumeBtn = btnGroup.createEl("button", { text: "Resume" });
-                resumeBtn.style.fontSize = "0.8em";
-                resumeBtn.style.padding = "2px 5px";
+                resumeBtn.addClass('cross-player-download-button');
                 resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
             } else if (dl.status === 'error') {
                 const retryBtn = btnGroup.createEl("button", { text: "Retry" });
-                retryBtn.style.fontSize = "0.8em";
-                retryBtn.style.padding = "2px 5px";
+                retryBtn.addClass('cross-player-download-button');
                 retryBtn.onclick = () => this.plugin.retryDownload(dl.id);
             }
 
             // Cancel Button
             const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
-            cancelBtn.style.fontSize = "0.8em";
-            cancelBtn.style.padding = "2px 5px";
+            cancelBtn.addClass('cross-player-download-button');
             cancelBtn.onclick = () => this.plugin.cancelDownload(dl.id);
         });
     }
@@ -2760,7 +2696,7 @@ class CrossPlayerMainView extends ItemView {
     }
 
     getOverlayProgressBottomOffset(): string {
-        if (document.fullscreenElement) {
+        if (activeDocument.fullscreenElement) {
             return "18px";
         }
 
@@ -2911,19 +2847,20 @@ class CrossPlayerMainView extends ItemView {
     }
 
     async onOpen() {
+        this.plugin.mainView = this;
         const container = this.contentEl;
         container.empty();
         container.addClass("cross-player-main-view");
         // Make the view focusable so it can receive keyboard events
         container.tabIndex = 0;
-        container.style.outline = "none";
+        container.addClass('cross-player-no-outline');
 
         // Keyboard shortcuts handler
         container.addEventListener('keydown', (e) => {
             if (!this.videoEl) return;
 
             // If the video element itself has focus, let default controls handle it
-            if (document.activeElement === this.videoEl) return;
+            if (activeDocument.activeElement === this.videoEl) return;
 
             // Ignore if user is typing in an input (unlikely here but good practice)
             if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
@@ -2951,51 +2888,18 @@ class CrossPlayerMainView extends ItemView {
             }
         });
 
-        container.style.display = "flex";
-        container.style.flexDirection = "column";
-        container.style.justifyContent = "flex-start";
-        container.style.alignItems = "stretch";
-        container.style.width = "100%";
-        container.style.height = "100%";
-        container.style.minWidth = "0";
-        container.style.minHeight = "0";
-        container.style.paddingTop = "0";
-        container.style.paddingLeft = "0";
-        container.style.paddingRight = "0";
-        container.style.margin = "0";
-        container.style.boxSizing = "border-box";
-        container.style.overflow = "hidden";
-        container.style.backgroundColor = "var(--background-primary)";
-        container.style.position = "relative"; // Needed for overlay
-
         // Wrapper for video and overlay to manage events cleanly
         this.videoWrapperEl = container.createDiv({ cls: 'cross-player-video-wrapper' });
-        this.videoWrapperEl.style.position = "relative";
-        this.videoWrapperEl.style.flex = "1 1 auto";
-        this.videoWrapperEl.style.width = "100%";
-        this.videoWrapperEl.style.height = "100%";
-        this.videoWrapperEl.style.minWidth = "0";
-        this.videoWrapperEl.style.minHeight = "0";
-        this.videoWrapperEl.style.display = "flex";
-        this.videoWrapperEl.style.justifyContent = "center";
-        this.videoWrapperEl.style.alignItems = "center";
-        this.videoWrapperEl.style.background = "var(--background-primary)";
-        this.videoWrapperEl.style.overflow = "hidden";
 
         this.videoEl = this.videoWrapperEl.createEl("video");
         this.videoEl.controls = !this.shouldUseTouchOverlay();
-        this.videoEl.style.maxWidth = "100%";
-        this.videoEl.style.maxHeight = "100%";
-        this.videoEl.style.width = "100%";
-        this.videoEl.style.height = "auto";
-        this.videoEl.style.display = "block";
-        this.videoEl.style.objectFit = "contain";
+        this.videoEl.addClass('cross-player-media-element');
 
-        this.registerDomEvent(document, 'fullscreenchange', () => {
+        this.registerDomEvent(activeDocument, 'fullscreenchange', () => {
             window.setTimeout(() => {
                 this.refreshMobileOverlay();
                 if (this.overlayProgressWrapEl) {
-                    this.overlayProgressWrapEl.style.bottom = this.getOverlayProgressBottomOffset();
+                    this.overlayProgressWrapEl.setCssProps({ bottom: this.getOverlayProgressBottomOffset() });
                 }
             }, 50);
         });
@@ -3112,42 +3016,15 @@ class CrossPlayerMainView extends ItemView {
     createMobileOverlay(container: HTMLElement) {
         const overlay = container.createDiv({ cls: 'cross-player-overlay' });
         this.overlayEl = overlay;
-        overlay.style.position = "absolute";
-        overlay.style.top = "0";
-        overlay.style.left = "0";
-        overlay.style.width = "100%";
-        overlay.style.height = "100%";
-        overlay.style.display = "flex";
-        overlay.style.flexDirection = "column";
-        overlay.style.justifyContent = "center";
-        overlay.style.alignItems = "center";
-        overlay.style.backgroundColor = "rgba(0, 0, 0, 0.4)";
-        overlay.style.zIndex = "10";
-        overlay.style.opacity = "0";
-        overlay.style.transition = "opacity 0.3s ease";
-        overlay.style.pointerEvents = "none";
+        overlay.addClass('cross-player-mobile-overlay');
 
         let suppressControlTapUntil = 0;
 
         const setOverlayVisibility = (visible: boolean) => {
             if (visible) {
                 overlay.addClass('is-visible');
-                overlay.style.opacity = "1";
-                overlay.style.pointerEvents = "auto";
-                if (this.overlayProgressWrapEl) {
-                    this.overlayProgressWrapEl.style.opacity = "1";
-                    this.overlayProgressWrapEl.style.visibility = "visible";
-                    this.overlayProgressWrapEl.style.pointerEvents = "auto";
-                }
             } else {
                 overlay.removeClass('is-visible');
-                overlay.style.opacity = "0";
-                overlay.style.pointerEvents = "none";
-                if (this.overlayProgressWrapEl) {
-                    this.overlayProgressWrapEl.style.opacity = "0";
-                    this.overlayProgressWrapEl.style.visibility = "hidden";
-                    this.overlayProgressWrapEl.style.pointerEvents = "none";
-                }
             }
         };
 
@@ -3187,15 +3064,14 @@ class CrossPlayerMainView extends ItemView {
         let pointerStartY = 0;
         let pointerMoved = false;
 
-        const isOverlayVisible = () => overlay.style.opacity !== "0";
+        const isOverlayVisible = () => overlay.hasClass('is-visible');
 
         const isProgressWrapInteractive = () => {
             const progressWrapEl = this.overlayProgressWrapEl;
             return Boolean(
                 progressWrapEl &&
                 isOverlayVisible() &&
-                progressWrapEl.style.visibility !== "hidden" &&
-                progressWrapEl.style.pointerEvents !== "none"
+                overlay.hasClass('is-visible')
             );
         };
 
@@ -3275,38 +3151,12 @@ class CrossPlayerMainView extends ItemView {
 
         const progressWrap = overlay.createDiv({ cls: 'cross-player-overlay-progress-wrap' });
         this.overlayProgressWrapEl = progressWrap;
-        progressWrap.style.position = "absolute";
-        progressWrap.style.left = "14px";
-        progressWrap.style.right = "14px";
-        progressWrap.style.bottom = this.getOverlayProgressBottomOffset();
-        progressWrap.style.zIndex = "11";
-        progressWrap.style.opacity = "0";
-        progressWrap.style.visibility = "hidden";
-        progressWrap.style.pointerEvents = "none";
-        progressWrap.style.padding = "10px 12px";
-        progressWrap.style.touchAction = "none";
-        progressWrap.style.display = "flex";
-        progressWrap.style.alignItems = "center";
-        progressWrap.style.gap = "10px";
-        progressWrap.style.background = "var(--interactive-normal)";
-        progressWrap.style.border = "1px solid var(--background-modifier-border)";
-        progressWrap.style.borderRadius = "999px";
-        progressWrap.style.setProperty("backdrop-filter", "blur(10px)");
-        progressWrap.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
+        progressWrap.setCssProps({ bottom: this.getOverlayProgressBottomOffset() });
 
-        const currentTimeEl = progressWrap.createSpan({ text: "0:00" });
-        currentTimeEl.style.minWidth = "40px";
-        currentTimeEl.style.fontSize = "12px";
-        currentTimeEl.style.fontVariantNumeric = "tabular-nums";
-        currentTimeEl.style.color = "var(--text-normal)";
-        currentTimeEl.style.textAlign = "right";
+        const currentTimeEl = progressWrap.createSpan({ text: "0:00", cls: 'cross-player-overlay-time cross-player-overlay-time-current' });
         this.overlayCurrentTimeEl = currentTimeEl;
 
         const progressBarShell = progressWrap.createDiv({ cls: 'cross-player-overlay-progress-shell' });
-        progressBarShell.style.flex = "1";
-        progressBarShell.style.display = "flex";
-        progressBarShell.style.alignItems = "center";
-        progressBarShell.style.minWidth = "0";
 
         const progressBar = progressBarShell.createEl('input', {
             type: 'range',
@@ -3316,34 +3166,14 @@ class CrossPlayerMainView extends ItemView {
         progressBar.max = '1000';
         progressBar.step = '1';
         progressBar.value = '0';
-        progressBar.style.width = "100%";
-        progressBar.style.margin = "0";
-        progressBar.style.accentColor = "var(--interactive-accent)";
-        progressBar.style.touchAction = "none";
-        progressBar.style.height = "6px";
-        progressBar.style.borderRadius = "999px";
-        progressBar.style.setProperty("-webkit-appearance", "none");
-        progressBar.style.appearance = "none";
-        progressBar.style.outline = "none";
-        progressBar.style.border = "none";
         this.overlayProgressEl = progressBar;
 
-        const durationEl = progressWrap.createSpan({ text: "0:00" });
-        durationEl.style.minWidth = "40px";
-        durationEl.style.fontSize = "12px";
-        durationEl.style.fontVariantNumeric = "tabular-nums";
-        durationEl.style.color = "var(--text-muted)";
-        durationEl.style.textAlign = "left";
+        const durationEl = progressWrap.createSpan({ text: "0:00", cls: 'cross-player-overlay-time cross-player-overlay-time-duration' });
         this.overlayDurationEl = durationEl;
 
         const progressFullscreenBtn = progressWrap.createDiv({ cls: 'cross-player-big-btn' });
-        progressFullscreenBtn.style.width = "34px";
-        progressFullscreenBtn.style.height = "34px";
-        progressFullscreenBtn.style.minWidth = "34px";
-        progressFullscreenBtn.style.background = "var(--interactive-normal)";
-        progressFullscreenBtn.style.border = "1px solid var(--background-modifier-border)";
-        progressFullscreenBtn.style.boxShadow = "none";
-        setIcon(progressFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+        progressFullscreenBtn.addClass('cross-player-overlay-mini-btn');
+        setIcon(progressFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
         this.styleBigButton(progressFullscreenBtn);
         this.overlayFullscreenBtn = progressFullscreenBtn;
         progressFullscreenBtn.onclick = (e) => {
@@ -3352,7 +3182,7 @@ class CrossPlayerMainView extends ItemView {
             this.toggleFullscreen();
             window.setTimeout(() => {
                 if (this.overlayFullscreenBtn) {
-                    setIcon(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+                    setIcon(this.overlayFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
                 }
                 showOverlay();
             }, 80);
@@ -3421,11 +3251,6 @@ class CrossPlayerMainView extends ItemView {
         }, { passive: false });
 
         const controlsRow = overlay.createDiv({ cls: 'cross-player-controls-row' });
-        controlsRow.style.display = "flex";
-        controlsRow.style.gap = "15px";
-        controlsRow.style.alignItems = "center";
-        controlsRow.style.justifyContent = "center";
-        controlsRow.style.padding = "0 10px";
 
         // Previous Button
         const prevBtn = controlsRow.createDiv({ cls: 'cross-player-big-btn' });
@@ -3509,7 +3334,7 @@ class CrossPlayerMainView extends ItemView {
                 this.overlayDurationEl.setText("0:00");
             }
             if (this.overlayFullscreenBtn) {
-                setIcon(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+                setIcon(this.overlayFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
             }
             return;
         }
@@ -3524,7 +3349,7 @@ class CrossPlayerMainView extends ItemView {
             this.overlayDurationEl.setText(this.formatPlaybackTime(this.videoEl.duration));
         }
         if (this.overlayFullscreenBtn) {
-            setIcon(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+            setIcon(this.overlayFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
         }
     }
 
@@ -3533,12 +3358,14 @@ class CrossPlayerMainView extends ItemView {
 
         const normalized = Math.min(1, Math.max(0, progress));
         const percent = (normalized * 100).toFixed(2);
-        const isDarkTheme = document.body.classList.contains('theme-dark');
+        const isDarkTheme = activeDocument.body.classList.contains('theme-dark');
         const fillColor = "var(--interactive-accent)";
         const trackColor = isDarkTheme ? "rgba(255, 255, 255, 0.22)" : "rgba(0, 0, 0, 0.10)";
 
-        this.overlayProgressEl.style.background = `linear-gradient(to right, ${fillColor} 0%, ${fillColor} ${percent}%, ${trackColor} ${percent}%, ${trackColor} 100%)`;
-        this.overlayProgressEl.style.boxShadow = isDarkTheme ? "0 0 0 1px rgba(255, 255, 255, 0.05) inset" : "none";
+        this.overlayProgressEl.setCssProps({
+            '--cross-player-progress-background': `linear-gradient(to right, ${fillColor} 0%, ${fillColor} ${percent}%, ${trackColor} ${percent}%, ${trackColor} 100%)`,
+            '--cross-player-progress-shadow': isDarkTheme ? "0 0 0 1px rgba(255, 255, 255, 0.05) inset" : "none"
+        });
     }
 
     formatPlaybackTime(seconds: number): string {
@@ -3622,23 +3449,8 @@ class CrossPlayerMainView extends ItemView {
                 this.audioPlaceholderEl.remove();
             }
             this.audioPlaceholderEl = this.videoWrapperEl.createDiv({ cls: 'cross-player-audio-placeholder' });
-            this.audioPlaceholderEl.style.position = "absolute";
-            this.audioPlaceholderEl.style.top = "0";
-            this.audioPlaceholderEl.style.left = "0";
-            this.audioPlaceholderEl.style.width = "100%";
-            this.audioPlaceholderEl.style.height = "100%";
-            this.audioPlaceholderEl.style.display = "flex";
-            this.audioPlaceholderEl.style.flexDirection = "column";
-            this.audioPlaceholderEl.style.justifyContent = "center";
-            this.audioPlaceholderEl.style.alignItems = "center";
-            this.audioPlaceholderEl.style.gap = "16px";
-            this.audioPlaceholderEl.style.padding = "32px";
-            this.audioPlaceholderEl.style.zIndex = "1";
-            this.audioPlaceholderEl.style.background = "radial-gradient(circle at top, var(--background-secondary), var(--background-primary))";
-            this.audioPlaceholderEl.style.textAlign = "center";
-            this.audioPlaceholderEl.style.pointerEvents = "none";
         } else {
-            this.audioPlaceholderEl.style.display = "flex";
+            this.audioPlaceholderEl.removeClass('is-hidden');
             this.audioPlaceholderEl.empty();
         }
     }
@@ -3648,47 +3460,19 @@ class CrossPlayerMainView extends ItemView {
         if (!this.audioPlaceholderEl || !this.videoEl) return;
         this.contentEl.removeClass('is-media-active');
         this.videoWrapperEl?.removeClass('is-video-active');
-        if (this.videoWrapperEl) {
-            this.videoWrapperEl.style.justifyContent = "center";
-        }
 
-        const badge = this.audioPlaceholderEl.createDiv();
-        badge.style.width = "96px";
-        badge.style.height = "96px";
-        badge.style.borderRadius = "28px";
-        badge.style.display = "flex";
-        badge.style.alignItems = "center";
-        badge.style.justifyContent = "center";
-        badge.style.background = "var(--interactive-normal)";
-        badge.style.border = "1px solid var(--background-modifier-border)";
-        badge.style.boxShadow = "0 18px 48px rgba(0, 0, 0, 0.16)";
+        const badge = this.audioPlaceholderEl.createDiv({ cls: 'cross-player-idle-badge' });
 
-        const iconEl = badge.createDiv();
+        const iconEl = badge.createDiv({ cls: 'cross-player-idle-badge-icon' });
         setIcon(iconEl, "play-circle");
-        iconEl.style.width = "44px";
-        iconEl.style.height = "44px";
-        iconEl.style.color = "var(--text-muted)";
-        const svg = iconEl.querySelector('svg');
-        if (svg) {
-            svg.style.width = "100%";
-            svg.style.height = "100%";
-        }
 
-        const titleEl = this.audioPlaceholderEl.createDiv({ text: "Nothing is playing" });
-        titleEl.style.fontSize = "1.1rem";
-        titleEl.style.fontWeight = "600";
-        titleEl.style.color = "var(--text-normal)";
+        this.audioPlaceholderEl.createDiv({ text: "Nothing is playing", cls: 'cross-player-placeholder-title' });
 
-        const descEl = this.audioPlaceholderEl.createDiv({ text: "Pick something from the queue to start playback." });
-        descEl.style.maxWidth = "280px";
-        descEl.style.fontSize = "0.95rem";
-        descEl.style.lineHeight = "1.5";
-        descEl.style.color = "var(--text-muted)";
+        this.audioPlaceholderEl.createDiv({ text: "Pick something from the queue to start playback.", cls: 'cross-player-placeholder-description' });
 
         this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-        this.videoEl.style.opacity = "0";
-        this.videoEl.style.pointerEvents = "none";
-        this.videoEl.style.background = "transparent";
+        this.videoEl.addClass('is-hidden');
+        this.videoEl.removeClass('is-audio-controls');
     }
 
     showAudioPlaceholder() {
@@ -3696,35 +3480,22 @@ class CrossPlayerMainView extends ItemView {
         if (!this.audioPlaceholderEl || !this.videoEl) return;
         this.contentEl.addClass('is-media-active');
         this.videoWrapperEl?.removeClass('is-video-active');
-        if (this.videoWrapperEl) {
-            this.videoWrapperEl.style.justifyContent = "center";
-        }
 
         const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: 'cross-player-music-icon' });
         setIcon(musicIconEl, "music");
-        musicIconEl.style.width = "120px";
-        musicIconEl.style.height = "120px";
-        musicIconEl.style.color = "var(--text-muted)";
-        musicIconEl.style.opacity = "0.2";
-        const svg = musicIconEl.querySelector('svg');
-        if (svg) {
-            svg.style.width = "100%";
-            svg.style.height = "100%";
-        }
 
         this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-        this.videoEl.style.opacity = "1";
-        this.videoEl.style.pointerEvents = "auto";
-        this.videoEl.style.background = "transparent";
+        this.videoEl.removeClass('is-hidden');
+        this.videoEl.addClass('is-audio-controls');
     }
 
     hidePlaceholder() {
         if (this.audioPlaceholderEl) {
-            this.audioPlaceholderEl.style.display = "none";
+            this.audioPlaceholderEl.addClass('is-hidden');
         }
         if (this.videoEl) {
-            this.videoEl.style.opacity = "1";
-            this.videoEl.style.pointerEvents = "auto";
+            this.videoEl.removeClass('is-hidden');
+            this.videoEl.removeClass('is-audio-controls');
         }
         this.contentEl.addClass('is-media-active');
     }
@@ -3781,10 +3552,7 @@ class CrossPlayerMainView extends ItemView {
             const container = this.contentEl;
             this.videoEl = container.createEl("video");
             this.videoEl.controls = !this.shouldUseTouchOverlay();
-            this.videoEl.style.maxWidth = "100%";
-            this.videoEl.style.maxHeight = "100%";
-            this.videoEl.style.width = "100%";
-            this.videoEl.style.height = "auto";
+            this.videoEl.addClass('cross-player-media-element');
         }
 
         // --- Subtitle Support Preparation ---
@@ -3870,30 +3638,15 @@ class CrossPlayerMainView extends ItemView {
         if (isAudio) {
             this.showAudioPlaceholder();
             this.videoWrapperEl.removeClass('is-video-active');
-            this.videoWrapperEl.style.justifyContent = "center";
-
-            // Adjust video element to be minimal (just controls)
-            // But we can't easily make it "just controls". 
-            // If we set height small, it might look weird.
-            // Let's set it to absolute bottom?
-            this.videoEl.style.height = "50px"; // Height for controls
-            this.videoEl.style.position = "absolute";
-            this.videoEl.style.bottom = "0";
-            this.videoEl.style.zIndex = "5"; // Above placeholder
-            this.videoEl.style.background = "transparent"; // Try to transparent?
+            this.videoEl.addClass('is-audio-controls');
 
         } else {
             // Video
             this.hidePlaceholder();
             this.videoWrapperEl.addClass('is-video-active');
-            this.videoWrapperEl.style.justifyContent = "flex-end";
             // Reset video properties
             this.videoEl.poster = "";
-            this.videoEl.style.background = "";
-            this.videoEl.style.width = "100%";
-            this.videoEl.style.height = "auto";
-            this.videoEl.style.position = "static"; // Default
-            this.videoEl.style.zIndex = "auto";
+            this.videoEl.removeClass('is-audio-controls');
         }
 
         if (autoPlay) {
@@ -3935,12 +3688,12 @@ class CrossPlayerMainView extends ItemView {
     toggleFullscreen() {
         if (!this.videoEl) return;
 
-        if (!document.fullscreenElement) {
+        if (!activeDocument.fullscreenElement) {
             this.contentEl.requestFullscreen().catch(err => {
                 new Notice(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
             });
         } else {
-            document.exitFullscreen();
+            void activeDocument.exitFullscreen();
         }
 
         window.setTimeout(() => this.refreshMobileOverlay(), 50);

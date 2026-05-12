@@ -2322,7 +2322,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   getLastGoodWatchedFolder() {
     try {
-      return window.localStorage.getItem(LAST_WATCHED_FOLDER_KEY) || "";
+      return this.app.loadLocalStorage(LAST_WATCHED_FOLDER_KEY) || "";
     } catch (error) {
       console.warn("[Cross Player] Failed to read watched folder backup", error);
       return "";
@@ -2331,9 +2331,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   setLastGoodWatchedFolder(path) {
     try {
       if (path) {
-        window.localStorage.setItem(LAST_WATCHED_FOLDER_KEY, path);
+        this.app.saveLocalStorage(LAST_WATCHED_FOLDER_KEY, path);
       } else {
-        window.localStorage.removeItem(LAST_WATCHED_FOLDER_KEY);
+        this.app.saveLocalStorage(LAST_WATCHED_FOLDER_KEY, null);
       }
     } catch (error) {
       console.warn("[Cross Player] Failed to store watched folder backup", error);
@@ -2530,11 +2530,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.addSettingTab(new CrossPlayerSettingTab(this.app, this));
     this.registerView(
       VIEW_TYPE_CROSS_PLAYER_LIST,
-      (leaf) => this.listView = new CrossPlayerListView(leaf, this)
+      (leaf) => new CrossPlayerListView(leaf, this)
     );
     this.registerView(
       VIEW_TYPE_CROSS_PLAYER_MAIN,
-      (leaf) => this.mainView = new CrossPlayerMainView(leaf, this)
+      (leaf) => new CrossPlayerMainView(leaf, this)
     );
     this.addRibbonIcon("play-circle", "Open Cross Player", () => {
       this.activateListView();
@@ -2545,8 +2545,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       callback: () => new ConfirmCleanConsumedMediaModal(this.app, this).open()
     });
     this.addCommand({
-      id: "open-cross-player",
-      name: "Open Cross Player",
+      id: "open-player",
+      name: "Open Player",
       callback: () => {
         this.activateListView();
       }
@@ -2697,8 +2697,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.registerDomEvent(window, "focus", () => {
       this.debouncedReload();
     });
-    this.registerDomEvent(document, "visibilitychange", () => {
-      if (document.visibilityState === "visible") {
+    this.registerDomEvent(activeDocument, "visibilitychange", () => {
+      if (activeDocument.visibilityState === "visible") {
         this.debouncedReload();
       }
     });
@@ -2719,10 +2719,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async loadDeviceId() {
-    let id = localStorage.getItem("cross-player-device-id");
+    let id = this.app.loadLocalStorage("cross-player-device-id");
     if (!id) {
       id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      localStorage.setItem("cross-player-device-id", id);
+      this.app.saveLocalStorage("cross-player-device-id", id);
     }
     this.deviceId = id;
     let name = import_obsidian.Platform.isMobile ? "Mobile" : "Desktop";
@@ -2943,7 +2943,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async getMediaDuration(file) {
     return new Promise((resolve) => {
-      const video = document.createElement("video");
+      const video = activeDocument.createElement("video");
       video.preload = "metadata";
       video.onloadedmetadata = () => {
         resolve(video.duration);
@@ -3089,7 +3089,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       leaf = workspace.getLeftLeaf(false);
       await leaf.setViewState({ type: VIEW_TYPE_CROSS_PLAYER_LIST, active: true });
     }
-    workspace.revealLeaf(leaf);
+    this.listView = leaf.view instanceof CrossPlayerListView ? leaf.view : null;
+    await workspace.revealLeaf(leaf);
   }
   async activateMainView() {
     const { workspace } = this.app;
@@ -3101,11 +3102,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       leaf = workspace.getLeaf(false);
       await leaf.setViewState({ type: VIEW_TYPE_CROSS_PLAYER_MAIN, active: true });
     }
-    workspace.revealLeaf(leaf);
+    await workspace.revealLeaf(leaf);
     workspace.setActiveLeaf(leaf, { focus: true });
     if (leaf.view instanceof CrossPlayerMainView) {
       this.mainView = leaf.view;
-      setTimeout(() => {
+      window.setTimeout(() => {
         if (this.mainView) {
           this.mainView.contentEl.focus();
           if (this.mainView.videoEl) {
@@ -3259,7 +3260,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         }
         const file = this.app.vault.getAbstractFileByPath(item.path);
         if (file instanceof import_obsidian.TFile) {
-          await this.app.vault.delete(file);
+          await this.app.fileManager.trashFile(file);
           count++;
           removedIds.add(item.id);
         } else if (!file) {
@@ -3292,7 +3293,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     try {
       const file = this.app.vault.getAbstractFileByPath(item.path);
       if (file instanceof import_obsidian.TFile) {
-        await this.app.vault.delete(file);
+        await this.app.fileManager.trashFile(file);
         deletedFromDisk = true;
       } else if (!file) {
         deletedFromDisk = true;
@@ -3543,7 +3544,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           console.log(`Download completed for: ${downloadStatus.name}`);
           const { watchedFolder } = this.data.settings;
           if (watchedFolder) {
-            setTimeout(() => {
+            window.setTimeout(() => {
               this.scanFolder(watchedFolder);
             }, 2e3);
           }
@@ -3554,7 +3555,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         downloadStatus.childProcess = void 0;
         (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
         if (downloadStatus.status === "completed") {
-          setTimeout(() => {
+          window.setTimeout(() => {
             var _a3;
             this.activeDownloads = this.activeDownloads.filter((d) => d.id !== downloadId);
             (_a3 = this.listView) == null ? void 0 : _a3.updateDownloadProgress();
@@ -3644,8 +3645,7 @@ var YouTubeDownloadModal = class extends import_obsidian.Modal {
     const textareas = contentEl.querySelectorAll("textarea");
     if (textareas.length > 0) {
       const videoArea = textareas[0];
-      videoArea.style.height = "100px";
-      videoArea.style.width = "100%";
+      videoArea.addClass("cross-player-download-textarea");
     }
     new import_obsidian.Setting(contentEl).setName("Audio Links").setDesc("Paste links to download as AUDIO ONLY (mp3), one per line.").addTextArea((text) => text.setPlaceholder("https://youtube.com/watch?v=...").setValue(this.audioLinks).onChange(async (value) => {
       this.audioLinks = value;
@@ -3654,8 +3654,7 @@ var YouTubeDownloadModal = class extends import_obsidian.Modal {
     }
     const allTextareas = contentEl.querySelectorAll("textarea");
     allTextareas.forEach((ta) => {
-      ta.style.height = "100px";
-      ta.style.width = "100%";
+      ta.addClass("cross-player-download-textarea");
     });
     new import_obsidian.Setting(contentEl).setName("Quality").setDesc("Select max video quality (ignored for audio links).").addDropdown((drop3) => drop3.addOption("best", "Best Available").addOption("1080p", "1080p").addOption("720p", "720p").addOption("480p", "480p").setValue(this.quality).onChange(async (value) => {
       this.quality = value;
@@ -3756,7 +3755,7 @@ var ConsumptionStatsModal = class extends import_obsidian.Modal {
     const hint = contentEl.createEl("p", {
       text: "Stats are stored as small daily buckets, so they stay compact even over long periods."
     });
-    hint.style.color = "var(--text-muted)";
+    hint.addClass("cross-player-muted-text");
     const closeBtn = contentEl.createEl("button", { text: "Close" });
     closeBtn.onclick = () => this.close();
   }
@@ -3772,7 +3771,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h3", { text: "General Settings" });
+    new import_obsidian.Setting(containerEl).setName("General Settings").setHeading();
     new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
     }));
@@ -3818,7 +3817,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       await this.plugin.saveData();
       (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
     }));
-    containerEl.createEl("h3", { text: "Audio Settings" });
+    new import_obsidian.Setting(containerEl).setName("Audio Settings").setHeading();
     new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion.").addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).setDynamicTooltip().onChange(async (value) => {
       var _a;
       this.plugin.data.settings.volumeBoostPercent = value;
@@ -3831,12 +3830,12 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       await this.plugin.saveData(false);
       (_a = this.plugin.mainView) == null ? void 0 : _a.applyAudioSettings();
     }));
-    containerEl.createEl("h3", { text: "Consumption Statistics" });
+    new import_obsidian.Setting(containerEl).setName("Consumption Statistics").setHeading();
     const allTime = this.plugin.getConsumptionSummary();
     new import_obsidian.Setting(containerEl).setName("Usage Summary").setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`).addButton((button) => button.setButtonText("View Statistics").onClick(() => {
       new ConsumptionStatsModal(this.app, this.plugin).open();
     }));
-    containerEl.createEl("h3", { text: "Storage & Download Settings" });
+    new import_obsidian.Setting(containerEl).setName("Storage & Download Settings").setHeading();
     new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
       this.plugin.data.settings.youtubeDlpPath = value;
       await this.plugin.saveData();
@@ -3880,8 +3879,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     return "list-video";
   }
   async onOpen() {
+    this.plugin.listView = this;
     this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
     this.refresh();
+  }
+  async onClose() {
+    if (this.plugin.listView === this) {
+      this.plugin.listView = null;
+    }
   }
   captureScrollPosition() {
     const list = this.contentEl.querySelector(".cross-player-list");
@@ -3904,8 +3909,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const sizeEl = this.contentEl.querySelector(".cross-player-size");
     if (sizeEl) {
       sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
-      sizeEl.style.color = sizeInGB > limitGB ? "var(--text-error)" : "";
-      sizeEl.style.fontWeight = sizeInGB > limitGB ? "bold" : "";
+      sizeEl.toggleClass("is-over-limit", sizeInGB > limitGB);
     }
   }
   getDisplayNameParts(name) {
@@ -3927,19 +3931,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       this.plugin.data.queueScrollTop = this.savedScrollTop;
     }
     container.empty();
-    container.style.display = "flex";
-    container.style.flexDirection = "column";
-    container.style.height = "100%";
-    container.style.overflow = "hidden";
+    container.addClass("cross-player-list-view");
     const headerContainer = container.createDiv({ cls: "cross-player-header" });
-    headerContainer.style.textAlign = "center";
-    headerContainer.style.marginBottom = "10px";
-    headerContainer.style.flexShrink = "0";
+    headerContainer.addClass("cross-player-header-layout");
     const titleRow = headerContainer.createDiv({ cls: "cross-player-title-row" });
-    titleRow.style.display = "flex";
-    titleRow.style.justifyContent = "center";
-    titleRow.style.alignItems = "center";
-    titleRow.style.gap = "8px";
     titleRow.createEl("h4", { text: "Media Queue", cls: "cross-player-title", attr: { style: "margin: 0;" } });
     const sortBtn = titleRow.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(sortBtn, "arrow-up-down");
@@ -3971,11 +3966,6 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     };
     const speed = this.plugin.data.playbackSpeed || 1;
     const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
-    speedContainer.style.display = "flex";
-    speedContainer.style.justifyContent = "center";
-    speedContainer.style.alignItems = "center";
-    speedContainer.style.gap = "10px";
-    speedContainer.style.marginTop = "5px";
     const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(minusBtn, "minus-circle");
     minusBtn.ariaLabel = "Decrease Speed";
@@ -3992,9 +3982,6 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     };
     const speedEl = speedContainer.createDiv({ cls: "cross-player-speed-display" });
     speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
-    speedEl.style.fontSize = "0.8em";
-    speedEl.style.color = "var(--text-muted)";
-    speedEl.style.fontWeight = "bold";
     const plusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(plusBtn, "plus-circle");
     plusBtn.ariaLabel = "Increase Speed";
@@ -4015,21 +4002,12 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const limitGB = limitBytes > 0 ? limitBytes / (1024 * 1024 * 1024) : 10;
     const sizeInGB = stats.totalSize / (1024 * 1024 * 1024);
     const statsContainer = headerContainer.createDiv({ cls: "cross-player-stats" });
-    statsContainer.style.fontSize = "0.8em";
-    statsContainer.style.color = "var(--text-muted)";
-    statsContainer.style.marginTop = "5px";
     const etcText = `ETC: ${this.plugin.formatDuration(adjustedDuration)}`;
     statsContainer.createSpan({ text: etcText, cls: "cross-player-etc" });
     statsContainer.createSpan({ text: " \u2022 " });
     const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`, cls: "cross-player-size" });
-    if (sizeInGB > limitGB) {
-      sizeSpan.style.color = "var(--text-error)";
-      sizeSpan.style.fontWeight = "bold";
-    }
-    const list = container.createDiv({ cls: "cross-player-list" });
-    list.style.flexGrow = "1";
-    list.style.overflowY = "auto";
-    list.style.overflowX = "hidden";
+    sizeSpan.toggleClass("is-over-limit", sizeInGB > limitGB);
+    const list = container.createDiv({ cls: "cross-player-list cross-player-list-scroll" });
     list.addEventListener("scroll", () => {
       this.savedScrollTop = list.scrollTop;
       this.plugin.data.queueScrollTop = this.savedScrollTop;
@@ -4040,14 +4018,14 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       itemEl.dataset.id = item.id;
       const isPlaying = item.status === "playing" || this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id;
       if (isPlaying) {
-        itemEl.style.backgroundColor = "var(--background-modifier-active-hover)";
+        itemEl.addClass("is-playing");
       }
       const progressEl = itemEl.createDiv({ cls: "cross-player-item-progress" });
       if (this.plugin.data.settings.showProgressColor && item.duration > 0 && (item.position > 0 || item.status === "completed")) {
         const pct = item.status === "completed" ? 100 : Math.min(100, item.position / item.duration * 100);
-        progressEl.style.width = `${pct}%`;
+        progressEl.setCssProps({ width: `${pct}%` });
       } else {
-        progressEl.style.width = "0%";
+        progressEl.setCssProps({ width: "0%" });
       }
       const statusIcon = itemEl.createDiv({ cls: "cross-player-status-icon" });
       if (item.status === "completed")
@@ -4056,25 +4034,18 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         (0, import_obsidian.setIcon)(statusIcon, "play-circle");
       else
         (0, import_obsidian.setIcon)(statusIcon, "circle");
-      statusIcon.style.marginRight = "5px";
+      statusIcon.addClass("cross-player-status-icon-compact");
       if (this.plugin.data.settings.showMediaIndicator) {
         const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
         const ext = (_a2 = item.path.split(".").pop()) == null ? void 0 : _a2.toLowerCase();
         const isAudio = AUDIO_EXTENSIONS.includes(ext || "");
         (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
-        typeIcon.style.marginRight = "10px";
-        typeIcon.style.color = "var(--text-muted)";
+        typeIcon.addClass("cross-player-type-icon-muted");
       }
       const nameEl = itemEl.createDiv({ cls: "cross-player-name" });
-      nameEl.style.flexGrow = "1";
-      nameEl.style.cursor = "pointer";
       nameEl.title = item.path;
       if (this.plugin.data.settings.wrapQueueText) {
         nameEl.addClass("is-wrapped");
-      } else {
-        nameEl.style.overflow = "hidden";
-        nameEl.style.textOverflow = "ellipsis";
-        nameEl.style.whiteSpace = "nowrap";
       }
       const { title, extension } = this.getDisplayNameParts(item.name);
       nameEl.createSpan({ text: title, cls: "cross-player-name-title" });
@@ -4103,12 +4074,9 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         );
         menu.showAtPosition({ x: event.clientX, y: event.clientY });
       });
-      const controls = itemEl.createDiv({ cls: "cross-player-controls" });
-      controls.style.display = "flex";
-      controls.style.gap = "5px";
+      const controls = itemEl.createDiv({ cls: "cross-player-controls cross-player-controls-compact" });
       const handle = controls.createDiv({ cls: "clickable-icon sortable-handle" });
       (0, import_obsidian.setIcon)(handle, "grip-horizontal");
-      handle.style.cursor = "grab";
     });
     sortable_esm_default.create(list, {
       animation: 150,
@@ -4127,14 +4095,11 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       }
     });
     const downloadContainer = container.createDiv({ cls: "cross-player-download-container" });
-    downloadContainer.style.flexShrink = "0";
-    downloadContainer.style.borderTop = "1px solid var(--background-modifier-border)";
-    downloadContainer.style.backgroundColor = "var(--background-secondary)";
     this.updateDownloadProgress(downloadContainer);
     const scrollTopToRestore = (_a = this.plugin.data.queueScrollTop) != null ? _a : this.savedScrollTop;
     if (scrollTopToRestore > 0) {
       list.scrollTop = scrollTopToRestore;
-      requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
         list.scrollTop = scrollTopToRestore;
       });
     }
@@ -4154,10 +4119,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     statsContainer.createSpan({ text: etcText });
     statsContainer.createSpan({ text: " \u2022 " });
     const sizeSpan = statsContainer.createSpan({ text: `Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB` });
-    if (sizeInGB > limitGB) {
-      sizeSpan.style.color = "var(--text-error)";
-      sizeSpan.style.fontWeight = "bold";
-    }
+    sizeSpan.toggleClass("is-over-limit", sizeInGB > limitGB);
   }
   updateItemProgress(id, percentage) {
     const itemEl = this.contentEl.querySelector(`.cross-player-item[data-id="${id}"]`);
@@ -4165,11 +4127,11 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       const progressEl = itemEl.querySelector(".cross-player-item-progress");
       if (progressEl) {
         if (!this.plugin.data.settings.showProgressColor) {
-          progressEl.style.width = "0%";
+          progressEl.setCssProps({ width: "0%" });
           return;
         }
         const pct = Math.min(100, Math.max(0, percentage));
-        progressEl.style.width = `${pct}%`;
+        progressEl.setCssProps({ width: `${pct}%` });
       }
     }
   }
@@ -4183,38 +4145,23 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     container.empty();
     const activeDownloads = this.plugin.activeDownloads;
     if (activeDownloads.length === 0) {
-      container.style.display = "none";
+      container.addClass("is-hidden");
       return;
     } else {
-      container.style.display = "block";
+      container.removeClass("is-hidden");
     }
     const header = container.createDiv({ cls: "download-header" });
-    header.style.padding = "5px 10px";
-    header.style.cursor = "pointer";
-    header.style.display = "flex";
-    header.style.justifyContent = "space-between";
-    header.style.alignItems = "center";
-    header.style.backgroundColor = "var(--background-secondary-alt)";
     header.createSpan({ text: `Downloads (${activeDownloads.length})`, attr: { style: "font-weight: bold; font-size: 0.9em;" } });
     const toggleIcon = header.createDiv();
     const isCollapsed = container.dataset.collapsed === "true";
     (0, import_obsidian.setIcon)(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
     const content = container.createDiv({ cls: "download-content" });
-    content.style.padding = "10px";
-    content.style.maxHeight = "30vh";
-    content.style.overflowY = "auto";
-    if (isCollapsed)
-      content.style.display = "none";
+    content.toggleClass("is-collapsed", isCollapsed);
     header.onclick = () => {
       const collapsed = container.dataset.collapsed === "true";
       container.dataset.collapsed = String(!collapsed);
-      if (!collapsed) {
-        content.style.display = "none";
-        (0, import_obsidian.setIcon)(toggleIcon, "chevron-up");
-      } else {
-        content.style.display = "block";
-        (0, import_obsidian.setIcon)(toggleIcon, "chevron-down");
-      }
+      content.toggleClass("is-collapsed", !collapsed);
+      (0, import_obsidian.setIcon)(toggleIcon, collapsed ? "chevron-down" : "chevron-up");
     };
     if (activeDownloads.length > 0) {
       let totalProgress = 0;
@@ -4234,17 +4181,12 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
       globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
       const globalBar = globalProgressContainer.createEl("progress");
-      globalBar.style.width = "100%";
-      globalBar.style.height = "8px";
+      globalBar.addClass("cross-player-global-progress");
       globalBar.value = avgProgress;
       globalBar.max = 100;
     }
     activeDownloads.forEach((dl) => {
       const dlItem = content.createDiv({ cls: "download-item" });
-      dlItem.style.marginBottom = "8px";
-      dlItem.style.fontSize = "0.8em";
-      dlItem.style.borderBottom = "1px solid var(--background-modifier-border)";
-      dlItem.style.paddingBottom = "5px";
       const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
       nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
       let statusText = dl.progress;
@@ -4256,8 +4198,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         statusText = "Converting...";
       nameRow.createSpan({ text: statusText });
       const progressBar = dlItem.createEl("progress");
-      progressBar.style.width = "100%";
-      progressBar.style.height = "6px";
+      progressBar.addClass("cross-player-download-progress");
       if (dl.progress.includes("%")) {
         progressBar.value = parseFloat(dl.progress) || 0;
       } else {
@@ -4272,28 +4213,24 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         info.setText("Processing media...");
       } else if (dl.status === "error") {
         info.setText(dl.error || "Unknown Error");
-        info.style.color = "var(--text-error)";
+        info.addClass("cross-player-download-error");
       }
       const btnGroup = controlsRow.createDiv({ attr: { style: "display: flex; gap: 5px;" } });
       if (dl.status === "downloading") {
         const pauseBtn = btnGroup.createEl("button", { text: "Pause" });
-        pauseBtn.style.fontSize = "0.8em";
-        pauseBtn.style.padding = "2px 5px";
+        pauseBtn.addClass("cross-player-download-button");
         pauseBtn.onclick = () => this.plugin.pauseDownload(dl.id);
       } else if (dl.status === "paused") {
         const resumeBtn = btnGroup.createEl("button", { text: "Resume" });
-        resumeBtn.style.fontSize = "0.8em";
-        resumeBtn.style.padding = "2px 5px";
+        resumeBtn.addClass("cross-player-download-button");
         resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
       } else if (dl.status === "error") {
         const retryBtn = btnGroup.createEl("button", { text: "Retry" });
-        retryBtn.style.fontSize = "0.8em";
-        retryBtn.style.padding = "2px 5px";
+        retryBtn.addClass("cross-player-download-button");
         retryBtn.onclick = () => this.plugin.retryDownload(dl.id);
       }
       const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
-      cancelBtn.style.fontSize = "0.8em";
-      cancelBtn.style.padding = "2px 5px";
+      cancelBtn.addClass("cross-player-download-button");
       cancelBtn.onclick = () => this.plugin.cancelDownload(dl.id);
     });
   }
@@ -4330,7 +4267,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     this.plugin = plugin;
   }
   getOverlayProgressBottomOffset() {
-    if (document.fullscreenElement) {
+    if (activeDocument.fullscreenElement) {
       return "18px";
     }
     if (import_obsidian.Platform.isTablet) {
@@ -4453,15 +4390,16 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
   }
   async onOpen() {
+    this.plugin.mainView = this;
     const container = this.contentEl;
     container.empty();
     container.addClass("cross-player-main-view");
     container.tabIndex = 0;
-    container.style.outline = "none";
+    container.addClass("cross-player-no-outline");
     container.addEventListener("keydown", (e) => {
       if (!this.videoEl)
         return;
-      if (document.activeElement === this.videoEl)
+      if (activeDocument.activeElement === this.videoEl)
         return;
       if (["INPUT", "TEXTAREA"].includes(e.target.tagName))
         return;
@@ -4486,47 +4424,15 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           break;
       }
     });
-    container.style.display = "flex";
-    container.style.flexDirection = "column";
-    container.style.justifyContent = "flex-start";
-    container.style.alignItems = "stretch";
-    container.style.width = "100%";
-    container.style.height = "100%";
-    container.style.minWidth = "0";
-    container.style.minHeight = "0";
-    container.style.paddingTop = "0";
-    container.style.paddingLeft = "0";
-    container.style.paddingRight = "0";
-    container.style.margin = "0";
-    container.style.boxSizing = "border-box";
-    container.style.overflow = "hidden";
-    container.style.backgroundColor = "var(--background-primary)";
-    container.style.position = "relative";
     this.videoWrapperEl = container.createDiv({ cls: "cross-player-video-wrapper" });
-    this.videoWrapperEl.style.position = "relative";
-    this.videoWrapperEl.style.flex = "1 1 auto";
-    this.videoWrapperEl.style.width = "100%";
-    this.videoWrapperEl.style.height = "100%";
-    this.videoWrapperEl.style.minWidth = "0";
-    this.videoWrapperEl.style.minHeight = "0";
-    this.videoWrapperEl.style.display = "flex";
-    this.videoWrapperEl.style.justifyContent = "center";
-    this.videoWrapperEl.style.alignItems = "center";
-    this.videoWrapperEl.style.background = "var(--background-primary)";
-    this.videoWrapperEl.style.overflow = "hidden";
     this.videoEl = this.videoWrapperEl.createEl("video");
     this.videoEl.controls = !this.shouldUseTouchOverlay();
-    this.videoEl.style.maxWidth = "100%";
-    this.videoEl.style.maxHeight = "100%";
-    this.videoEl.style.width = "100%";
-    this.videoEl.style.height = "auto";
-    this.videoEl.style.display = "block";
-    this.videoEl.style.objectFit = "contain";
-    this.registerDomEvent(document, "fullscreenchange", () => {
+    this.videoEl.addClass("cross-player-media-element");
+    this.registerDomEvent(activeDocument, "fullscreenchange", () => {
       window.setTimeout(() => {
         this.refreshMobileOverlay();
         if (this.overlayProgressWrapEl) {
-          this.overlayProgressWrapEl.style.bottom = this.getOverlayProgressBottomOffset();
+          this.overlayProgressWrapEl.setCssProps({ bottom: this.getOverlayProgressBottomOffset() });
         }
       }, 50);
     });
@@ -4619,40 +4525,13 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   createMobileOverlay(container) {
     const overlay = container.createDiv({ cls: "cross-player-overlay" });
     this.overlayEl = overlay;
-    overlay.style.position = "absolute";
-    overlay.style.top = "0";
-    overlay.style.left = "0";
-    overlay.style.width = "100%";
-    overlay.style.height = "100%";
-    overlay.style.display = "flex";
-    overlay.style.flexDirection = "column";
-    overlay.style.justifyContent = "center";
-    overlay.style.alignItems = "center";
-    overlay.style.backgroundColor = "rgba(0, 0, 0, 0.4)";
-    overlay.style.zIndex = "10";
-    overlay.style.opacity = "0";
-    overlay.style.transition = "opacity 0.3s ease";
-    overlay.style.pointerEvents = "none";
+    overlay.addClass("cross-player-mobile-overlay");
     let suppressControlTapUntil = 0;
     const setOverlayVisibility = (visible) => {
       if (visible) {
         overlay.addClass("is-visible");
-        overlay.style.opacity = "1";
-        overlay.style.pointerEvents = "auto";
-        if (this.overlayProgressWrapEl) {
-          this.overlayProgressWrapEl.style.opacity = "1";
-          this.overlayProgressWrapEl.style.visibility = "visible";
-          this.overlayProgressWrapEl.style.pointerEvents = "auto";
-        }
       } else {
         overlay.removeClass("is-visible");
-        overlay.style.opacity = "0";
-        overlay.style.pointerEvents = "none";
-        if (this.overlayProgressWrapEl) {
-          this.overlayProgressWrapEl.style.opacity = "0";
-          this.overlayProgressWrapEl.style.visibility = "hidden";
-          this.overlayProgressWrapEl.style.pointerEvents = "none";
-        }
       }
     };
     const shouldSuppressControlAction = (event) => {
@@ -4685,11 +4564,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     let pointerStartX = 0;
     let pointerStartY = 0;
     let pointerMoved = false;
-    const isOverlayVisible = () => overlay.style.opacity !== "0";
+    const isOverlayVisible = () => overlay.hasClass("is-visible");
     const isProgressWrapInteractive = () => {
       const progressWrapEl = this.overlayProgressWrapEl;
       return Boolean(
-        progressWrapEl && isOverlayVisible() && progressWrapEl.style.visibility !== "hidden" && progressWrapEl.style.pointerEvents !== "none"
+        progressWrapEl && isOverlayVisible() && overlay.hasClass("is-visible")
       );
     };
     const isOverlayControlTarget = (target) => {
@@ -4760,36 +4639,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
     const progressWrap = overlay.createDiv({ cls: "cross-player-overlay-progress-wrap" });
     this.overlayProgressWrapEl = progressWrap;
-    progressWrap.style.position = "absolute";
-    progressWrap.style.left = "14px";
-    progressWrap.style.right = "14px";
-    progressWrap.style.bottom = this.getOverlayProgressBottomOffset();
-    progressWrap.style.zIndex = "11";
-    progressWrap.style.opacity = "0";
-    progressWrap.style.visibility = "hidden";
-    progressWrap.style.pointerEvents = "none";
-    progressWrap.style.padding = "10px 12px";
-    progressWrap.style.touchAction = "none";
-    progressWrap.style.display = "flex";
-    progressWrap.style.alignItems = "center";
-    progressWrap.style.gap = "10px";
-    progressWrap.style.background = "var(--interactive-normal)";
-    progressWrap.style.border = "1px solid var(--background-modifier-border)";
-    progressWrap.style.borderRadius = "999px";
-    progressWrap.style.setProperty("backdrop-filter", "blur(10px)");
-    progressWrap.style.setProperty("-webkit-backdrop-filter", "blur(10px)");
-    const currentTimeEl = progressWrap.createSpan({ text: "0:00" });
-    currentTimeEl.style.minWidth = "40px";
-    currentTimeEl.style.fontSize = "12px";
-    currentTimeEl.style.fontVariantNumeric = "tabular-nums";
-    currentTimeEl.style.color = "var(--text-normal)";
-    currentTimeEl.style.textAlign = "right";
+    progressWrap.setCssProps({ bottom: this.getOverlayProgressBottomOffset() });
+    const currentTimeEl = progressWrap.createSpan({ text: "0:00", cls: "cross-player-overlay-time cross-player-overlay-time-current" });
     this.overlayCurrentTimeEl = currentTimeEl;
     const progressBarShell = progressWrap.createDiv({ cls: "cross-player-overlay-progress-shell" });
-    progressBarShell.style.flex = "1";
-    progressBarShell.style.display = "flex";
-    progressBarShell.style.alignItems = "center";
-    progressBarShell.style.minWidth = "0";
     const progressBar = progressBarShell.createEl("input", {
       type: "range",
       cls: "cross-player-overlay-progress"
@@ -4798,32 +4651,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     progressBar.max = "1000";
     progressBar.step = "1";
     progressBar.value = "0";
-    progressBar.style.width = "100%";
-    progressBar.style.margin = "0";
-    progressBar.style.accentColor = "var(--interactive-accent)";
-    progressBar.style.touchAction = "none";
-    progressBar.style.height = "6px";
-    progressBar.style.borderRadius = "999px";
-    progressBar.style.setProperty("-webkit-appearance", "none");
-    progressBar.style.appearance = "none";
-    progressBar.style.outline = "none";
-    progressBar.style.border = "none";
     this.overlayProgressEl = progressBar;
-    const durationEl = progressWrap.createSpan({ text: "0:00" });
-    durationEl.style.minWidth = "40px";
-    durationEl.style.fontSize = "12px";
-    durationEl.style.fontVariantNumeric = "tabular-nums";
-    durationEl.style.color = "var(--text-muted)";
-    durationEl.style.textAlign = "left";
+    const durationEl = progressWrap.createSpan({ text: "0:00", cls: "cross-player-overlay-time cross-player-overlay-time-duration" });
     this.overlayDurationEl = durationEl;
     const progressFullscreenBtn = progressWrap.createDiv({ cls: "cross-player-big-btn" });
-    progressFullscreenBtn.style.width = "34px";
-    progressFullscreenBtn.style.height = "34px";
-    progressFullscreenBtn.style.minWidth = "34px";
-    progressFullscreenBtn.style.background = "var(--interactive-normal)";
-    progressFullscreenBtn.style.border = "1px solid var(--background-modifier-border)";
-    progressFullscreenBtn.style.boxShadow = "none";
-    (0, import_obsidian.setIcon)(progressFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+    progressFullscreenBtn.addClass("cross-player-overlay-mini-btn");
+    (0, import_obsidian.setIcon)(progressFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
     this.styleBigButton(progressFullscreenBtn);
     this.overlayFullscreenBtn = progressFullscreenBtn;
     progressFullscreenBtn.onclick = (e) => {
@@ -4833,7 +4666,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.toggleFullscreen();
       window.setTimeout(() => {
         if (this.overlayFullscreenBtn) {
-          (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+          (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
         }
         showOverlay();
       }, 80);
@@ -4905,11 +4738,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       stopProgressGesture(e);
     }, { passive: false });
     const controlsRow = overlay.createDiv({ cls: "cross-player-controls-row" });
-    controlsRow.style.display = "flex";
-    controlsRow.style.gap = "15px";
-    controlsRow.style.alignItems = "center";
-    controlsRow.style.justifyContent = "center";
-    controlsRow.style.padding = "0 10px";
     const prevBtn = controlsRow.createDiv({ cls: "cross-player-big-btn" });
     (0, import_obsidian.setIcon)(prevBtn, "skip-back");
     this.styleBigButton(prevBtn);
@@ -4983,7 +4811,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         this.overlayDurationEl.setText("0:00");
       }
       if (this.overlayFullscreenBtn) {
-        (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+        (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
       }
       return;
     }
@@ -4997,7 +4825,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.overlayDurationEl.setText(this.formatPlaybackTime(this.videoEl.duration));
     }
     if (this.overlayFullscreenBtn) {
-      (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, document.fullscreenElement ? "minimize" : "maximize");
+      (0, import_obsidian.setIcon)(this.overlayFullscreenBtn, activeDocument.fullscreenElement ? "minimize" : "maximize");
     }
   }
   updateOverlayProgressTrack(progress) {
@@ -5005,11 +4833,13 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       return;
     const normalized = Math.min(1, Math.max(0, progress));
     const percent = (normalized * 100).toFixed(2);
-    const isDarkTheme = document.body.classList.contains("theme-dark");
+    const isDarkTheme = activeDocument.body.classList.contains("theme-dark");
     const fillColor = "var(--interactive-accent)";
     const trackColor = isDarkTheme ? "rgba(255, 255, 255, 0.22)" : "rgba(0, 0, 0, 0.10)";
-    this.overlayProgressEl.style.background = `linear-gradient(to right, ${fillColor} 0%, ${fillColor} ${percent}%, ${trackColor} ${percent}%, ${trackColor} 100%)`;
-    this.overlayProgressEl.style.boxShadow = isDarkTheme ? "0 0 0 1px rgba(255, 255, 255, 0.05) inset" : "none";
+    this.overlayProgressEl.setCssProps({
+      "--cross-player-progress-background": `linear-gradient(to right, ${fillColor} 0%, ${fillColor} ${percent}%, ${trackColor} ${percent}%, ${trackColor} 100%)`,
+      "--cross-player-progress-shadow": isDarkTheme ? "0 0 0 1px rgba(255, 255, 255, 0.05) inset" : "none"
+    });
   }
   formatPlaybackTime(seconds) {
     if (!isFinite(seconds) || seconds < 0)
@@ -5082,23 +4912,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         this.audioPlaceholderEl.remove();
       }
       this.audioPlaceholderEl = this.videoWrapperEl.createDiv({ cls: "cross-player-audio-placeholder" });
-      this.audioPlaceholderEl.style.position = "absolute";
-      this.audioPlaceholderEl.style.top = "0";
-      this.audioPlaceholderEl.style.left = "0";
-      this.audioPlaceholderEl.style.width = "100%";
-      this.audioPlaceholderEl.style.height = "100%";
-      this.audioPlaceholderEl.style.display = "flex";
-      this.audioPlaceholderEl.style.flexDirection = "column";
-      this.audioPlaceholderEl.style.justifyContent = "center";
-      this.audioPlaceholderEl.style.alignItems = "center";
-      this.audioPlaceholderEl.style.gap = "16px";
-      this.audioPlaceholderEl.style.padding = "32px";
-      this.audioPlaceholderEl.style.zIndex = "1";
-      this.audioPlaceholderEl.style.background = "radial-gradient(circle at top, var(--background-secondary), var(--background-primary))";
-      this.audioPlaceholderEl.style.textAlign = "center";
-      this.audioPlaceholderEl.style.pointerEvents = "none";
     } else {
-      this.audioPlaceholderEl.style.display = "flex";
+      this.audioPlaceholderEl.removeClass("is-hidden");
       this.audioPlaceholderEl.empty();
     }
   }
@@ -5109,42 +4924,14 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       return;
     this.contentEl.removeClass("is-media-active");
     (_a = this.videoWrapperEl) == null ? void 0 : _a.removeClass("is-video-active");
-    if (this.videoWrapperEl) {
-      this.videoWrapperEl.style.justifyContent = "center";
-    }
-    const badge = this.audioPlaceholderEl.createDiv();
-    badge.style.width = "96px";
-    badge.style.height = "96px";
-    badge.style.borderRadius = "28px";
-    badge.style.display = "flex";
-    badge.style.alignItems = "center";
-    badge.style.justifyContent = "center";
-    badge.style.background = "var(--interactive-normal)";
-    badge.style.border = "1px solid var(--background-modifier-border)";
-    badge.style.boxShadow = "0 18px 48px rgba(0, 0, 0, 0.16)";
-    const iconEl = badge.createDiv();
+    const badge = this.audioPlaceholderEl.createDiv({ cls: "cross-player-idle-badge" });
+    const iconEl = badge.createDiv({ cls: "cross-player-idle-badge-icon" });
     (0, import_obsidian.setIcon)(iconEl, "play-circle");
-    iconEl.style.width = "44px";
-    iconEl.style.height = "44px";
-    iconEl.style.color = "var(--text-muted)";
-    const svg = iconEl.querySelector("svg");
-    if (svg) {
-      svg.style.width = "100%";
-      svg.style.height = "100%";
-    }
-    const titleEl = this.audioPlaceholderEl.createDiv({ text: "Nothing is playing" });
-    titleEl.style.fontSize = "1.1rem";
-    titleEl.style.fontWeight = "600";
-    titleEl.style.color = "var(--text-normal)";
-    const descEl = this.audioPlaceholderEl.createDiv({ text: "Pick something from the queue to start playback." });
-    descEl.style.maxWidth = "280px";
-    descEl.style.fontSize = "0.95rem";
-    descEl.style.lineHeight = "1.5";
-    descEl.style.color = "var(--text-muted)";
+    this.audioPlaceholderEl.createDiv({ text: "Nothing is playing", cls: "cross-player-placeholder-title" });
+    this.audioPlaceholderEl.createDiv({ text: "Pick something from the queue to start playback.", cls: "cross-player-placeholder-description" });
     this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-    this.videoEl.style.opacity = "0";
-    this.videoEl.style.pointerEvents = "none";
-    this.videoEl.style.background = "transparent";
+    this.videoEl.addClass("is-hidden");
+    this.videoEl.removeClass("is-audio-controls");
   }
   showAudioPlaceholder() {
     var _a;
@@ -5153,32 +4940,19 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       return;
     this.contentEl.addClass("is-media-active");
     (_a = this.videoWrapperEl) == null ? void 0 : _a.removeClass("is-video-active");
-    if (this.videoWrapperEl) {
-      this.videoWrapperEl.style.justifyContent = "center";
-    }
     const musicIconEl = this.audioPlaceholderEl.createDiv({ cls: "cross-player-music-icon" });
     (0, import_obsidian.setIcon)(musicIconEl, "music");
-    musicIconEl.style.width = "120px";
-    musicIconEl.style.height = "120px";
-    musicIconEl.style.color = "var(--text-muted)";
-    musicIconEl.style.opacity = "0.2";
-    const svg = musicIconEl.querySelector("svg");
-    if (svg) {
-      svg.style.width = "100%";
-      svg.style.height = "100%";
-    }
     this.videoEl.poster = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-    this.videoEl.style.opacity = "1";
-    this.videoEl.style.pointerEvents = "auto";
-    this.videoEl.style.background = "transparent";
+    this.videoEl.removeClass("is-hidden");
+    this.videoEl.addClass("is-audio-controls");
   }
   hidePlaceholder() {
     if (this.audioPlaceholderEl) {
-      this.audioPlaceholderEl.style.display = "none";
+      this.audioPlaceholderEl.addClass("is-hidden");
     }
     if (this.videoEl) {
-      this.videoEl.style.opacity = "1";
-      this.videoEl.style.pointerEvents = "auto";
+      this.videoEl.removeClass("is-hidden");
+      this.videoEl.removeClass("is-audio-controls");
     }
     this.contentEl.addClass("is-media-active");
   }
@@ -5221,10 +4995,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       const container = this.contentEl;
       this.videoEl = container.createEl("video");
       this.videoEl.controls = !this.shouldUseTouchOverlay();
-      this.videoEl.style.maxWidth = "100%";
-      this.videoEl.style.maxHeight = "100%";
-      this.videoEl.style.width = "100%";
-      this.videoEl.style.height = "auto";
+      this.videoEl.addClass("cross-player-media-element");
     }
     while (this.videoEl.firstChild) {
       this.videoEl.removeChild(this.videoEl.firstChild);
@@ -5295,22 +5066,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (isAudio) {
       this.showAudioPlaceholder();
       this.videoWrapperEl.removeClass("is-video-active");
-      this.videoWrapperEl.style.justifyContent = "center";
-      this.videoEl.style.height = "50px";
-      this.videoEl.style.position = "absolute";
-      this.videoEl.style.bottom = "0";
-      this.videoEl.style.zIndex = "5";
-      this.videoEl.style.background = "transparent";
+      this.videoEl.addClass("is-audio-controls");
     } else {
       this.hidePlaceholder();
       this.videoWrapperEl.addClass("is-video-active");
-      this.videoWrapperEl.style.justifyContent = "flex-end";
       this.videoEl.poster = "";
-      this.videoEl.style.background = "";
-      this.videoEl.style.width = "100%";
-      this.videoEl.style.height = "auto";
-      this.videoEl.style.position = "static";
-      this.videoEl.style.zIndex = "auto";
+      this.videoEl.removeClass("is-audio-controls");
     }
     if (autoPlay) {
       try {
@@ -5343,12 +5104,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   toggleFullscreen() {
     if (!this.videoEl)
       return;
-    if (!document.fullscreenElement) {
+    if (!activeDocument.fullscreenElement) {
       this.contentEl.requestFullscreen().catch((err) => {
         new import_obsidian.Notice(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
       });
     } else {
-      document.exitFullscreen();
+      void activeDocument.exitFullscreen();
     }
     window.setTimeout(() => this.refreshMobileOverlay(), 50);
   }
