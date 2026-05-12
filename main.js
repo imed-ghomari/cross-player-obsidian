@@ -2391,6 +2391,33 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return true;
     return path === watchedFolder || path.startsWith(watchedFolder + "/");
   }
+  collectMediaFiles(folder) {
+    const files = [];
+    const visitFolder = (currentFolder) => {
+      for (const child of currentFolder.children) {
+        if (child instanceof import_obsidian.TFile) {
+          files.push(child);
+        } else if (child instanceof import_obsidian.TFolder) {
+          visitFolder(child);
+        }
+      }
+    };
+    visitFolder(folder);
+    return files;
+  }
+  getVaultFolders() {
+    const folders = [];
+    const visitFolder = (currentFolder) => {
+      folders.push(currentFolder);
+      for (const child of currentFolder.children) {
+        if (child instanceof import_obsidian.TFolder) {
+          visitFolder(child);
+        }
+      }
+    };
+    visitFolder(this.app.vault.getRoot());
+    return folders;
+  }
   rememberQueueScrollPosition() {
     var _a;
     (_a = this.listView) == null ? void 0 : _a.captureScrollPosition();
@@ -2953,12 +2980,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async scanFolder(folderPath) {
     const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
     if (folder instanceof import_obsidian.TFolder) {
-      const files = this.app.vault.getFiles();
-      const filesInFolder = files.filter((file) => {
-        if (folderPath === "")
-          return true;
-        return file.path.startsWith(folderPath + "/");
-      });
+      const filesInFolder = this.collectMediaFiles(folder);
       const promises = filesInFolder.map((file) => this.handleFileChange(file, false));
       await Promise.all(promises);
       await this.saveData();
@@ -3705,7 +3727,7 @@ var FolderSuggestModal = class extends import_obsidian.FuzzySuggestModal {
     this.plugin = plugin;
   }
   getItems() {
-    return this.app.vault.getAllLoadedFiles().filter((f) => f instanceof import_obsidian.TFolder);
+    return this.plugin.getVaultFolders();
   }
   getItemText(item) {
     return item.path;

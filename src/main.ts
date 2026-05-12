@@ -174,6 +174,39 @@ export default class CrossPlayerPlugin extends Plugin {
         return path === watchedFolder || path.startsWith(watchedFolder + '/');
     }
 
+    private collectMediaFiles(folder: TFolder): TFile[] {
+        const files: TFile[] = [];
+
+        const visitFolder = (currentFolder: TFolder) => {
+            for (const child of currentFolder.children) {
+                if (child instanceof TFile) {
+                    files.push(child);
+                } else if (child instanceof TFolder) {
+                    visitFolder(child);
+                }
+            }
+        };
+
+        visitFolder(folder);
+        return files;
+    }
+
+    getVaultFolders(): TFolder[] {
+        const folders: TFolder[] = [];
+
+        const visitFolder = (currentFolder: TFolder) => {
+            folders.push(currentFolder);
+            for (const child of currentFolder.children) {
+                if (child instanceof TFolder) {
+                    visitFolder(child);
+                }
+            }
+        };
+
+        visitFolder(this.app.vault.getRoot());
+        return folders;
+    }
+
     rememberQueueScrollPosition() {
         this.listView?.captureScrollPosition();
     }
@@ -856,11 +889,7 @@ export default class CrossPlayerPlugin extends Plugin {
     async scanFolder(folderPath: string) {
         const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
         if (folder instanceof TFolder) {
-            const files = this.app.vault.getFiles();
-            const filesInFolder = files.filter(file => {
-                if (folderPath === "") return true; // Watch entire vault if empty
-                return file.path.startsWith(folderPath + "/");
-            });
+            const filesInFolder = this.collectMediaFiles(folder);
 
             // Process all files without saving individually
             const promises = filesInFolder.map(file => this.handleFileChange(file, false));
@@ -1832,8 +1861,7 @@ class FolderSuggestModal extends FuzzySuggestModal<TFolder> {
     }
 
     getItems(): TFolder[] {
-        return this.app.vault.getAllLoadedFiles()
-            .filter(f => f instanceof TFolder) as TFolder[];
+        return this.plugin.getVaultFolders();
     }
 
     getItemText(item: TFolder): string {
