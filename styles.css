@@ -54,6 +54,14 @@
     font-size: 0.9em;
 }
 
+.cross-player-name-title {
+    color: var(--text-normal);
+}
+
+.cross-player-name-extension {
+    color: var(--text-muted);
+}
+
 .cross-player-name.is-wrapped {
     overflow: visible;
     text-overflow: initial;

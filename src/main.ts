@@ -789,11 +789,7 @@ export default class CrossPlayerPlugin extends Plugin {
         this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, normalizedPath));
 
         if (this.mainView?.currentItem && !this.isPathInsideWatchedFolder(this.mainView.currentItem.path, normalizedPath)) {
-            this.mainView.videoEl.pause();
-            this.mainView.videoEl.src = "";
-            this.mainView.currentItem = null;
-            // @ts-ignore
-            if (this.mainView.leaf.view.headerTitleEl) this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+            this.mainView.clearCurrentMedia();
         }
 
         try {
@@ -948,12 +944,7 @@ export default class CrossPlayerPlugin extends Plugin {
             // Check if deleted file is the current item
             // OR if deleted file is a folder containing the current item
             if (this.mainView.currentItem.path === path || this.mainView.currentItem.path.startsWith(path + "/")) {
-                this.mainView.videoEl.pause();
-                this.mainView.videoEl.src = "";
-                this.mainView.currentItem = null;
-                // Update title to show it's gone
-                // @ts-ignore
-                if (this.mainView.leaf.view.headerTitleEl) this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+                this.mainView.clearCurrentMedia();
                 new Notice("Playing media was deleted.");
             }
         }
@@ -1239,6 +1230,8 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async cleanConsumedMedia() {
+        this.rememberQueueScrollPosition();
+
         const toRemove = this.data.queue.filter(item => item.status === 'completed');
         if (toRemove.length === 0) {
             new Notice("No completed media to clean.");
@@ -1250,6 +1243,10 @@ export default class CrossPlayerPlugin extends Plugin {
         let failedCount = 0;
         for (const item of toRemove) {
             try {
+                if (this.mainView?.currentItem?.id === item.id) {
+                    this.mainView.clearCurrentMedia();
+                }
+
                 const file = this.app.vault.getAbstractFileByPath(item.path);
                 if (file instanceof TFile) {
                     await this.app.vault.delete(file);
@@ -1274,8 +1271,18 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async deleteMediaItem(item: MediaItem) {
+        this.rememberQueueScrollPosition();
+
         // If it's the current playing item, stop playback
         const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
+
+        // Find next item before mutating queue or clearing current playback.
+        let nextItem: MediaItem | undefined;
+        if (isCurrent) {
+            const currentIndex = this.data.queue.findIndex(i => i.id === item.id);
+            nextItem = this.data.queue.find((i, index) => index > currentIndex && i.status === 'pending');
+            this.mainView?.clearCurrentMedia();
+        }
 
         // Delete from vault
         let deletedFromDisk = false;
@@ -1296,18 +1303,7 @@ export default class CrossPlayerPlugin extends Plugin {
             return;
         }
 
-        if (isCurrent && this.mainView) {
-            this.mainView.videoEl.pause();
-        }
-
         // Remove from queue
-        // Find next item if we are deleting the current one
-        let nextItem: MediaItem | undefined;
-        if (isCurrent) {
-            const currentIndex = this.data.queue.findIndex(i => i.id === item.id);
-            nextItem = this.data.queue.find((i, index) => index > currentIndex && i.status === 'pending');
-        }
-
         this.data.queue = this.data.queue.filter(i => i.id !== item.id);
         await this.saveData();
         new Notice(`Permanently deleted: ${item.name}`);
@@ -1316,10 +1312,6 @@ export default class CrossPlayerPlugin extends Plugin {
             if (nextItem) {
                 await this.playMedia(nextItem, true);
             } else {
-                if (this.mainView) {
-                    this.mainView.currentItem = null;
-                    this.mainView.videoEl.src = "";
-                }
                 this.activateListView();
             }
         }
@@ -1334,6 +1326,8 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async setMediaItemAsUnread(item: MediaItem) {
+        this.rememberQueueScrollPosition();
+
         // Find the actual item in the queue to ensure we are modifying the source of truth
         // This prevents issues where 'item' might be a stale reference (e.g. from mainView.currentItem)
         const queueItem = this.data.queue.find(i => i.id === item.id);
@@ -1346,10 +1340,8 @@ export default class CrossPlayerPlugin extends Plugin {
         const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
 
         if (isCurrent && this.mainView) {
-            // Stop playback
-            this.mainView.currentItem = null; // Set null first to prevent onpause from overwriting position
-            this.mainView.videoEl.pause();
-            this.mainView.videoEl.src = "";
+            // Stop playback without re-persisting the item we're resetting.
+            this.mainView.clearCurrentMedia();
             this.activateListView();
         }
 
@@ -2190,6 +2182,18 @@ class CrossPlayerListView extends ItemView {
         }
     }
 
+    getDisplayNameParts(name: string): { title: string; extension: string } {
+        const lastDotIndex = name.lastIndexOf(".");
+        if (lastDotIndex <= 0 || lastDotIndex === name.length - 1) {
+            return { title: name, extension: "" };
+        }
+
+        return {
+            title: name.slice(0, lastDotIndex),
+            extension: name.slice(lastDotIndex)
+        };
+    }
+
     refresh() {
         const container = this.contentEl;
 
@@ -2355,15 +2359,6 @@ class CrossPlayerListView extends ItemView {
         list.style.overflowY = "auto";
         list.style.overflowX = "hidden";
 
-        // Restore scroll position
-        const scrollTopToRestore = this.plugin.data.queueScrollTop ?? this.savedScrollTop;
-        if (scrollTopToRestore > 0) {
-            // Use requestAnimationFrame to ensure the list is rendered before scrolling
-            requestAnimationFrame(() => {
-                list.scrollTop = scrollTopToRestore;
-            });
-        }
-
         // Save scroll position on scroll
         list.addEventListener('scroll', () => {
             this.savedScrollTop = list.scrollTop;
@@ -2419,7 +2414,7 @@ class CrossPlayerListView extends ItemView {
             // I'll just add the element.
 
             // Name
-            const nameEl = itemEl.createDiv({ text: item.name, cls: "cross-player-name" });
+            const nameEl = itemEl.createDiv({ cls: "cross-player-name" });
             nameEl.style.flexGrow = "1";
             nameEl.style.cursor = "pointer";
             nameEl.title = item.path;
@@ -2429,6 +2424,12 @@ class CrossPlayerListView extends ItemView {
                 nameEl.style.overflow = "hidden";
                 nameEl.style.textOverflow = "ellipsis";
                 nameEl.style.whiteSpace = "nowrap";
+            }
+
+            const { title, extension } = this.getDisplayNameParts(item.name);
+            nameEl.createSpan({ text: title, cls: "cross-player-name-title" });
+            if (extension) {
+                nameEl.createSpan({ text: extension, cls: "cross-player-name-extension" });
             }
 
             nameEl.addEventListener("click", (e) => {
@@ -2451,6 +2452,7 @@ class CrossPlayerListView extends ItemView {
                         .setTitle("Delete Media")
                         .setIcon("trash")
                         .onClick(() => {
+                            this.captureScrollPosition();
                             this.plugin.deleteMediaItem(item);
                         })
                 );
@@ -2460,6 +2462,7 @@ class CrossPlayerListView extends ItemView {
                         .setTitle("Set as Unread")
                         .setIcon("undo")
                         .onClick(() => {
+                            this.captureScrollPosition();
                             this.plugin.setMediaItemAsUnread(item);
                         })
                 );
@@ -2507,6 +2510,14 @@ class CrossPlayerListView extends ItemView {
         downloadContainer.style.backgroundColor = "var(--background-secondary)";
 
         this.updateDownloadProgress(downloadContainer);
+
+        const scrollTopToRestore = this.plugin.data.queueScrollTop ?? this.savedScrollTop;
+        if (scrollTopToRestore > 0) {
+            list.scrollTop = scrollTopToRestore;
+            requestAnimationFrame(() => {
+                list.scrollTop = scrollTopToRestore;
+            });
+        }
     }
 
     updateStats() {
@@ -2774,6 +2785,17 @@ class CrossPlayerMainView extends ItemView {
 
     getIcon() {
         return "play";
+    }
+
+    setViewTitle(title: string) {
+        // @ts-ignore
+        if (this.leaf.view.headerTitleEl) {
+            // @ts-ignore
+            this.leaf.view.headerTitleEl.setText(title);
+        } else {
+            // @ts-ignore
+            if (this.leaf.view.titleEl) this.leaf.view.titleEl.setText(title);
+        }
     }
 
     isCurrentPlaybackSource() {
@@ -3707,6 +3729,28 @@ class CrossPlayerMainView extends ItemView {
         this.contentEl.addClass('is-media-active');
     }
 
+    clearCurrentMedia() {
+        if (this.mobileOverlayHideTimeout !== null) {
+            window.clearTimeout(this.mobileOverlayHideTimeout);
+            this.mobileOverlayHideTimeout = null;
+        }
+
+        this.currentItem = null;
+        this.activeMediaSrc = null;
+        this.lastPositionPersist = 0;
+
+        if (this.videoEl) {
+            this.videoEl.pause();
+            this.videoEl.removeAttribute('src');
+            this.videoEl.load();
+        }
+
+        this.setViewTitle("Cross Player");
+        this.showIdlePlaceholder();
+        this.refreshMobileOverlay();
+        this.updateOverlayProgress();
+    }
+
     async stop() {
         if (this.videoEl) {
             // 1. Pause immediately to freeze currentTime
@@ -3723,25 +3767,14 @@ class CrossPlayerMainView extends ItemView {
             this.videoEl.removeAttribute('src');
             this.videoEl.load();
         }
-        this.activeMediaSrc = null;
-        this.currentItem = null;
-        this.lastPositionPersist = 0;
-        this.showIdlePlaceholder();
+        this.clearCurrentMedia();
     }
 
     async play(item: MediaItem, autoPlay: boolean = false): Promise<boolean> {
         this.currentItem = item;
 
         // Update view title
-        // @ts-ignore
-        if (this.leaf.view.headerTitleEl) {
-            // @ts-ignore
-            this.leaf.view.headerTitleEl.setText(item.name);
-        } else {
-            // Fallback or if titleEl is the one used in older/newer API
-            // @ts-ignore
-            if (this.leaf.view.titleEl) this.leaf.view.titleEl.setText(item.name);
-        }
+        this.setViewTitle(item.name);
 
         if (!this.videoEl) {
             // Re-create if missing (unlikely if view is open)
@@ -3804,6 +3837,9 @@ class CrossPlayerMainView extends ItemView {
         };
 
         this.videoEl.onerror = () => {
+            if (!this.currentItem || !this.activeMediaSrc) {
+                return;
+            }
             console.error("Video playback error", this.videoEl?.error);
             new Notice("Error playing video file.");
         };
@@ -3815,7 +3851,7 @@ class CrossPlayerMainView extends ItemView {
             this.videoEl.src = resourcePath;
         } else {
             console.error("File not found for playback:", item.path);
-            this.showIdlePlaceholder();
+            this.clearCurrentMedia();
             return false;
         }
 

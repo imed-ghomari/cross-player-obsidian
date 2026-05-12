@@ -2914,11 +2914,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.setLastGoodWatchedFolder(normalizedPath);
     this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, normalizedPath));
     if (((_a = this.mainView) == null ? void 0 : _a.currentItem) && !this.isPathInsideWatchedFolder(this.mainView.currentItem.path, normalizedPath)) {
-      this.mainView.videoEl.pause();
-      this.mainView.videoEl.src = "";
-      this.mainView.currentItem = null;
-      if (this.mainView.leaf.view.headerTitleEl)
-        this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+      this.mainView.clearCurrentMedia();
     }
     try {
       await this.saveData();
@@ -3011,11 +3007,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const path = file.path;
     if (this.mainView && this.mainView.currentItem) {
       if (this.mainView.currentItem.path === path || this.mainView.currentItem.path.startsWith(path + "/")) {
-        this.mainView.videoEl.pause();
-        this.mainView.videoEl.src = "";
-        this.mainView.currentItem = null;
-        if (this.mainView.leaf.view.headerTitleEl)
-          this.mainView.leaf.view.headerTitleEl.setText("Cross Player");
+        this.mainView.clearCurrentMedia();
         new import_obsidian.Notice("Playing media was deleted.");
       }
     }
@@ -3250,6 +3242,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.saveData();
   }
   async cleanConsumedMedia() {
+    var _a, _b;
+    this.rememberQueueScrollPosition();
     const toRemove = this.data.queue.filter((item) => item.status === "completed");
     if (toRemove.length === 0) {
       new import_obsidian.Notice("No completed media to clean.");
@@ -3260,6 +3254,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     let failedCount = 0;
     for (const item of toRemove) {
       try {
+        if (((_b = (_a = this.mainView) == null ? void 0 : _a.currentItem) == null ? void 0 : _b.id) === item.id) {
+          this.mainView.clearCurrentMedia();
+        }
         const file = this.app.vault.getAbstractFileByPath(item.path);
         if (file instanceof import_obsidian.TFile) {
           await this.app.vault.delete(file);
@@ -3282,7 +3279,15 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     new import_obsidian.Notice(`Permanently deleted ${count} media file(s).`);
   }
   async deleteMediaItem(item) {
+    var _a;
+    this.rememberQueueScrollPosition();
     const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
+    let nextItem;
+    if (isCurrent) {
+      const currentIndex = this.data.queue.findIndex((i) => i.id === item.id);
+      nextItem = this.data.queue.find((i, index2) => index2 > currentIndex && i.status === "pending");
+      (_a = this.mainView) == null ? void 0 : _a.clearCurrentMedia();
+    }
     let deletedFromDisk = false;
     try {
       const file = this.app.vault.getAbstractFileByPath(item.path);
@@ -3299,14 +3304,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("Could not permanently delete the file. It was left in the queue.");
       return;
     }
-    if (isCurrent && this.mainView) {
-      this.mainView.videoEl.pause();
-    }
-    let nextItem;
-    if (isCurrent) {
-      const currentIndex = this.data.queue.findIndex((i) => i.id === item.id);
-      nextItem = this.data.queue.find((i, index2) => index2 > currentIndex && i.status === "pending");
-    }
     this.data.queue = this.data.queue.filter((i) => i.id !== item.id);
     await this.saveData();
     new import_obsidian.Notice(`Permanently deleted: ${item.name}`);
@@ -3314,10 +3311,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       if (nextItem) {
         await this.playMedia(nextItem, true);
       } else {
-        if (this.mainView) {
-          this.mainView.currentItem = null;
-          this.mainView.videoEl.src = "";
-        }
         this.activateListView();
       }
     }
@@ -3330,6 +3323,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.deleteMediaItem(this.mainView.currentItem);
   }
   async setMediaItemAsUnread(item) {
+    this.rememberQueueScrollPosition();
     const queueItem = this.data.queue.find((i) => i.id === item.id);
     if (!queueItem) {
       new import_obsidian.Notice("Item not found in queue.");
@@ -3337,9 +3331,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
     if (isCurrent && this.mainView) {
-      this.mainView.currentItem = null;
-      this.mainView.videoEl.pause();
-      this.mainView.videoEl.src = "";
+      this.mainView.clearCurrentMedia();
       this.activateListView();
     }
     this.revertConsumption(queueItem);
@@ -3916,6 +3908,16 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       sizeEl.style.fontWeight = sizeInGB > limitGB ? "bold" : "";
     }
   }
+  getDisplayNameParts(name) {
+    const lastDotIndex = name.lastIndexOf(".");
+    if (lastDotIndex <= 0 || lastDotIndex === name.length - 1) {
+      return { title: name, extension: "" };
+    }
+    return {
+      title: name.slice(0, lastDotIndex),
+      extension: name.slice(lastDotIndex)
+    };
+  }
   refresh() {
     var _a;
     const container = this.contentEl;
@@ -4028,12 +4030,6 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     list.style.flexGrow = "1";
     list.style.overflowY = "auto";
     list.style.overflowX = "hidden";
-    const scrollTopToRestore = (_a = this.plugin.data.queueScrollTop) != null ? _a : this.savedScrollTop;
-    if (scrollTopToRestore > 0) {
-      requestAnimationFrame(() => {
-        list.scrollTop = scrollTopToRestore;
-      });
-    }
     list.addEventListener("scroll", () => {
       this.savedScrollTop = list.scrollTop;
       this.plugin.data.queueScrollTop = this.savedScrollTop;
@@ -4069,7 +4065,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         typeIcon.style.marginRight = "10px";
         typeIcon.style.color = "var(--text-muted)";
       }
-      const nameEl = itemEl.createDiv({ text: item.name, cls: "cross-player-name" });
+      const nameEl = itemEl.createDiv({ cls: "cross-player-name" });
       nameEl.style.flexGrow = "1";
       nameEl.style.cursor = "pointer";
       nameEl.title = item.path;
@@ -4079,6 +4075,11 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         nameEl.style.overflow = "hidden";
         nameEl.style.textOverflow = "ellipsis";
         nameEl.style.whiteSpace = "nowrap";
+      }
+      const { title, extension } = this.getDisplayNameParts(item.name);
+      nameEl.createSpan({ text: title, cls: "cross-player-name-title" });
+      if (extension) {
+        nameEl.createSpan({ text: extension, cls: "cross-player-name-extension" });
       }
       nameEl.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -4090,11 +4091,13 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         const menu = new import_obsidian.Menu();
         menu.addItem(
           (menuItem) => menuItem.setTitle("Delete Media").setIcon("trash").onClick(() => {
+            this.captureScrollPosition();
             this.plugin.deleteMediaItem(item);
           })
         );
         menu.addItem(
           (menuItem) => menuItem.setTitle("Set as Unread").setIcon("undo").onClick(() => {
+            this.captureScrollPosition();
             this.plugin.setMediaItemAsUnread(item);
           })
         );
@@ -4128,6 +4131,13 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     downloadContainer.style.borderTop = "1px solid var(--background-modifier-border)";
     downloadContainer.style.backgroundColor = "var(--background-secondary)";
     this.updateDownloadProgress(downloadContainer);
+    const scrollTopToRestore = (_a = this.plugin.data.queueScrollTop) != null ? _a : this.savedScrollTop;
+    if (scrollTopToRestore > 0) {
+      list.scrollTop = scrollTopToRestore;
+      requestAnimationFrame(() => {
+        list.scrollTop = scrollTopToRestore;
+      });
+    }
   }
   updateStats() {
     const statsContainer = this.contentEl.querySelector(".cross-player-stats");
@@ -4339,6 +4349,14 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   }
   getIcon() {
     return "play";
+  }
+  setViewTitle(title) {
+    if (this.leaf.view.headerTitleEl) {
+      this.leaf.view.headerTitleEl.setText(title);
+    } else {
+      if (this.leaf.view.titleEl)
+        this.leaf.view.titleEl.setText(title);
+    }
   }
   isCurrentPlaybackSource() {
     if (!this.videoEl || !this.currentItem || !this.activeMediaSrc)
@@ -5164,6 +5182,24 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
     this.contentEl.addClass("is-media-active");
   }
+  clearCurrentMedia() {
+    if (this.mobileOverlayHideTimeout !== null) {
+      window.clearTimeout(this.mobileOverlayHideTimeout);
+      this.mobileOverlayHideTimeout = null;
+    }
+    this.currentItem = null;
+    this.activeMediaSrc = null;
+    this.lastPositionPersist = 0;
+    if (this.videoEl) {
+      this.videoEl.pause();
+      this.videoEl.removeAttribute("src");
+      this.videoEl.load();
+    }
+    this.setViewTitle("Cross Player");
+    this.showIdlePlaceholder();
+    this.refreshMobileOverlay();
+    this.updateOverlayProgress();
+  }
   async stop() {
     if (this.videoEl) {
       this.videoEl.pause();
@@ -5175,20 +5211,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.videoEl.removeAttribute("src");
       this.videoEl.load();
     }
-    this.activeMediaSrc = null;
-    this.currentItem = null;
-    this.lastPositionPersist = 0;
-    this.showIdlePlaceholder();
+    this.clearCurrentMedia();
   }
   async play(item, autoPlay = false) {
     var _a;
     this.currentItem = item;
-    if (this.leaf.view.headerTitleEl) {
-      this.leaf.view.headerTitleEl.setText(item.name);
-    } else {
-      if (this.leaf.view.titleEl)
-        this.leaf.view.titleEl.setText(item.name);
-    }
+    this.setViewTitle(item.name);
     if (!this.videoEl) {
       const container = this.contentEl;
       this.videoEl = container.createEl("video");
@@ -5240,6 +5268,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
     this.videoEl.onerror = () => {
       var _a2;
+      if (!this.currentItem || !this.activeMediaSrc) {
+        return;
+      }
       console.error("Video playback error", (_a2 = this.videoEl) == null ? void 0 : _a2.error);
       new import_obsidian.Notice("Error playing video file.");
     };
@@ -5250,7 +5281,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.videoEl.src = resourcePath;
     } else {
       console.error("File not found for playback:", item.path);
-      this.showIdlePlaceholder();
+      this.clearCurrentMedia();
       return false;
     }
     const resumePosition = item.position > 2 ? item.position - 2 : item.position;
