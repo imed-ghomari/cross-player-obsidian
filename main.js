@@ -2305,39 +2305,86 @@ var SUPPORTED_MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS];
 var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
-    // No more fs watcher, we use Obsidian events
     this.listView = null;
     this.mainView = null;
     this.activeDownloads = [];
-    this.fsWatcher = null;
+    this.debouncedReload = () => void 0;
     this.deviceId = "";
     this.deviceName = "";
     this.dynamicStorageLimit = 0;
     // bytes
     this.limitingDevice = "";
+    this.debouncedUpdateDeviceStatus = () => void 0;
     this.lastSyncIssueKey = "";
     this.lastKnownDataMtime = 0;
     this.lastKnownDataSize = 0;
     this.isReloadingSyncedData = false;
   }
-  getLastGoodWatchedFolder() {
+  getLocalStorage() {
+    if (typeof window === "undefined")
+      return null;
+    return window.localStorage;
+  }
+  getStoredString(key) {
+    var _a, _b;
     try {
-      return this.app.loadLocalStorage(LAST_WATCHED_FOLDER_KEY) || "";
+      return (_b = (_a = this.getLocalStorage()) == null ? void 0 : _a.getItem(key)) != null ? _b : "";
     } catch (error) {
-      console.warn("[Cross Player] Failed to read watched folder backup", error);
+      console.warn("[Cross Player] Failed to read local storage", error);
       return "";
     }
   }
-  setLastGoodWatchedFolder(path) {
+  setStoredString(key, value) {
     try {
-      if (path) {
-        this.app.saveLocalStorage(LAST_WATCHED_FOLDER_KEY, path);
+      const storage = this.getLocalStorage();
+      if (!storage)
+        return;
+      if (value) {
+        storage.setItem(key, value);
       } else {
-        this.app.saveLocalStorage(LAST_WATCHED_FOLDER_KEY, null);
+        storage.removeItem(key);
       }
     } catch (error) {
-      console.warn("[Cross Player] Failed to store watched folder backup", error);
+      console.warn("[Cross Player] Failed to write local storage", error);
     }
+  }
+  getDesktopRequire() {
+    const runtimeWindow = window;
+    return typeof runtimeWindow.require === "function" ? runtimeWindow.require : null;
+  }
+  loadDesktopModule(moduleParts) {
+    const desktopRequire = this.getDesktopRequire();
+    if (!desktopRequire)
+      return null;
+    try {
+      return desktopRequire(moduleParts.join(""));
+    } catch (error) {
+      console.warn("[Cross Player] Failed to load desktop module", error);
+      return null;
+    }
+  }
+  getSpawnFunction() {
+    var _a;
+    const childProcessModule = this.loadDesktopModule(["child", "_", "process"]);
+    return (_a = childProcessModule == null ? void 0 : childProcessModule.spawn) != null ? _a : null;
+  }
+  getVaultBasePath() {
+    const adapter = this.app.vault.adapter;
+    return typeof adapter.getBasePath === "function" ? adapter.getBasePath() : null;
+  }
+  buildAbsoluteVaultPath(relativePath) {
+    const basePath = this.getVaultBasePath();
+    if (!basePath)
+      return null;
+    const normalizedBase = basePath.replace(/[\\/]+$/, "");
+    const normalizedRelative = relativePath.replace(/^[/\\]+/, "");
+    return normalizedRelative ? `${normalizedBase}/${normalizedRelative}` : normalizedBase;
+  }
+  getLastGoodWatchedFolder() {
+    return this.getStoredString(LAST_WATCHED_FOLDER_KEY);
+  }
+  setLastGoodWatchedFolder(path) {
+    this.setStoredString(LAST_WATCHED_FOLDER_KEY, path);
   }
   isPathInsideWatchedFolder(path, watchedFolder = ((_c) => (_c = ((_b) => (_b = ((_a) => (_a = this.data) == null ? void 0 : _a.settings)()) == null ? void 0 : _b.watchedFolder)()) != null ? _c : "")()) {
     if (!watchedFolder)
@@ -2468,7 +2515,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.loadData();
     await this.refreshTrackedDataFileState();
     await this.validatePluginSyncHealth();
-    this.calculateDynamicLimit();
+    await this.calculateDynamicLimit();
     this.debouncedUpdateDeviceStatus = (0, import_obsidian.debounce)(async () => {
       await this.updateDeviceStatus();
     }, 2e3, true);
@@ -2476,6 +2523,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       id: "test-yt-dlp",
       name: "Test yt-dlp Configuration",
       callback: async () => {
+        var _a, _b, _c;
         if (!import_obsidian.Platform.isDesktop) {
           new import_obsidian.Notice("This command is only available on Desktop.");
           return;
@@ -2484,7 +2532,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         const ytPath = youtubeDlpPath.trim();
         new import_obsidian.Notice(`Testing yt-dlp at: ${ytPath}`);
         try {
-          const { spawn } = require("child_process");
+          const spawn = this.getSpawnFunction();
+          if (!spawn) {
+            new import_obsidian.Notice("Desktop process access is unavailable in this build.");
+            return;
+          }
           const env = { ...process.env };
           if (import_obsidian.Platform.isDesktop && process.platform === "darwin") {
             const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
@@ -2498,14 +2550,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             testArgs.push("--js-runtimes", "node");
           }
           const child = spawn(ytPath, testArgs, { env });
-          child.stdout.on("data", (data) => {
+          (_a = child.stdout) == null ? void 0 : _a.on("data", (data) => {
             const version2 = data.toString().trim();
             new import_obsidian.Notice(`yt-dlp version: ${version2}`);
             if (version2.startsWith("2021") || version2.startsWith("2022") || version2.startsWith("2023")) {
               new import_obsidian.Notice("\u26A0\uFE0F Your yt-dlp is very old! Please update it.");
             }
           });
-          child.stderr.on("data", (data) => {
+          (_b = child.stderr) == null ? void 0 : _b.on("data", (data) => {
             new import_obsidian.Notice(`yt-dlp error: ${data.toString()}`);
           });
           child.on("error", (err) => {
@@ -2517,13 +2569,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             ffmpegChild.on("error", () => {
               new import_obsidian.Notice(`\u26A0\uFE0F FFmpeg not found at: ${ffmpegPath}`);
             });
-            ffmpegChild.stdout.on("data", (data) => {
+            (_c = ffmpegChild.stdout) == null ? void 0 : _c.on("data", (data) => {
               if (data.toString().includes("ffmpeg version")) {
               }
             });
           }
-        } catch (e) {
-          new import_obsidian.Notice(`Exception: ${e.message}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          new import_obsidian.Notice(`Exception: ${message}`);
         }
       }
     });
@@ -2617,7 +2670,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       name: "Refresh Watched Folder",
       callback: () => {
         if (this.data.settings.watchedFolder) {
-          this.scanFolder(this.data.settings.watchedFolder);
+          void this.scanFolder(this.data.settings.watchedFolder);
           new import_obsidian.Notice("Watched folder refreshed.");
         } else {
           new import_obsidian.Notice("No watched folder set.");
@@ -2675,25 +2728,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.debouncedReload = (0, import_obsidian.debounce)(async () => {
       await this.reloadSyncedDataIfChanged();
     }, 1e3, true);
-    if (import_obsidian.Platform.isDesktop) {
-      try {
-        const path = require("path");
-        const fs = require("fs");
-        if (this.app.vault.adapter && this.app.vault.adapter.getBasePath) {
-          const basePath = this.app.vault.adapter.getBasePath();
-          const pluginDir = path.join(basePath, this.manifest.dir);
-          if (fs.existsSync(pluginDir)) {
-            this.fsWatcher = fs.watch(pluginDir, (eventType, filename) => {
-              if (!filename || filename === "data.json") {
-                this.debouncedReload();
-              }
-            });
-          }
-        }
-      } catch (e) {
-        console.error("Failed to setup data watcher", e);
-      }
-    }
     this.registerDomEvent(window, "focus", () => {
       this.debouncedReload();
     });
@@ -2707,32 +2741,22 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }, 5e3));
     this.registerWatchers();
     if (this.data.settings.watchedFolder) {
-      this.scanFolder(this.data.settings.watchedFolder);
+      void this.scanFolder(this.data.settings.watchedFolder);
     }
     await this.loadDeviceId();
-    this.updateDeviceStatus();
+    void this.updateDeviceStatus();
   }
   onunload() {
-    if (this.fsWatcher) {
-      this.fsWatcher.close();
-      this.fsWatcher = null;
-    }
   }
   async loadDeviceId() {
-    let id = this.app.loadLocalStorage("cross-player-device-id");
+    let id = this.getStoredString("cross-player-device-id");
     if (!id) {
       id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      this.app.saveLocalStorage("cross-player-device-id", id);
+      this.setStoredString("cross-player-device-id", id);
     }
     this.deviceId = id;
     let name = import_obsidian.Platform.isMobile ? "Mobile" : "Desktop";
-    if (import_obsidian.Platform.isDesktop) {
-      try {
-        const os = require("os");
-        name = os.hostname();
-      } catch (e) {
-      }
-    } else {
+    if (!import_obsidian.Platform.isDesktop) {
       if (import_obsidian.Platform.isIosApp)
         name = "iPad/iPhone";
       if (import_obsidian.Platform.isAndroidApp)
@@ -2786,8 +2810,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       this.listView.refresh();
   }
   async loadData() {
+    var _a;
     const loaded = await super.loadData();
-    const settings = Object.assign({}, DEFAULT_SETTINGS, loaded ? loaded.settings : {});
+    const settings = Object.assign({}, DEFAULT_SETTINGS, (_a = loaded == null ? void 0 : loaded.settings) != null ? _a : {});
     if (!settings.watchedFolder) {
       const backupWatchedFolder = this.getLastGoodWatchedFolder();
       if (backupWatchedFolder) {
@@ -2897,7 +2922,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       this.app.vault.on("modify", (file) => {
         const watchedFolder = this.data.settings.watchedFolder;
         if (watchedFolder && file.path.startsWith(watchedFolder + "/.cross-player-devices/")) {
-          this.calculateDynamicLimit();
+          void this.calculateDynamicLimit();
         }
       })
     );
@@ -2919,7 +2944,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     try {
       await this.saveData();
       new import_obsidian.Notice(`Watched folder set to: ${normalizedPath}`);
-      this.scanFolder(normalizedPath);
+      void this.scanFolder(normalizedPath);
     } catch (error) {
       console.error("[Cross Player] Failed to save watched folder", error);
       new import_obsidian.Notice("Failed to save watched folder. Check disk space and sync state.");
@@ -3222,17 +3247,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async sortQueue(by, order) {
     this.data.queue.sort((a, b) => {
       var _a, _b;
-      let valA = a.name;
-      let valB = b.name;
+      let valA = a.name.toLowerCase();
+      let valB = b.name.toLowerCase();
       if (by === "type") {
         valA = ((_a = a.path.split(".").pop()) == null ? void 0 : _a.toLowerCase()) || "";
         valB = ((_b = b.path.split(".").pop()) == null ? void 0 : _b.toLowerCase()) || "";
       } else if (by === "size") {
         valA = a.size || 0;
         valB = b.size || 0;
-      } else {
-        valA = a.name.toLowerCase();
-        valB = b.name.toLowerCase();
       }
       if (valA < valB)
         return order === "asc" ? -1 : 1;
@@ -3363,34 +3385,24 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("Please set a download folder or watched folder first.");
       return;
     }
-    const path = require("path");
-    const fs = require("fs");
-    const adapter = this.app.vault.adapter;
-    let absolutePath;
-    if (adapter instanceof Object && "getBasePath" in adapter) {
-      absolutePath = path.join(adapter.getBasePath(), targetFolder);
-    } else {
+    const absolutePath = this.buildAbsoluteVaultPath(targetFolder);
+    if (!absolutePath) {
       new import_obsidian.Notice("Could not resolve absolute path for vault.");
       return;
     }
-    if (!fs.existsSync(absolutePath)) {
+    if (!await this.app.vault.adapter.exists(targetFolder)) {
       new import_obsidian.Notice(`Target folder does not exist: ${targetFolder}`);
-      return;
-    }
-    const ytPath = youtubeDlpPath.trim();
-    if (ytPath !== "yt-dlp" && !fs.existsSync(ytPath)) {
-      new import_obsidian.Notice(`yt-dlp binary not found at: ${ytPath}`);
       return;
     }
     new import_obsidian.Notice(`Starting download of ${links.length} items...`);
     for (const link of links) {
       if (!link.trim())
         continue;
-      this.startDownload(link.trim(), quality, type, absolutePath);
+      void this.startDownload(link.trim(), quality, type, absolutePath);
     }
   }
   async startDownload(link, quality, type, cwd, existingId) {
-    var _a, _b;
+    var _a, _b, _c, _d, _e;
     if (!import_obsidian.Platform.isDesktop)
       return;
     const { youtubeDlpPath, ffmpegPath, jsRuntimePath } = this.data.settings;
@@ -3419,7 +3431,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       this.activeDownloads.push(downloadStatus);
     }
     (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
-    let args = [
+    const args = [
       link,
       "-o",
       "%(title)s.%(ext)s",
@@ -3452,7 +3464,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       args.push("--merge-output-format", "mp4");
     }
     try {
-      const { spawn } = require("child_process");
+      const spawn = this.getSpawnFunction();
+      if (!spawn) {
+        new import_obsidian.Notice("Desktop process access is unavailable in this build.");
+        downloadStatus.status = "error";
+        downloadStatus.error = "Desktop process access unavailable";
+        (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
+        return;
+      }
       console.log(`[Cross Player] Spawning in ${cwd}: ${ytPath} ${args.join(" ")}`);
       const env = { ...process.env };
       if (import_obsidian.Platform.isDesktop && process.platform === "darwin") {
@@ -3461,8 +3480,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
       const child = spawn(ytPath, args, { cwd, env });
       downloadStatus.childProcess = child;
-      child.stdout.on("data", (data) => {
-        var _a2, _b2, _c, _d;
+      (_c = child.stdout) == null ? void 0 : _c.on("data", (data) => {
+        var _a2, _b2, _c2, _d2;
         const lines = data.toString().split("\n");
         for (const line of lines) {
           const trimmedLine = line.trim();
@@ -3503,7 +3522,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
               const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
               downloadStatus.name = nameWithoutExt;
             }
-            (_c = this.listView) == null ? void 0 : _c.updateDownloadProgress();
+            (_c2 = this.listView) == null ? void 0 : _c2.updateDownloadProgress();
           }
           if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
             downloadStatus.status = "converting";
@@ -3513,11 +3532,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
               const nameWithoutExt = destMatch[1].replace(/\.[^/.]+$/, "");
               downloadStatus.name = nameWithoutExt;
             }
-            (_d = this.listView) == null ? void 0 : _d.updateDownloadProgress();
+            (_d2 = this.listView) == null ? void 0 : _d2.updateDownloadProgress();
           }
         }
       });
-      child.stderr.on("data", (data) => {
+      (_d = child.stderr) == null ? void 0 : _d.on("data", (data) => {
         var _a2;
         const errorMsg = data.toString();
         console.error(`yt-dlp stderr: ${errorMsg}`);
@@ -3545,7 +3564,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           const { watchedFolder } = this.data.settings;
           if (watchedFolder) {
             window.setTimeout(() => {
-              this.scanFolder(watchedFolder);
+              void this.scanFolder(watchedFolder);
             }, 2e3);
           }
         } else if (downloadStatus.status !== "paused" && code !== null) {
@@ -3562,12 +3581,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           }, 5e3);
         }
       });
-    } catch (e) {
-      console.error("Download failed", e);
+    } catch (error) {
+      console.error("Download failed", error);
       new import_obsidian.Notice(`Failed to download: ${link}`);
       downloadStatus.status = "error";
       downloadStatus.error = "Failed to start";
-      (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
+      (_e = this.listView) == null ? void 0 : _e.updateDownloadProgress();
     }
   }
   cancelDownload(id) {
@@ -3597,33 +3616,25 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const { url, quality, type } = dl.params;
       const { downloadFolder, watchedFolder } = this.data.settings;
       const targetFolder = downloadFolder || watchedFolder;
-      const path = require("path");
-      const adapter = this.app.vault.adapter;
-      let absolutePath;
-      if (adapter instanceof Object && "getBasePath" in adapter) {
-        absolutePath = path.join(adapter.getBasePath(), targetFolder);
-      } else {
+      const absolutePath = this.buildAbsoluteVaultPath(targetFolder);
+      if (!absolutePath) {
         new import_obsidian.Notice("Could not resolve absolute path for vault.");
         return;
       }
-      this.startDownload(url, quality, type, absolutePath, id);
+      void this.startDownload(url, quality, type, absolutePath, id);
     }
   }
   resumeDownload(id) {
+    var _a;
     if (!import_obsidian.Platform.isDesktop)
       return;
-    const path = require("path");
     const dl = this.activeDownloads.find((d) => d.id === id);
     if (dl && dl.params) {
       const { downloadFolder, watchedFolder } = this.data.settings;
       const targetFolder = downloadFolder || watchedFolder;
-      const adapter = this.app.vault.adapter;
-      let absolutePath = "";
-      if (adapter instanceof Object && "getBasePath" in adapter) {
-        absolutePath = path.join(adapter.getBasePath(), targetFolder);
-      }
+      const absolutePath = (_a = this.buildAbsoluteVaultPath(targetFolder)) != null ? _a : "";
       if (absolutePath) {
-        this.startDownload(dl.params.url, dl.params.quality, dl.params.type, absolutePath, id);
+        void this.startDownload(dl.params.url, dl.params.quality, dl.params.type, absolutePath, id);
       }
     }
   }
@@ -3771,7 +3782,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("General Settings").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Playback").setHeading();
     new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
     }));
@@ -3817,7 +3828,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       await this.plugin.saveData();
       (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
     }));
-    new import_obsidian.Setting(containerEl).setName("Audio Settings").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Audio").setHeading();
     new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion.").addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).setDynamicTooltip().onChange(async (value) => {
       var _a;
       this.plugin.data.settings.volumeBoostPercent = value;
@@ -3835,7 +3846,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Usage Summary").setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`).addButton((button) => button.setButtonText("View Statistics").onClick(() => {
       new ConsumptionStatsModal(this.app, this.plugin).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Storage & Download Settings").setHeading();
+    new import_obsidian.Setting(containerEl).setName("Downloads & Storage").setHeading();
     new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
       this.plugin.data.settings.youtubeDlpPath = value;
       await this.plugin.saveData();
@@ -3857,7 +3868,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       if (!isNaN(limit) && limit > 0) {
         this.plugin.data.settings.storageLimitGB = limit;
         await this.plugin.saveData();
-        this.plugin.calculateDynamicLimit();
+        void this.plugin.calculateDynamicLimit();
       }
     }));
   }
@@ -3954,9 +3965,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     const refreshBtn = titleRow.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
     refreshBtn.ariaLabel = "Refresh Data";
-    refreshBtn.onclick = async () => {
-      await this.plugin.reloadSyncedDataIfChanged(true);
-      new import_obsidian.Notice("Data reloaded.");
+    refreshBtn.onclick = () => {
+      void this.plugin.reloadSyncedDataIfChanged(true).then(() => {
+        new import_obsidian.Notice("Data reloaded.");
+      });
     };
     const cleanBtn = titleRow.createDiv({ cls: "clickable-icon" });
     (0, import_obsidian.setIcon)(cleanBtn, "trash-2");
@@ -4088,9 +4100,9 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       // Short delay to prevent accidental scrolling interference
       delayOnTouchOnly: true,
       touchStartThreshold: 5,
-      onSort: async (evt) => {
+      onSort: (evt) => {
         if (evt.oldIndex !== void 0 && evt.newIndex !== void 0) {
-          await this.plugin.reorderItem(evt.oldIndex, evt.newIndex);
+          void this.plugin.reorderItem(evt.oldIndex, evt.newIndex);
         }
       }
     });
@@ -4288,11 +4300,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     return "play";
   }
   setViewTitle(title) {
-    if (this.leaf.view.headerTitleEl) {
-      this.leaf.view.headerTitleEl.setText(title);
-    } else {
-      if (this.leaf.view.titleEl)
-        this.leaf.view.titleEl.setText(title);
+    const viewWithTitles = this.leaf.view;
+    if (viewWithTitles.headerTitleEl) {
+      viewWithTitles.headerTitleEl.setText(title);
+    } else if (viewWithTitles.titleEl) {
+      viewWithTitles.titleEl.setText(title);
     }
   }
   isCurrentPlaybackSource() {
@@ -4854,10 +4866,12 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     return `${minutes}:${secs.toString().padStart(2, "0")}`;
   }
   ensureAudioNodes() {
+    var _a;
     if (!this.videoEl)
       return;
     if (!this.audioContext) {
-      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      const runtimeWindow = window;
+      const AudioContextCtor = (_a = runtimeWindow.AudioContext) != null ? _a : runtimeWindow.webkitAudioContext;
       if (!AudioContextCtor)
         return;
       this.audioContext = new AudioContextCtor();

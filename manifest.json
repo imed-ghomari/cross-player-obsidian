@@ -5,5 +5,6 @@
 	"minAppVersion": "1.7.2",
 	"description": "A media player plugin that watches a folder and plays media.",
 	"author": "Imed Ghomari",
-	"authorUrl": "https://github.com/imed-ghomari/cross-player-obsidian"
+	"authorUrl": "https://github.com/imed-ghomari",
+	"isDesktopOnly": false
 }
