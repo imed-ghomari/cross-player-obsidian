@@ -3208,6 +3208,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       await this.playMedia(nextItem, true);
     }
   }
+  async permanentlyDeleteVaultFile(file) {
+    await this.app.vault.delete(file, true);
+  }
   async playNextItem() {
     this.rememberQueueScrollPosition();
     let currentIndex = -1;
@@ -3313,7 +3316,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         }
         const file = this.app.vault.getAbstractFileByPath(item.path);
         if (file instanceof import_obsidian.TFile) {
-          await this.app.fileManager.trashFile(file);
+          await this.permanentlyDeleteVaultFile(file);
           count++;
           removedIds.add(item.id);
         } else if (!file) {
@@ -3346,7 +3349,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     try {
       const file = this.app.vault.getAbstractFileByPath(item.path);
       if (file instanceof import_obsidian.TFile) {
-        await this.app.fileManager.trashFile(file);
+        await this.permanentlyDeleteVaultFile(file);
         deletedFromDisk = true;
       } else if (!file) {
         deletedFromDisk = true;
@@ -3964,12 +3967,18 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     };
   }
   refresh() {
-    var _a;
+    var _a, _b;
     const container = this.contentEl;
+    const storedScrollTop = (_a = this.plugin.data.queueScrollTop) != null ? _a : this.savedScrollTop;
     const oldList = container.querySelector(".cross-player-list");
     if (oldList) {
-      this.savedScrollTop = oldList.scrollTop;
-      this.plugin.data.queueScrollTop = this.savedScrollTop;
+      const measuredScrollTop = oldList.scrollTop;
+      if (measuredScrollTop > 0 || storedScrollTop === 0) {
+        this.savedScrollTop = measuredScrollTop;
+        this.plugin.data.queueScrollTop = measuredScrollTop;
+      } else {
+        this.savedScrollTop = storedScrollTop;
+      }
     }
     container.empty();
     container.addClass("cross-player-list-view");
@@ -4138,7 +4147,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     });
     const downloadContainer = container.createDiv({ cls: "cross-player-download-container" });
     this.updateDownloadProgress(downloadContainer);
-    const scrollTopToRestore = (_a = this.plugin.data.queueScrollTop) != null ? _a : this.savedScrollTop;
+    const scrollTopToRestore = (_b = this.plugin.data.queueScrollTop) != null ? _b : this.savedScrollTop;
     if (scrollTopToRestore > 0) {
       list.scrollTop = scrollTopToRestore;
       window.requestAnimationFrame(() => {
@@ -4668,7 +4677,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         return;
       if (Date.now() - pointerStartTime > 500)
         return;
-      handlePlayerTap(e.target instanceof HTMLElement ? e.target : null, e);
+      handlePlayerTap(e.target instanceof Element ? e.target : null, e);
     };
     const onPointerCancel = () => {
       pointerMoved = true;

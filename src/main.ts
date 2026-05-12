@@ -1213,6 +1213,10 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
+    private async permanentlyDeleteVaultFile(file: TAbstractFile) {
+        await this.app.vault.delete(file, true);
+    }
+
     async playNextItem() {
         this.rememberQueueScrollPosition();
 
@@ -1324,7 +1328,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
                 const file = this.app.vault.getAbstractFileByPath(item.path);
                 if (file instanceof TFile) {
-                    await this.app.fileManager.trashFile(file);
+                    await this.permanentlyDeleteVaultFile(file);
                     count++;
                     removedIds.add(item.id);
                 } else if (!file) {
@@ -1364,7 +1368,7 @@ export default class CrossPlayerPlugin extends Plugin {
         try {
             const file = this.app.vault.getAbstractFileByPath(item.path);
             if (file instanceof TFile) {
-                await this.app.fileManager.trashFile(file);
+                await this.permanentlyDeleteVaultFile(file);
                 deletedFromDisk = true;
             } else if (!file) {
                 deletedFromDisk = true;
@@ -2253,12 +2257,18 @@ class CrossPlayerListView extends ItemView {
 
     refresh() {
         const container = this.contentEl;
+        const storedScrollTop = this.plugin.data.queueScrollTop ?? this.savedScrollTop;
 
         // Save scroll position before emptying
-        const oldList = container.querySelector(".cross-player-list");
+        const oldList = container.querySelector<HTMLElement>(".cross-player-list");
         if (oldList) {
-            this.savedScrollTop = oldList.scrollTop;
-            this.plugin.data.queueScrollTop = this.savedScrollTop;
+            const measuredScrollTop = oldList.scrollTop;
+            if (measuredScrollTop > 0 || storedScrollTop === 0) {
+                this.savedScrollTop = measuredScrollTop;
+                this.plugin.data.queueScrollTop = measuredScrollTop;
+            } else {
+                this.savedScrollTop = storedScrollTop;
+            }
         }
 
         container.empty();
@@ -3129,7 +3139,7 @@ class CrossPlayerMainView extends ItemView {
             );
         };
 
-        const isOverlayControlTarget = (target: HTMLElement | null) => {
+        const isOverlayControlTarget = (target: Element | null) => {
             if (!target || !isOverlayVisible()) return false;
 
             if (target.closest('.cross-player-big-btn')) {
@@ -3146,7 +3156,7 @@ class CrossPlayerMainView extends ItemView {
             );
         };
 
-        const handlePlayerTap = (target: HTMLElement | null, event: Event) => {
+        const handlePlayerTap = (target: Element | null, event: Event) => {
             if (!isOverlayVisible()) {
                 event.preventDefault();
                 event.stopPropagation();
@@ -3187,7 +3197,7 @@ class CrossPlayerMainView extends ItemView {
         const onPointerUp = (e: PointerEvent) => {
             if (!e.isPrimary || pointerMoved) return;
             if (Date.now() - pointerStartTime > 500) return;
-            handlePlayerTap(e.target instanceof HTMLElement ? e.target : null, e);
+            handlePlayerTap(e.target instanceof Element ? e.target : null, e);
         };
 
         const onPointerCancel = () => {

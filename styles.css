@@ -266,6 +266,9 @@
 
 .cross-player-overlay-progress {
     width: 100%;
+    flex: 1 1 auto;
+    display: block;
+    min-width: 0;
     accent-color: var(--interactive-accent);
     margin: 0;
     touch-action: none;
@@ -281,6 +284,7 @@
 
 .cross-player-overlay-progress-shell {
     flex: 1;
+    width: 100%;
     display: flex;
     align-items: center;
     min-width: 0;
