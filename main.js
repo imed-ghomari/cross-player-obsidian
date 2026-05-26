@@ -2319,6 +2319,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.lastKnownDataMtime = 0;
     this.lastKnownDataSize = 0;
     this.isReloadingSyncedData = false;
+    this.saveDataChain = Promise.resolve();
+    this.deferredMetadataPaths = /* @__PURE__ */ new Set();
+    this.deferredMetadataTimer = null;
+    this.isHydratingDeferredMetadata = false;
   }
   getLocalStorage() {
     if (typeof window === "undefined")
@@ -2922,10 +2926,15 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async saveData(refresh = true) {
     this.rememberQueueScrollPosition();
-    await super.saveData(this.data);
-    await this.refreshTrackedDataFileState();
-    if (refresh && this.listView)
-      this.listView.refresh();
+    const runSave = async () => {
+      await super.saveData(this.data);
+      await this.refreshTrackedDataFileState();
+      if (refresh && this.listView)
+        this.listView.refresh();
+    };
+    const queuedSave = this.saveDataChain.catch(() => void 0).then(runSave);
+    this.saveDataChain = queuedSave.catch(() => void 0);
+    await queuedSave;
   }
   registerWatchers() {
     this.registerEvent(
@@ -3002,6 +3011,73 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       };
       video.src = this.app.vault.getResourcePath(file);
     });
+  }
+  isAndroidPlaybackProbeSensitive() {
+    if (!import_obsidian.Platform.isMobile)
+      return false;
+    if (import_obsidian.Platform.isAndroidApp)
+      return true;
+    return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  }
+  shouldDeferMetadataProbe() {
+    var _a;
+    return this.isAndroidPlaybackProbeSensitive() && !!((_a = this.mainView) == null ? void 0 : _a.isActivelyPlayingLocally());
+  }
+  queueDeferredMetadataHydration(path) {
+    this.deferredMetadataPaths.add(path);
+    this.scheduleDeferredMetadataHydration();
+  }
+  scheduleDeferredMetadataHydration(delay = 2e3) {
+    if (this.deferredMetadataTimer !== null)
+      return;
+    this.deferredMetadataTimer = window.setTimeout(() => {
+      this.deferredMetadataTimer = null;
+      void this.flushDeferredMetadataHydration();
+    }, delay);
+  }
+  async flushDeferredMetadataHydration() {
+    if (this.isHydratingDeferredMetadata)
+      return;
+    if (this.shouldDeferMetadataProbe()) {
+      this.scheduleDeferredMetadataHydration(3e3);
+      return;
+    }
+    this.isHydratingDeferredMetadata = true;
+    try {
+      while (this.deferredMetadataPaths.size > 0) {
+        if (this.shouldDeferMetadataProbe()) {
+          this.scheduleDeferredMetadataHydration(3e3);
+          break;
+        }
+        const nextPath = this.deferredMetadataPaths.values().next().value;
+        if (!nextPath)
+          break;
+        this.deferredMetadataPaths.delete(nextPath);
+        const file = this.app.vault.getAbstractFileByPath(nextPath);
+        if (!(file instanceof import_obsidian.TFile))
+          continue;
+        const queueItem = this.data.queue.find((item) => item.path === nextPath);
+        if (!queueItem || queueItem.duration > 0)
+          continue;
+        const duration = await this.getMediaDuration(file);
+        if (duration <= 0)
+          continue;
+        const latestItem = this.data.queue.find((item) => item.path === nextPath);
+        if (!latestItem || latestItem.duration > 0)
+          continue;
+        latestItem.duration = duration;
+        latestItem.size = latestItem.size || file.stat.size;
+        await this.saveData(false);
+        if (this.listView) {
+          this.listView.updateStats();
+        }
+      }
+    } finally {
+      this.isHydratingDeferredMetadata = false;
+      if (this.deferredMetadataPaths.size > 0) {
+        this.scheduleDeferredMetadataHydration(3e3);
+      }
+    }
   }
   getQueueStats() {
     let totalDuration = 0;
@@ -3087,7 +3163,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return;
     let existing = this.data.queue.find((item) => item.path === file.path);
     if (!existing) {
-      const duration = await this.getMediaDuration(file);
+      const deferDurationProbe = this.shouldDeferMetadataProbe();
+      const duration = deferDurationProbe ? 0 : await this.getMediaDuration(file);
       existing = this.data.queue.find((item) => item.path === file.path);
       if (existing) {
         if (!existing.duration) {
@@ -3108,6 +3185,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         size: file.stat.size
       };
       this.data.queue.push(newItem);
+      if (deferDurationProbe) {
+        this.queueDeferredMetadataHydration(file.path);
+      }
       if (shouldSave) {
         await this.saveData();
         new import_obsidian.Notice(`Added ${file.name} to queue`);
@@ -3115,8 +3195,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     } else {
       let changed = false;
       if (!existing.duration) {
-        existing.duration = await this.getMediaDuration(file);
-        changed = true;
+        if (this.shouldDeferMetadataProbe()) {
+          this.queueDeferredMetadataHydration(file.path);
+        } else {
+          existing.duration = await this.getMediaDuration(file);
+          changed = true;
+        }
       }
       if (!existing.size) {
         existing.size = file.stat.size;
@@ -4353,6 +4437,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const currentSrc = this.videoEl.currentSrc || this.videoEl.src;
     return currentSrc === this.activeMediaSrc;
   }
+  isActivelyPlayingLocally() {
+    return !!this.videoEl && this.isCurrentPlaybackSource() && !this.videoEl.paused && !this.videoEl.ended;
+  }
   async syncCurrentItemDuration() {
     if (!this.videoEl || !this.currentItem || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
       return;
@@ -4501,6 +4588,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           void this.plugin.playNextUnread();
         }
       }
+      void this.plugin.flushDeferredMetadataHydration();
     };
     this.videoEl.ontimeupdate = async () => {
       if (this.currentItem && this.isCurrentPlaybackSource()) {
@@ -4531,6 +4619,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       if (this.currentItem && this.isCurrentPlaybackSource()) {
         await this.persistCurrentPlaybackPosition(true);
       }
+      void this.plugin.flushDeferredMetadataHydration();
       this.updateOverlayProgress();
     };
   }

@@ -96,6 +96,10 @@ export default class CrossPlayerPlugin extends Plugin {
     lastKnownDataMtime: number = 0;
     lastKnownDataSize: number = 0;
     isReloadingSyncedData: boolean = false;
+    private saveDataChain: Promise<void> = Promise.resolve();
+    private deferredMetadataPaths: Set<string> = new Set();
+    private deferredMetadataTimer: number | null = null;
+    private isHydratingDeferredMetadata: boolean = false;
 
     private getLocalStorage(): Storage | null {
         if (typeof window === 'undefined') return null;
@@ -813,9 +817,16 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async saveData(refresh: boolean = true) {
         this.rememberQueueScrollPosition();
-        await super.saveData(this.data);
-        await this.refreshTrackedDataFileState();
-        if (refresh && this.listView) this.listView.refresh();
+
+        const runSave = async () => {
+            await super.saveData(this.data);
+            await this.refreshTrackedDataFileState();
+            if (refresh && this.listView) this.listView.refresh();
+        };
+
+        const queuedSave = this.saveDataChain.catch(() => undefined).then(runSave);
+        this.saveDataChain = queuedSave.catch(() => undefined);
+        await queuedSave;
     }
 
     registerWatchers() {
@@ -916,6 +927,79 @@ export default class CrossPlayerPlugin extends Plugin {
             };
             video.src = this.app.vault.getResourcePath(file);
         });
+    }
+
+    isAndroidPlaybackProbeSensitive(): boolean {
+        if (!Platform.isMobile) return false;
+        if (Platform.isAndroidApp) return true;
+        return typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+    }
+
+    shouldDeferMetadataProbe(): boolean {
+        return this.isAndroidPlaybackProbeSensitive() && !!this.mainView?.isActivelyPlayingLocally();
+    }
+
+    queueDeferredMetadataHydration(path: string) {
+        this.deferredMetadataPaths.add(path);
+        this.scheduleDeferredMetadataHydration();
+    }
+
+    scheduleDeferredMetadataHydration(delay: number = 2000) {
+        if (this.deferredMetadataTimer !== null) return;
+
+        this.deferredMetadataTimer = window.setTimeout(() => {
+            this.deferredMetadataTimer = null;
+            void this.flushDeferredMetadataHydration();
+        }, delay);
+    }
+
+    async flushDeferredMetadataHydration() {
+        if (this.isHydratingDeferredMetadata) return;
+        if (this.shouldDeferMetadataProbe()) {
+            this.scheduleDeferredMetadataHydration(3000);
+            return;
+        }
+
+        this.isHydratingDeferredMetadata = true;
+        try {
+            while (this.deferredMetadataPaths.size > 0) {
+                if (this.shouldDeferMetadataProbe()) {
+                    this.scheduleDeferredMetadataHydration(3000);
+                    break;
+                }
+
+                const nextPath = this.deferredMetadataPaths.values().next().value as string | undefined;
+                if (!nextPath) break;
+
+                this.deferredMetadataPaths.delete(nextPath);
+
+                const file = this.app.vault.getAbstractFileByPath(nextPath);
+                if (!(file instanceof TFile)) continue;
+
+                const queueItem = this.data.queue.find(item => item.path === nextPath);
+                if (!queueItem || queueItem.duration > 0) continue;
+
+                const duration = await this.getMediaDuration(file);
+                if (duration <= 0) continue;
+
+                const latestItem = this.data.queue.find(item => item.path === nextPath);
+                if (!latestItem || latestItem.duration > 0) continue;
+
+                latestItem.duration = duration;
+                latestItem.size = latestItem.size || file.stat.size;
+                await this.saveData(false);
+
+                if (this.listView) {
+                    this.listView.updateStats();
+                }
+            }
+        } finally {
+            this.isHydratingDeferredMetadata = false;
+
+            if (this.deferredMetadataPaths.size > 0) {
+                this.scheduleDeferredMetadataHydration(3000);
+            }
+        }
     }
 
     getQueueStats() {
@@ -1064,7 +1148,8 @@ export default class CrossPlayerPlugin extends Plugin {
         // Check if already in queue
         let existing = this.data.queue.find(item => item.path === file.path);
         if (!existing) {
-            const duration = await this.getMediaDuration(file);
+            const deferDurationProbe = this.shouldDeferMetadataProbe();
+            const duration = deferDurationProbe ? 0 : await this.getMediaDuration(file);
 
             // Double check existence after async duration fetch to prevent race conditions
             existing = this.data.queue.find(item => item.path === file.path);
@@ -1087,6 +1172,9 @@ export default class CrossPlayerPlugin extends Plugin {
                 size: file.stat.size
             };
             this.data.queue.push(newItem);
+            if (deferDurationProbe) {
+                this.queueDeferredMetadataHydration(file.path);
+            }
             if (shouldSave) {
                 await this.saveData();
                 new Notice(`Added ${file.name} to queue`);
@@ -1095,8 +1183,12 @@ export default class CrossPlayerPlugin extends Plugin {
             // Update duration/size if missing (migration)
             let changed = false;
             if (!existing.duration) {
-                existing.duration = await this.getMediaDuration(file);
-                changed = true;
+                if (this.shouldDeferMetadataProbe()) {
+                    this.queueDeferredMetadataHydration(file.path);
+                } else {
+                    existing.duration = await this.getMediaDuration(file);
+                    changed = true;
+                }
             }
             if (!existing.size) {
                 existing.size = file.stat.size;
@@ -2804,6 +2896,10 @@ class CrossPlayerMainView extends ItemView {
         return currentSrc === this.activeMediaSrc;
     }
 
+    isActivelyPlayingLocally() {
+        return !!this.videoEl && this.isCurrentPlaybackSource() && !this.videoEl.paused && !this.videoEl.ended;
+    }
+
     async syncCurrentItemDuration() {
         if (!this.videoEl || !this.currentItem || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
             return;
@@ -2986,6 +3082,8 @@ class CrossPlayerMainView extends ItemView {
                     void this.plugin.playNextUnread();
                 }
             }
+
+            void this.plugin.flushDeferredMetadataHydration();
         };
 
         this.videoEl.ontimeupdate = async () => {
@@ -3027,8 +3125,9 @@ class CrossPlayerMainView extends ItemView {
             if (this.currentItem && this.isCurrentPlaybackSource()) {
                 await this.persistCurrentPlaybackPosition(true);
             }
+            void this.plugin.flushDeferredMetadataHydration();
             this.updateOverlayProgress();
-        }
+        };
     }
 
     async onClose() {
