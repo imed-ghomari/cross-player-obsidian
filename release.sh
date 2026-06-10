@@ -4,6 +4,7 @@ set -e
 VERSION="${1:?Usage: ./release.sh <version>}"
 
 npm version "$VERSION" --no-git-tag-version || true
+node -e "const fs = require('fs'); const path = 'manifest.json'; const manifest = JSON.parse(fs.readFileSync(path, 'utf8')); manifest.version = process.argv[1]; fs.writeFileSync(path, JSON.stringify(manifest, null, '\t') + '\n');" "$VERSION"
 npm run build
 git add .
 git commit -m "Release $VERSION"
