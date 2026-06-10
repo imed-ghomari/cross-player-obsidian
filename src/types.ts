@@ -5,6 +5,7 @@ export interface MediaItem {
     status: 'pending' | 'playing' | 'completed';
     finished?: boolean;
     position: number;
+    playbackUpdatedAt?: number;
     duration: number;
     size?: number; // in bytes
     countedAsConsumed?: boolean;

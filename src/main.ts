@@ -100,6 +100,7 @@ export default class CrossPlayerPlugin extends Plugin {
     private deferredMetadataPaths: Set<string> = new Set();
     private deferredMetadataTimer: number | null = null;
     private isHydratingDeferredMetadata: boolean = false;
+    private pendingPlaybackStateKeys: Set<string> = new Set();
 
     private getLocalStorage(): Storage | null {
         if (typeof window === 'undefined') return null;
@@ -133,6 +134,85 @@ export default class CrossPlayerPlugin extends Plugin {
     private getDesktopRequire(): AudioContextWindow['require'] | null {
         const runtimeWindow = window as AudioContextWindow;
         return typeof runtimeWindow.require === 'function' ? runtimeWindow.require : null;
+    }
+
+    private getMediaItemKeys(item: MediaItem): string[] {
+        return [`id:${item.id}`, `path:${item.path}`];
+    }
+
+    markPlaybackStateChanged(item: MediaItem, timestamp: number = Date.now()) {
+        item.playbackUpdatedAt = Math.max(item.playbackUpdatedAt || 0, timestamp);
+        for (const key of this.getMediaItemKeys(item)) {
+            this.pendingPlaybackStateKeys.add(key);
+        }
+    }
+
+    private hasPendingPlaybackStateChange(item: MediaItem): boolean {
+        return this.getMediaItemKeys(item).some(key => this.pendingPlaybackStateKeys.has(key));
+    }
+
+    private findMatchingQueueItem(queue: MediaItem[] | undefined, item: MediaItem): MediaItem | undefined {
+        return queue?.find(candidate => candidate.id === item.id)
+            || queue?.find(candidate => candidate.path === item.path);
+    }
+
+    private hasDifferentPlaybackState(a: MediaItem, b: MediaItem): boolean {
+        return Math.abs((a.position || 0) - (b.position || 0)) > 1
+            || a.status !== b.status
+            || !!a.finished !== !!b.finished
+            || !!a.countedAsConsumed !== !!b.countedAsConsumed
+            || (a.consumedAt || '') !== (b.consumedAt || '');
+    }
+
+    private copyPlaybackState(target: MediaItem, source: MediaItem) {
+        target.position = source.position || 0;
+        target.status = source.status;
+        target.finished = source.finished;
+        target.countedAsConsumed = source.countedAsConsumed;
+        target.consumedAt = source.consumedAt;
+        target.playbackUpdatedAt = source.playbackUpdatedAt;
+    }
+
+    private async mergeFresherPlaybackStateFromDisk() {
+        const stat = await this.getPluginDataStat();
+        const nextMtime = stat?.mtime ?? 0;
+        const nextSize = stat?.size ?? 0;
+        const changed = nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
+        if (!changed) return;
+
+        try {
+            const dataText = await this.app.vault.adapter.read(this.getPluginDataPath());
+            const diskData = (dataText.trim() ? JSON.parse(dataText) : {}) as Partial<CrossPlayerData>;
+            if (!Array.isArray(diskData.queue)) return;
+
+            for (const localItem of this.data.queue) {
+                const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
+                if (!diskItem) continue;
+
+                const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
+                const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
+                const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
+                const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
+
+                if (diskIsNewer || (!localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem))) {
+                    this.copyPlaybackState(localItem, diskItem);
+                }
+
+                if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration > 0) {
+                    localItem.duration = diskItem.duration;
+                }
+
+                if (!localItem.size && diskItem.size) {
+                    localItem.size = diskItem.size;
+                }
+            }
+
+            if (diskData.consumptionStats) {
+                this.data.consumptionStats = Object.assign({}, diskData.consumptionStats, this.data.consumptionStats ?? {});
+            }
+        } catch (error) {
+            console.warn('[Cross Player] Failed to merge synced playback state before save', error);
+        }
     }
 
     private loadDesktopModule<T>(moduleParts: string[]): T | null {
@@ -819,8 +899,10 @@ export default class CrossPlayerPlugin extends Plugin {
         this.rememberQueueScrollPosition();
 
         const runSave = async () => {
+            await this.mergeFresherPlaybackStateFromDisk();
             await super.saveData(this.data);
             await this.refreshTrackedDataFileState();
+            this.pendingPlaybackStateKeys.clear();
             if (refresh && this.listView) this.listView.refresh();
         };
 
@@ -902,12 +984,14 @@ export default class CrossPlayerPlugin extends Plugin {
         if (folder instanceof TFolder) {
             const filesInFolder = this.collectMediaFiles(folder);
 
-            // Process all files without saving individually
+            // Process all files without saving individually.
             const promises = filesInFolder.map(file => this.handleFileChange(file, false));
-            await Promise.all(promises);
+            const changedItems = await Promise.all(promises);
 
-            // Save once at the end
-            await this.saveData();
+            // Save once at the end, and only when the scan actually changed queue data.
+            if (changedItems.some(Boolean)) {
+                await this.saveData();
+            }
         } else {
             console.warn("Watched path is not a folder:", folderPath);
         }
@@ -1119,31 +1203,32 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async handleFileChange(file: TAbstractFile, shouldSave: boolean = true) {
+    async handleFileChange(file: TAbstractFile, shouldSave: boolean = true): Promise<boolean> {
         const folderPath = this.data.settings.watchedFolder ?? "";
         // If it's undefined somehow, return, but allow "" for root
-        if (this.data.settings.watchedFolder === undefined) return;
+        if (this.data.settings.watchedFolder === undefined) return false;
 
         // Ignore hidden files and folders (starting with .)
-        if (file.name.startsWith('.') || file.path.includes('/.')) return;
+        if (file.name.startsWith('.') || file.path.includes('/.')) return false;
 
         // Recursively handle folders
         if (file instanceof TFolder) {
+            let changed = false;
             for (const child of file.children) {
-                await this.handleFileChange(child, shouldSave);
+                changed = (await this.handleFileChange(child, shouldSave)) || changed;
             }
-            return;
+            return changed;
         }
 
-        if (!(file instanceof TFile)) return;
+        if (!(file instanceof TFile)) return false;
 
         // Double check it is in the folder
-        if (!this.isPathInsideWatchedFolder(file.path, folderPath)) return;
+        if (!this.isPathInsideWatchedFolder(file.path, folderPath)) return false;
 
         console.log(`[Cross Player] processing: ${file.path}`);
 
         const ext = file.extension.toLowerCase();
-        if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return;
+        if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return false;
 
         // Check if already in queue
         let existing = this.data.queue.find(item => item.path === file.path);
@@ -1155,11 +1240,12 @@ export default class CrossPlayerPlugin extends Plugin {
             existing = this.data.queue.find(item => item.path === file.path);
             if (existing) {
                 // If it appeared while we were waiting, verify its props
-                if (!existing.duration) {
+                if (!existing.duration && duration > 0) {
                     existing.duration = duration;
                     if (shouldSave) await this.saveData();
+                    return true;
                 }
-                return;
+                return false;
             }
 
             const newItem: MediaItem = {
@@ -1179,6 +1265,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 await this.saveData();
                 new Notice(`Added ${file.name} to queue`);
             }
+            return true;
         } else {
             // Update duration/size if missing (migration)
             let changed = false;
@@ -1186,8 +1273,11 @@ export default class CrossPlayerPlugin extends Plugin {
                 if (this.shouldDeferMetadataProbe()) {
                     this.queueDeferredMetadataHydration(file.path);
                 } else {
-                    existing.duration = await this.getMediaDuration(file);
-                    changed = true;
+                    const duration = await this.getMediaDuration(file);
+                    if (duration > 0) {
+                        existing.duration = duration;
+                        changed = true;
+                    }
                 }
             }
             if (!existing.size) {
@@ -1195,6 +1285,7 @@ export default class CrossPlayerPlugin extends Plugin {
                 changed = true;
             }
             if (changed && shouldSave) await this.saveData();
+            return changed;
         }
     }
 
@@ -1261,6 +1352,7 @@ export default class CrossPlayerPlugin extends Plugin {
             } else {
                 currentPlaying.status = 'pending';
             }
+            this.markPlaybackStateChanged(currentPlaying);
         }
 
         if (item.status === 'completed') {
@@ -1268,6 +1360,7 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         item.status = 'playing';
+        this.markPlaybackStateChanged(item);
         await this.saveData();
 
         // 3. Start new playback
@@ -1276,6 +1369,7 @@ export default class CrossPlayerPlugin extends Plugin {
             if (!success) {
                 // Revert status if playback failed
                 item.status = 'pending';
+                this.markPlaybackStateChanged(item);
                 await this.saveData();
                 new Notice(`Failed to play ${item.name}`);
             }
@@ -1350,6 +1444,7 @@ export default class CrossPlayerPlugin extends Plugin {
             } else if (previousStatus === 'completed') {
                 // Keep historical stats unless the user explicitly marks it unread.
             }
+            this.markPlaybackStateChanged(item);
             await this.saveData();
         }
     }
@@ -1358,6 +1453,7 @@ export default class CrossPlayerPlugin extends Plugin {
         const item = this.data.queue.find(i => i.id === id);
         if (item && (force || Math.abs(item.position - position) > 1)) {
             item.position = position;
+            this.markPlaybackStateChanged(item);
             await this.saveData(false);
         }
     }
@@ -1521,6 +1617,7 @@ export default class CrossPlayerPlugin extends Plugin {
         queueItem.status = 'pending';
         queueItem.finished = false;
         queueItem.position = 0;
+        this.markPlaybackStateChanged(queueItem);
         await this.saveData();
 
         // Always refresh list view to update visual progress and status icon
@@ -2961,6 +3058,7 @@ class CrossPlayerMainView extends ItemView {
 
         queueItem.position = currentTime;
         this.currentItem.position = currentTime;
+        this.plugin.markPlaybackStateChanged(queueItem);
 
         if (duration > 0 && Math.abs((queueItem.duration || 0) - duration) > 1) {
             queueItem.duration = duration;
@@ -2974,9 +3072,11 @@ class CrossPlayerMainView extends ItemView {
             this.plugin.recordConsumption(queueItem);
             this.currentItem.status = 'completed';
             this.currentItem.finished = true;
+            this.plugin.markPlaybackStateChanged(queueItem);
         } else if (queueItem.status === 'playing') {
             queueItem.status = queueItem.finished ? 'completed' : 'pending';
             this.currentItem.status = queueItem.status;
+            this.plugin.markPlaybackStateChanged(queueItem);
         }
 
         await this.plugin.saveData();
