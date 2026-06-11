@@ -3084,9 +3084,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   isAndroidPlaybackProbeSensitive() {
     if (!import_obsidian.Platform.isMobile)
       return false;
-    if (import_obsidian.Platform.isAndroidApp)
-      return true;
-    return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+    return import_obsidian.Platform.isAndroidApp;
   }
   shouldDeferMetadataProbe() {
     var _a;
@@ -3372,7 +3370,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async permanentlyDeleteVaultFile(file) {
-    await this.app.vault.delete(file, true);
+    await this.app.fileManager.trashFile(file);
   }
   async playNextItem() {
     this.rememberQueueScrollPosition();
@@ -3985,7 +3983,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets.").addSlider((slider) => slider.setLimits(0.5, 5, 0.1).setValue(this.plugin.data.settings.defaultPlaybackSpeed).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets.").addSlider((slider) => slider.setLimits(0.5, 5, 0.1).setValue(this.plugin.data.settings.defaultPlaybackSpeed).onChange(async (value) => {
       this.plugin.data.settings.defaultPlaybackSpeed = value;
       await this.plugin.saveData();
     }));
@@ -4028,7 +4026,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
     }));
     new import_obsidian.Setting(containerEl).setName("Audio").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion.").addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion.").addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).onChange(async (value) => {
       var _a;
       this.plugin.data.settings.volumeBoostPercent = value;
       await this.plugin.saveData(false);

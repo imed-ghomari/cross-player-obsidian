@@ -898,7 +898,7 @@ export default class CrossPlayerPlugin extends Plugin {
     async saveData(refresh: boolean = true) {
         this.rememberQueueScrollPosition();
 
-        const runSave = async () => {
+        const runSave = async (): Promise<void> => {
             await this.mergeFresherPlaybackStateFromDisk();
             await super.saveData(this.data);
             await this.refreshTrackedDataFileState();
@@ -1015,8 +1015,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     isAndroidPlaybackProbeSensitive(): boolean {
         if (!Platform.isMobile) return false;
-        if (Platform.isAndroidApp) return true;
-        return typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
+        return Platform.isAndroidApp;
     }
 
     shouldDeferMetadataProbe(): boolean {
@@ -1400,7 +1399,7 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     private async permanentlyDeleteVaultFile(file: TAbstractFile) {
-        await this.app.vault.delete(file, true);
+        await this.app.fileManager.trashFile(file);
     }
 
     async playNextItem() {
@@ -2188,7 +2187,6 @@ class CrossPlayerSettingTab extends PluginSettingTab {
             .addSlider(slider => slider
                 .setLimits(0.5, 5.0, 0.1)
                 .setValue(this.plugin.data.settings.defaultPlaybackSpeed)
-                .setDynamicTooltip()
                 .onChange(async (value) => {
                     this.plugin.data.settings.defaultPlaybackSpeed = value;
                     await this.plugin.saveData();
@@ -2280,7 +2278,6 @@ class CrossPlayerSettingTab extends PluginSettingTab {
             .addSlider(slider => slider
                 .setLimits(100, 300, 10)
                 .setValue(this.plugin.data.settings.volumeBoostPercent)
-                .setDynamicTooltip()
                 .onChange(async (value) => {
                     this.plugin.data.settings.volumeBoostPercent = value;
                     await this.plugin.saveData(false);
