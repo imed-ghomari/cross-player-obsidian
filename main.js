@@ -3028,8 +3028,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       if (refresh && this.listView)
         this.listView.refresh();
     };
-    const queuedSave = this.saveDataChain.catch(() => void 0).then(runSave);
-    this.saveDataChain = queuedSave.catch(() => void 0);
+    const queuedSave = this.saveDataChain.catch(() => {
+    }).then(runSave);
+    this.saveDataChain = queuedSave.catch(() => {
+    });
     await queuedSave;
   }
   registerWatchers() {
@@ -5155,7 +5157,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         this.compressorNode.ratio.value = 1;
       }
       if (this.audioContext && this.audioContext.state === "suspended") {
-        this.audioContext.resume().catch(() => void 0);
+        this.audioContext.resume().catch(() => {
+        });
       }
     } catch (error) {
       console.error("Failed to apply audio settings", error);

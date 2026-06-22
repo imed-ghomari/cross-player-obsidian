@@ -940,8 +940,8 @@ export default class CrossPlayerPlugin extends Plugin {
             if (refresh && this.listView) this.listView.refresh();
         };
 
-        const queuedSave = this.saveDataChain.catch(() => undefined).then(runSave);
-        this.saveDataChain = queuedSave.catch(() => undefined);
+        const queuedSave: Promise<void> = this.saveDataChain.catch(() => {}).then(runSave);
+        this.saveDataChain = queuedSave.catch(() => {});
         await queuedSave;
     }
 
@@ -3728,7 +3728,7 @@ class CrossPlayerMainView extends ItemView {
             }
 
             if (this.audioContext && this.audioContext.state === 'suspended') {
-                this.audioContext.resume().catch(() => undefined);
+                this.audioContext.resume().catch(() => {});
             }
         } catch (error) {
             console.error('Failed to apply audio settings', error);
