@@ -55,6 +55,7 @@ export interface DownloadStatus {
 export interface CrossPlayerData {
     settings: CrossPlayerSettings;
     queue: MediaItem[];
+    queueUpdatedAt?: number;
     playbackSpeed: number;
     queueScrollTop?: number;
     consumptionStats?: Record<string, ConsumptionStatBucket>;

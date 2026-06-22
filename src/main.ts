@@ -173,6 +173,10 @@ export default class CrossPlayerPlugin extends Plugin {
         target.playbackUpdatedAt = source.playbackUpdatedAt;
     }
 
+    markQueueChanged() {
+        this.data.queueUpdatedAt = Date.now();
+    }
+
     private async mergeFresherPlaybackStateFromDisk() {
         const stat = await this.getPluginDataStat();
         const nextMtime = stat?.mtime ?? 0;
@@ -185,25 +189,55 @@ export default class CrossPlayerPlugin extends Plugin {
             const diskData = (dataText.trim() ? JSON.parse(dataText) : {}) as Partial<CrossPlayerData>;
             if (!Array.isArray(diskData.queue)) return;
 
-            for (const localItem of this.data.queue) {
-                const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
-                if (!diskItem) continue;
+            const diskQueueUpdatedAt = diskData.queueUpdatedAt || 0;
+            const localQueueUpdatedAt = this.data.queueUpdatedAt || 0;
+            const diskQueueIsNewer = diskQueueUpdatedAt > localQueueUpdatedAt;
 
-                const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
-                const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
-                const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-                const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
+            if (diskQueueIsNewer) {
+                for (const diskItem of diskData.queue) {
+                    const localItem = this.findMatchingQueueItem(this.data.queue, diskItem);
+                    if (!localItem) continue;
 
-                if (diskIsNewer || (!localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem))) {
-                    this.copyPlaybackState(localItem, diskItem);
+                    const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
+                    const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
+                    const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
+                    const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
+
+                    if (!diskIsNewer && (localPlaybackUpdatedAt > diskPlaybackUpdatedAt || localChangedPlayback)) {
+                        this.copyPlaybackState(diskItem, localItem);
+                    }
+
+                    if ((!diskItem.duration || diskItem.duration <= 0) && localItem.duration && localItem.duration > 0) {
+                        diskItem.duration = localItem.duration;
+                    }
+
+                    if (!diskItem.size && localItem.size) {
+                        diskItem.size = localItem.size;
+                    }
                 }
+                this.data.queue = diskData.queue;
+                this.data.queueUpdatedAt = diskQueueUpdatedAt;
+            } else {
+                for (const localItem of this.data.queue) {
+                    const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
+                    if (!diskItem) continue;
 
-                if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration > 0) {
-                    localItem.duration = diskItem.duration;
-                }
+                    const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
+                    const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
+                    const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
+                    const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
 
-                if (!localItem.size && diskItem.size) {
-                    localItem.size = diskItem.size;
+                    if (diskIsNewer || (!localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem))) {
+                        this.copyPlaybackState(localItem, diskItem);
+                    }
+
+                    if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration && diskItem.duration > 0) {
+                        localItem.duration = diskItem.duration;
+                    }
+
+                    if (!localItem.size && diskItem.size) {
+                        localItem.size = diskItem.size;
+                    }
                 }
             }
 
@@ -1168,7 +1202,11 @@ export default class CrossPlayerPlugin extends Plugin {
             // Remove items that moved out
             const watchedFolder = this.data.settings.watchedFolder;
             if (watchedFolder) {
+                const initialLength = this.data.queue.length;
                 this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, watchedFolder));
+                if (this.data.queue.length !== initialLength) {
+                    this.markQueueChanged();
+                }
             }
 
             await this.saveData();
@@ -1198,6 +1236,7 @@ export default class CrossPlayerPlugin extends Plugin {
         this.data.queue = this.data.queue.filter(item => item.path !== path && !item.path.startsWith(path + "/"));
 
         if (this.data.queue.length !== initialLength) {
+            this.markQueueChanged();
             await this.saveData();
         }
     }
@@ -1260,6 +1299,7 @@ export default class CrossPlayerPlugin extends Plugin {
             if (deferDurationProbe) {
                 this.queueDeferredMetadataHydration(file.path);
             }
+            this.markQueueChanged();
             if (shouldSave) {
                 await this.saveData();
                 new Notice(`Added ${file.name} to queue`);
@@ -1464,6 +1504,7 @@ export default class CrossPlayerPlugin extends Plugin {
         const item = this.data.queue[index];
         this.data.queue.splice(index, 1);
         this.data.queue.splice(newIndex, 0, item);
+        this.markQueueChanged();
         await this.saveData();
     }
 
@@ -1472,6 +1513,7 @@ export default class CrossPlayerPlugin extends Plugin {
         const item = this.data.queue[oldIndex];
         this.data.queue.splice(oldIndex, 1);
         this.data.queue.splice(newIndex, 0, item);
+        this.markQueueChanged();
         await this.saveData();
     }
 
@@ -1492,6 +1534,7 @@ export default class CrossPlayerPlugin extends Plugin {
             if (valA > valB) return order === 'asc' ? 1 : -1;
             return 0;
         });
+        this.markQueueChanged();
         await this.saveData();
     }
 
@@ -1528,6 +1571,7 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         this.data.queue = this.data.queue.filter(item => item.status !== 'completed' || !removedIds.has(item.id));
+        this.markQueueChanged();
         await this.saveData();
         if (failedCount > 0) {
             new Notice(`Permanently deleted ${count} media file(s). ${failedCount} item(s) stayed in the queue because deletion failed.`);
@@ -1571,6 +1615,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         // Remove from queue
         this.data.queue = this.data.queue.filter(i => i.id !== item.id);
+        this.markQueueChanged();
         await this.saveData();
         new Notice(`Permanently deleted: ${item.name}`);
 
@@ -3017,7 +3062,6 @@ class CrossPlayerMainView extends ItemView {
             return;
         }
 
-        this.currentItem.position = this.videoEl.currentTime;
         await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
     }
 
@@ -3185,8 +3229,6 @@ class CrossPlayerMainView extends ItemView {
 
         this.videoEl.ontimeupdate = async () => {
             if (this.currentItem && this.isCurrentPlaybackSource()) {
-                this.currentItem.position = this.videoEl.currentTime;
-
                 // Throttled ETC update in List View
                 const now = Date.now();
                 // Update every 5 seconds (5000ms) to reflect progress in ETC without spamming updates

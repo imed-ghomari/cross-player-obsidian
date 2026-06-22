@@ -2383,6 +2383,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     target.consumedAt = source.consumedAt;
     target.playbackUpdatedAt = source.playbackUpdatedAt;
   }
+  markQueueChanged() {
+    this.data.queueUpdatedAt = Date.now();
+  }
   async mergeFresherPlaybackStateFromDisk() {
     var _a, _b, _c;
     const stat = await this.getPluginDataStat();
@@ -2396,22 +2399,48 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const diskData = dataText.trim() ? JSON.parse(dataText) : {};
       if (!Array.isArray(diskData.queue))
         return;
-      for (const localItem of this.data.queue) {
-        const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
-        if (!diskItem)
-          continue;
-        const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
-        const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
-        const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-        const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
-        if (diskIsNewer || !localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem)) {
-          this.copyPlaybackState(localItem, diskItem);
+      const diskQueueUpdatedAt = diskData.queueUpdatedAt || 0;
+      const localQueueUpdatedAt = this.data.queueUpdatedAt || 0;
+      const diskQueueIsNewer = diskQueueUpdatedAt > localQueueUpdatedAt;
+      if (diskQueueIsNewer) {
+        for (const diskItem of diskData.queue) {
+          const localItem = this.findMatchingQueueItem(this.data.queue, diskItem);
+          if (!localItem)
+            continue;
+          const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
+          const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
+          const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
+          const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
+          if (!diskIsNewer && (localPlaybackUpdatedAt > diskPlaybackUpdatedAt || localChangedPlayback)) {
+            this.copyPlaybackState(diskItem, localItem);
+          }
+          if ((!diskItem.duration || diskItem.duration <= 0) && localItem.duration && localItem.duration > 0) {
+            diskItem.duration = localItem.duration;
+          }
+          if (!diskItem.size && localItem.size) {
+            diskItem.size = localItem.size;
+          }
         }
-        if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration > 0) {
-          localItem.duration = diskItem.duration;
-        }
-        if (!localItem.size && diskItem.size) {
-          localItem.size = diskItem.size;
+        this.data.queue = diskData.queue;
+        this.data.queueUpdatedAt = diskQueueUpdatedAt;
+      } else {
+        for (const localItem of this.data.queue) {
+          const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
+          if (!diskItem)
+            continue;
+          const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
+          const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
+          const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
+          const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
+          if (diskIsNewer || !localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem)) {
+            this.copyPlaybackState(localItem, diskItem);
+          }
+          if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration && diskItem.duration > 0) {
+            localItem.duration = diskItem.duration;
+          }
+          if (!localItem.size && diskItem.size) {
+            localItem.size = diskItem.size;
+          }
         }
       }
       if (diskData.consumptionStats) {
@@ -3187,7 +3216,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
       const watchedFolder = this.data.settings.watchedFolder;
       if (watchedFolder) {
+        const initialLength = this.data.queue.length;
         this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, watchedFolder));
+        if (this.data.queue.length !== initialLength) {
+          this.markQueueChanged();
+        }
       }
       await this.saveData();
     }
@@ -3204,6 +3237,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const initialLength = this.data.queue.length;
     this.data.queue = this.data.queue.filter((item) => item.path !== path && !item.path.startsWith(path + "/"));
     if (this.data.queue.length !== initialLength) {
+      this.markQueueChanged();
       await this.saveData();
     }
   }
@@ -3257,6 +3291,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       if (deferDurationProbe) {
         this.queueDeferredMetadataHydration(file.path);
       }
+      this.markQueueChanged();
       if (shouldSave) {
         await this.saveData();
         new import_obsidian.Notice(`Added ${file.name} to queue`);
@@ -3431,6 +3466,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const item = this.data.queue[index2];
     this.data.queue.splice(index2, 1);
     this.data.queue.splice(newIndex2, 0, item);
+    this.markQueueChanged();
     await this.saveData();
   }
   async reorderItem(oldIndex2, newIndex2) {
@@ -3439,6 +3475,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const item = this.data.queue[oldIndex2];
     this.data.queue.splice(oldIndex2, 1);
     this.data.queue.splice(newIndex2, 0, item);
+    this.markQueueChanged();
     await this.saveData();
   }
   async sortQueue(by, order) {
@@ -3459,6 +3496,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         return order === "asc" ? 1 : -1;
       return 0;
     });
+    this.markQueueChanged();
     await this.saveData();
   }
   async cleanConsumedMedia() {
@@ -3491,6 +3529,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
     }
     this.data.queue = this.data.queue.filter((item) => item.status !== "completed" || !removedIds.has(item.id));
+    this.markQueueChanged();
     await this.saveData();
     if (failedCount > 0) {
       new import_obsidian.Notice(`Permanently deleted ${count} media file(s). ${failedCount} item(s) stayed in the queue because deletion failed.`);
@@ -3525,6 +3564,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return;
     }
     this.data.queue = this.data.queue.filter((i) => i.id !== item.id);
+    this.markQueueChanged();
     await this.saveData();
     new import_obsidian.Notice(`Permanently deleted: ${item.name}`);
     if (isCurrent) {
@@ -4538,7 +4578,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || !isFinite(this.videoEl.currentTime)) {
       return;
     }
-    this.currentItem.position = this.videoEl.currentTime;
     await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
   }
   async syncCompletionStatusFromPlayback() {
@@ -4675,7 +4714,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
     this.videoEl.ontimeupdate = async () => {
       if (this.currentItem && this.isCurrentPlaybackSource()) {
-        this.currentItem.position = this.videoEl.currentTime;
         const now = Date.now();
         if (now - this.lastEtcUpdate > 5e3) {
           this.lastEtcUpdate = now;
