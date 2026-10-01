@@ -56,6 +56,12 @@ export interface CrossPlayerData {
     settings: CrossPlayerSettings;
     queue: MediaItem[];
     queueUpdatedAt?: number;
+    // Paths (vault-relative) explicitly deleted on some device, with deletion
+    // timestamp (Date.now()). Used to stop stale peers from resurrecting
+    // queue items via whole-queue last-writer-wins. Synced via data.json.
+    // Entries older than 30 days are pruned; file existence always wins
+    // (recreated files clear their tombstone).
+    deletedPaths?: Record<string, number>;
     playbackSpeed: number;
     queueScrollTop?: number;
     consumptionStats?: Record<string, ConsumptionStatBucket>;

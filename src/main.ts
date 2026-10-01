@@ -97,6 +97,8 @@ export default class CrossPlayerPlugin extends Plugin {
     lastKnownDataSize: number = 0;
     isReloadingSyncedData: boolean = false;
     private saveDataChain: Promise<void> = Promise.resolve();
+    private saveInProgress: number = 0;
+    private pendingQueueChange: boolean = false;
     private deferredMetadataPaths: Set<string> = new Set();
     private deferredMetadataTimer: number | null = null;
     private isHydratingDeferredMetadata: boolean = false;
@@ -175,6 +177,65 @@ export default class CrossPlayerPlugin extends Plugin {
 
     markQueueChanged() {
         this.data.queueUpdatedAt = Date.now();
+        this.pendingQueueChange = true;
+    }
+
+    private hasUnsyncedChanges(): boolean {
+        return this.saveInProgress > 0
+            || this.pendingQueueChange
+            || this.pendingPlaybackStateKeys.size > 0;
+    }
+
+    private getDeletedPaths(): Record<string, number> {
+        if (!this.data.deletedPaths || typeof this.data.deletedPaths !== 'object') {
+            this.data.deletedPaths = {};
+        }
+        return this.data.deletedPaths as Record<string, number>;
+    }
+
+    private markPathDeleted(path: string, timestamp: number = Date.now()) {
+        const deleted = this.getDeletedPaths();
+        deleted[path] = Math.max(deleted[path] || 0, timestamp);
+        // Bound growth: keep at most 200 most recent entries.
+        const keys = Object.keys(deleted);
+        if (keys.length > 200) {
+            keys.sort((a, b) => (deleted[a] || 0) - (deleted[b] || 0));
+            for (let i = 0; i < keys.length - 200; i++) {
+                delete deleted[keys[i]];
+            }
+        }
+    }
+
+    private clearPathDeleted(path: string) {
+        const deleted = this.getDeletedPaths();
+        if (deleted[path] !== undefined) {
+            delete deleted[path];
+        }
+    }
+
+    private pruneDeletedPaths(maxAgeMs: number = 30 * 24 * 60 * 60 * 1000) {
+        const deleted = this.getDeletedPaths();
+        const cutoff = Date.now() - maxAgeMs;
+        for (const path of Object.keys(deleted)) {
+            if ((deleted[path] || 0) < cutoff) {
+                delete deleted[path];
+            }
+        }
+    }
+
+    private mergeDeletedPaths(diskDeleted?: Record<string, number>): Record<string, number> {
+        const local = this.getDeletedPaths();
+        const merged: Record<string, number> = { ...(diskDeleted ?? {}) };
+        for (const [path, ts] of Object.entries(local)) {
+            merged[path] = Math.max(merged[path] || 0, ts || 0);
+        }
+        this.data.deletedPaths = merged;
+        this.pruneDeletedPaths();
+        return this.getDeletedPaths();
+    }
+
+    private isPathTombstoned(path: string): boolean {
+        return this.getDeletedPaths()[path] !== undefined;
     }
 
     private async mergeFresherPlaybackStateFromDisk() {
@@ -192,6 +253,17 @@ export default class CrossPlayerPlugin extends Plugin {
             const diskQueueUpdatedAt = diskData.queueUpdatedAt || 0;
             const localQueueUpdatedAt = this.data.queueUpdatedAt || 0;
             const diskQueueIsNewer = diskQueueUpdatedAt > localQueueUpdatedAt;
+
+            // Union deletion tombstones so both sides learn about confirmed
+            // deletes even when the queue order itself loses LWW.
+            const mergedDeleted = this.mergeDeletedPaths(diskData.deletedPaths);
+            const isConfirmedDelete = (path: string): boolean => {
+                if (mergedDeleted[path] === undefined) return false;
+                // Only treat as confirmed delete when the file is actually
+                // gone from this vault. Missing-without-tombstone is left
+                // alone to survive partial sync (file not downloaded yet).
+                return !this.app.vault.getAbstractFileByPath(path);
+            };
 
             if (diskQueueIsNewer) {
                 for (const diskItem of diskData.queue) {
@@ -215,7 +287,9 @@ export default class CrossPlayerPlugin extends Plugin {
                         diskItem.size = localItem.size;
                     }
                 }
-                this.data.queue = diskData.queue;
+                this.data.queue = diskData.queue.filter(
+                    (item) => !isConfirmedDelete(item.path)
+                );
                 this.data.queueUpdatedAt = diskQueueUpdatedAt;
             } else {
                 for (const localItem of this.data.queue) {
@@ -227,7 +301,14 @@ export default class CrossPlayerPlugin extends Plugin {
                     const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
                     const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
 
-                    if (diskIsNewer || (!localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem))) {
+                    // Don't yank position out from under actively playing
+                    // media: the local player will save its own progress on
+                    // pause/close/throttle. Prevents mid-playback jumps when
+                    // a peer saves a newer timestamp for the same file.
+                    const isCurrentlyPlayingLocally = this.mainView?.currentItem?.id === localItem.id
+                        && !!this.mainView?.isActivelyPlayingLocally();
+
+                    if (!isCurrentlyPlayingLocally && (diskIsNewer || (!localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem)))) {
                         this.copyPlaybackState(localItem, diskItem);
                     }
 
@@ -238,6 +319,16 @@ export default class CrossPlayerPlugin extends Plugin {
                     if (!localItem.size && diskItem.size) {
                         localItem.size = diskItem.size;
                     }
+                }
+                // Drop locally queued items that a peer confirmed deleted
+                // (tombstoned + file actually gone). Keeps stale data.json
+                // from resurrecting cleaned files.
+                const beforePrune = this.data.queue.length;
+                this.data.queue = this.data.queue.filter(
+                    (item) => !isConfirmedDelete(item.path)
+                );
+                if (this.data.queue.length !== beforePrune) {
+                    this.pendingQueueChange = true;
                 }
             }
 
@@ -362,6 +453,14 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async reloadSyncedDataIfChanged(force: boolean = false) {
         if (this.isReloadingSyncedData) return;
+        // Never reload in the middle of a save: the on-disk read would be
+        // stale and loadData() would discard what we are writing.
+        if (this.saveInProgress > 0) return;
+        // Skip background reloads while local edits haven't been saved yet
+        // (delete/reorder in flight, position dirty). The next 5s tick or
+        // focus event retries after the save completes. Explicit force
+        // reloads (manual command) still go through.
+        if (!force && this.hasUnsyncedChanges()) return;
 
         const stat = await this.getPluginDataStat();
         const nextMtime = stat?.mtime ?? 0;
@@ -845,6 +944,14 @@ export default class CrossPlayerPlugin extends Plugin {
         // Ensure settings are definitely correct in data object
         this.data.settings = settings;
         this.data.consumptionStats = this.data.consumptionStats || {};
+        if (!this.data.deletedPaths || typeof this.data.deletedPaths !== 'object') {
+            this.data.deletedPaths = {};
+        }
+        // A fresh load means nothing is pending from the previous in-memory
+        // state: pending flags describe unsaved edits, which loadData()
+        // discards by definition. Guarded reloads already skip when dirty.
+        this.pendingPlaybackStateKeys.clear();
+        this.pendingQueueChange = false;
         if (settings.watchedFolder) {
             this.setLastGoodWatchedFolder(settings.watchedFolder);
         }
@@ -933,10 +1040,16 @@ export default class CrossPlayerPlugin extends Plugin {
         this.rememberQueueScrollPosition();
 
         const runSave = async (): Promise<void> => {
-            await this.mergeFresherPlaybackStateFromDisk();
-            await super.saveData(this.data);
-            await this.refreshTrackedDataFileState();
-            this.pendingPlaybackStateKeys.clear();
+            this.saveInProgress++;
+            try {
+                await this.mergeFresherPlaybackStateFromDisk();
+                await super.saveData(this.data);
+                await this.refreshTrackedDataFileState();
+                this.pendingPlaybackStateKeys.clear();
+                this.pendingQueueChange = false;
+            } finally {
+                this.saveInProgress--;
+            }
             if (refresh && this.listView) this.listView.refresh();
         };
 
@@ -1233,9 +1346,13 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         const initialLength = this.data.queue.length;
+        const removed = this.data.queue.filter(item => item.path === path || item.path.startsWith(path + "/"));
         this.data.queue = this.data.queue.filter(item => item.path !== path && !item.path.startsWith(path + "/"));
 
         if (this.data.queue.length !== initialLength) {
+            for (const item of removed) {
+                this.markPathDeleted(item.path);
+            }
             this.markQueueChanged();
             await this.saveData();
         }
@@ -1267,6 +1384,13 @@ export default class CrossPlayerPlugin extends Plugin {
 
         const ext = file.extension.toLowerCase();
         if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return false;
+
+        // File exists in the vault: ground truth wins. A previous delete
+        // tombstone for this path refers to an older incarnation, so clear
+        // it (re-downloaded / restored files queue normally again).
+        if (this.isPathTombstoned(file.path)) {
+            this.clearPathDeleted(file.path);
+        }
 
         // Check if already in queue
         let existing = this.data.queue.find(item => item.path === file.path);
@@ -1439,7 +1563,10 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     private async permanentlyDeleteVaultFile(file: TAbstractFile) {
-        await this.app.fileManager.trashFile(file);
+        // Always permanently delete: bypasses Obsidian trash and the user's
+        // trash setting so deleted media does not linger in .trash / system
+        // trash and cannot be re-synced back into the queue.
+        await this.app.vault.delete(file, true);
     }
 
     async playNextItem() {
@@ -1488,13 +1615,15 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async updatePosition(id: string, position: number, force: boolean = false) {
+    async updatePosition(id: string, position: number, force: boolean = false): Promise<boolean> {
         const item = this.data.queue.find(i => i.id === id);
         if (item && (force || Math.abs(item.position - position) > 1)) {
             item.position = position;
             this.markPlaybackStateChanged(item);
             await this.saveData(false);
+            return true;
         }
+        return false;
     }
 
     async moveItem(index: number, direction: number) {
@@ -1571,6 +1700,11 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         this.data.queue = this.data.queue.filter(item => item.status !== 'completed' || !removedIds.has(item.id));
+        for (const item of toRemove) {
+            if (removedIds.has(item.id)) {
+                this.markPathDeleted(item.path);
+            }
+        }
         this.markQueueChanged();
         await this.saveData();
         if (failedCount > 0) {
@@ -1615,6 +1749,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
         // Remove from queue
         this.data.queue = this.data.queue.filter(i => i.id !== item.id);
+        this.markPathDeleted(item.path);
         this.markQueueChanged();
         await this.saveData();
         new Notice(`Permanently deleted: ${item.name}`);
@@ -3057,12 +3192,12 @@ class CrossPlayerMainView extends ItemView {
         }
     }
 
-    async persistCurrentPlaybackPosition(force: boolean = false) {
+    async persistCurrentPlaybackPosition(force: boolean = false): Promise<boolean> {
         if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || !isFinite(this.videoEl.currentTime)) {
-            return;
+            return false;
         }
 
-        await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
+        return this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
     }
 
     async syncCompletionStatusFromPlayback() {
@@ -3240,8 +3375,13 @@ class CrossPlayerMainView extends ItemView {
                 }
 
                 if (now - this.lastPositionPersist > 5000) {
-                    this.lastPositionPersist = now;
-                    await this.persistCurrentPlaybackPosition();
+                    const saved = await this.persistCurrentPlaybackPosition();
+                    // Only advance the throttle when a save actually happened.
+                    // Previously the timer advanced even on no-op (<1s delta),
+                    // stretching the Android kill loss window to ~10s.
+                    if (saved) {
+                        this.lastPositionPersist = now;
+                    }
                 }
 
                 // Throttled Progress Bar update (every 1s)

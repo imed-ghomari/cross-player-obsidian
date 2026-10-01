@@ -2320,6 +2320,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.lastKnownDataSize = 0;
     this.isReloadingSyncedData = false;
     this.saveDataChain = Promise.resolve();
+    this.saveInProgress = 0;
+    this.pendingQueueChange = false;
     this.deferredMetadataPaths = /* @__PURE__ */ new Set();
     this.deferredMetadataTimer = null;
     this.isHydratingDeferredMetadata = false;
@@ -2385,9 +2387,58 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   markQueueChanged() {
     this.data.queueUpdatedAt = Date.now();
+    this.pendingQueueChange = true;
+  }
+  hasUnsyncedChanges() {
+    return this.saveInProgress > 0 || this.pendingQueueChange || this.pendingPlaybackStateKeys.size > 0;
+  }
+  getDeletedPaths() {
+    if (!this.data.deletedPaths || typeof this.data.deletedPaths !== "object") {
+      this.data.deletedPaths = {};
+    }
+    return this.data.deletedPaths;
+  }
+  markPathDeleted(path, timestamp = Date.now()) {
+    const deleted = this.getDeletedPaths();
+    deleted[path] = Math.max(deleted[path] || 0, timestamp);
+    const keys = Object.keys(deleted);
+    if (keys.length > 200) {
+      keys.sort((a, b) => (deleted[a] || 0) - (deleted[b] || 0));
+      for (let i = 0; i < keys.length - 200; i++) {
+        delete deleted[keys[i]];
+      }
+    }
+  }
+  clearPathDeleted(path) {
+    const deleted = this.getDeletedPaths();
+    if (deleted[path] !== void 0) {
+      delete deleted[path];
+    }
+  }
+  pruneDeletedPaths(maxAgeMs = 30 * 24 * 60 * 60 * 1e3) {
+    const deleted = this.getDeletedPaths();
+    const cutoff = Date.now() - maxAgeMs;
+    for (const path of Object.keys(deleted)) {
+      if ((deleted[path] || 0) < cutoff) {
+        delete deleted[path];
+      }
+    }
+  }
+  mergeDeletedPaths(diskDeleted) {
+    const local = this.getDeletedPaths();
+    const merged = { ...diskDeleted != null ? diskDeleted : {} };
+    for (const [path, ts] of Object.entries(local)) {
+      merged[path] = Math.max(merged[path] || 0, ts || 0);
+    }
+    this.data.deletedPaths = merged;
+    this.pruneDeletedPaths();
+    return this.getDeletedPaths();
+  }
+  isPathTombstoned(path) {
+    return this.getDeletedPaths()[path] !== void 0;
   }
   async mergeFresherPlaybackStateFromDisk() {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e, _f;
     const stat = await this.getPluginDataStat();
     const nextMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
     const nextSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
@@ -2402,6 +2453,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const diskQueueUpdatedAt = diskData.queueUpdatedAt || 0;
       const localQueueUpdatedAt = this.data.queueUpdatedAt || 0;
       const diskQueueIsNewer = diskQueueUpdatedAt > localQueueUpdatedAt;
+      const mergedDeleted = this.mergeDeletedPaths(diskData.deletedPaths);
+      const isConfirmedDelete = (path) => {
+        if (mergedDeleted[path] === void 0)
+          return false;
+        return !this.app.vault.getAbstractFileByPath(path);
+      };
       if (diskQueueIsNewer) {
         for (const diskItem of diskData.queue) {
           const localItem = this.findMatchingQueueItem(this.data.queue, diskItem);
@@ -2421,7 +2478,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             diskItem.size = localItem.size;
           }
         }
-        this.data.queue = diskData.queue;
+        this.data.queue = diskData.queue.filter(
+          (item) => !isConfirmedDelete(item.path)
+        );
         this.data.queueUpdatedAt = diskQueueUpdatedAt;
       } else {
         for (const localItem of this.data.queue) {
@@ -2432,7 +2491,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
           const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
           const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
-          if (diskIsNewer || !localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem)) {
+          const isCurrentlyPlayingLocally = ((_d = (_c = this.mainView) == null ? void 0 : _c.currentItem) == null ? void 0 : _d.id) === localItem.id && !!((_e = this.mainView) == null ? void 0 : _e.isActivelyPlayingLocally());
+          if (!isCurrentlyPlayingLocally && (diskIsNewer || !localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem))) {
             this.copyPlaybackState(localItem, diskItem);
           }
           if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration && diskItem.duration > 0) {
@@ -2442,9 +2502,16 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             localItem.size = diskItem.size;
           }
         }
+        const beforePrune = this.data.queue.length;
+        this.data.queue = this.data.queue.filter(
+          (item) => !isConfirmedDelete(item.path)
+        );
+        if (this.data.queue.length !== beforePrune) {
+          this.pendingQueueChange = true;
+        }
       }
       if (diskData.consumptionStats) {
-        this.data.consumptionStats = Object.assign({}, diskData.consumptionStats, (_c = this.data.consumptionStats) != null ? _c : {});
+        this.data.consumptionStats = Object.assign({}, diskData.consumptionStats, (_f = this.data.consumptionStats) != null ? _f : {});
       }
     } catch (error) {
       console.warn("[Cross Player] Failed to merge synced playback state before save", error);
@@ -2551,6 +2618,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async reloadSyncedDataIfChanged(force = false) {
     var _a, _b;
     if (this.isReloadingSyncedData)
+      return;
+    if (this.saveInProgress > 0)
+      return;
+    if (!force && this.hasUnsyncedChanges())
       return;
     const stat = await this.getPluginDataStat();
     const nextMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
@@ -2953,6 +3024,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }, loaded);
     this.data.settings = settings;
     this.data.consumptionStats = this.data.consumptionStats || {};
+    if (!this.data.deletedPaths || typeof this.data.deletedPaths !== "object") {
+      this.data.deletedPaths = {};
+    }
+    this.pendingPlaybackStateKeys.clear();
+    this.pendingQueueChange = false;
     if (settings.watchedFolder) {
       this.setLastGoodWatchedFolder(settings.watchedFolder);
     }
@@ -3021,10 +3097,16 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   async saveData(refresh = true) {
     this.rememberQueueScrollPosition();
     const runSave = async () => {
-      await this.mergeFresherPlaybackStateFromDisk();
-      await super.saveData(this.data);
-      await this.refreshTrackedDataFileState();
-      this.pendingPlaybackStateKeys.clear();
+      this.saveInProgress++;
+      try {
+        await this.mergeFresherPlaybackStateFromDisk();
+        await super.saveData(this.data);
+        await this.refreshTrackedDataFileState();
+        this.pendingPlaybackStateKeys.clear();
+        this.pendingQueueChange = false;
+      } finally {
+        this.saveInProgress--;
+      }
       if (refresh && this.listView)
         this.listView.refresh();
     };
@@ -3237,8 +3319,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
     }
     const initialLength = this.data.queue.length;
+    const removed = this.data.queue.filter((item) => item.path === path || item.path.startsWith(path + "/"));
     this.data.queue = this.data.queue.filter((item) => item.path !== path && !item.path.startsWith(path + "/"));
     if (this.data.queue.length !== initialLength) {
+      for (const item of removed) {
+        this.markPathDeleted(item.path);
+      }
       this.markQueueChanged();
       await this.saveData();
     }
@@ -3265,6 +3351,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const ext = file.extension.toLowerCase();
     if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext))
       return false;
+    if (this.isPathTombstoned(file.path)) {
+      this.clearPathDeleted(file.path);
+    }
     let existing = this.data.queue.find((item) => item.path === file.path);
     if (!existing) {
       const deferDurationProbe = this.shouldDeferMetadataProbe();
@@ -3407,7 +3496,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async permanentlyDeleteVaultFile(file) {
-    await this.app.fileManager.trashFile(file);
+    await this.app.vault.delete(file, true);
   }
   async playNextItem() {
     this.rememberQueueScrollPosition();
@@ -3459,7 +3548,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       item.position = position;
       this.markPlaybackStateChanged(item);
       await this.saveData(false);
+      return true;
     }
+    return false;
   }
   async moveItem(index2, direction) {
     const newIndex2 = index2 + direction;
@@ -3531,6 +3622,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
     }
     this.data.queue = this.data.queue.filter((item) => item.status !== "completed" || !removedIds.has(item.id));
+    for (const item of toRemove) {
+      if (removedIds.has(item.id)) {
+        this.markPathDeleted(item.path);
+      }
+    }
     this.markQueueChanged();
     await this.saveData();
     if (failedCount > 0) {
@@ -3566,6 +3662,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return;
     }
     this.data.queue = this.data.queue.filter((i) => i.id !== item.id);
+    this.markPathDeleted(item.path);
     this.markQueueChanged();
     await this.saveData();
     new import_obsidian.Notice(`Permanently deleted: ${item.name}`);
@@ -4578,9 +4675,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
   }
   async persistCurrentPlaybackPosition(force = false) {
     if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || !isFinite(this.videoEl.currentTime)) {
-      return;
+      return false;
     }
-    await this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
+    return this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
   }
   async syncCompletionStatusFromPlayback() {
     if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || this.currentItem.status === "completed" || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
@@ -4724,8 +4821,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           }
         }
         if (now - this.lastPositionPersist > 5e3) {
-          this.lastPositionPersist = now;
-          await this.persistCurrentPlaybackPosition();
+          const saved = await this.persistCurrentPlaybackPosition();
+          if (saved) {
+            this.lastPositionPersist = now;
+          }
         }
         if (now - this.lastProgressUpdate > 1e3) {
           this.lastProgressUpdate = now;
