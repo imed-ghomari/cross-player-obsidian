@@ -2359,6 +2359,23 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const runtimeWindow = window;
     return typeof runtimeWindow.require === "function" ? runtimeWindow.require : null;
   }
+  getNodeProcess() {
+    const holder = globalThis;
+    const proc = holder.process;
+    if (!proc || typeof proc !== "object")
+      return null;
+    const record = proc;
+    const env = {};
+    const rawEnv = record["env"];
+    if (rawEnv && typeof rawEnv === "object") {
+      for (const key of Object.keys(rawEnv)) {
+        const value = rawEnv[key];
+        env[key] = typeof value === "string" ? value : void 0;
+      }
+    }
+    const platformRaw = record["platform"];
+    return { env, platform: typeof platformRaw === "string" ? platformRaw : "" };
+  }
   getMediaItemKeys(item) {
     return [`id:${item.id}`, `path:${item.path}`];
   }
@@ -2427,8 +2444,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   mergeDeletedPaths(diskDeleted) {
     const local = this.getDeletedPaths();
     const merged = { ...diskDeleted != null ? diskDeleted : {} };
-    for (const [path, ts] of Object.entries(local)) {
-      merged[path] = Math.max(merged[path] || 0, ts || 0);
+    for (const path of Object.keys(local)) {
+      const ts = local[path] || 0;
+      merged[path] = Math.max(merged[path] || 0, ts);
     }
     this.data.deletedPaths = merged;
     this.pruneDeletedPaths();
@@ -2719,7 +2737,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       id: "test-yt-dlp",
       name: "Test yt-dlp Configuration",
       callback: async () => {
-        var _a, _b, _c;
+        var _a, _b, _c, _d;
         if (!import_obsidian.Platform.isDesktop) {
           new import_obsidian.Notice("This command is only available on Desktop.");
           return;
@@ -2733,10 +2751,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             new import_obsidian.Notice("Desktop process access is unavailable in this build.");
             return;
           }
-          const env = { ...process.env };
-          if (import_obsidian.Platform.isDesktop && process.platform === "darwin") {
+          const nodeProcess = this.getNodeProcess();
+          const env = { ...(_a = nodeProcess == null ? void 0 : nodeProcess.env) != null ? _a : {} };
+          if (import_obsidian.Platform.isDesktop && (nodeProcess == null ? void 0 : nodeProcess.platform) === "darwin") {
             const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-            env.PATH = extraPaths.join(":") + (env.PATH ? ":" + env.PATH : "");
+            env["PATH"] = extraPaths.join(":") + (env["PATH"] ? ":" + env["PATH"] : "");
           }
           const { jsRuntimePath } = this.data.settings;
           const testArgs = ["--version"];
@@ -2746,14 +2765,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             testArgs.push("--js-runtimes", "node");
           }
           const child = spawn(ytPath, testArgs, { env });
-          (_a = child.stdout) == null ? void 0 : _a.on("data", (data) => {
+          (_b = child.stdout) == null ? void 0 : _b.on("data", (data) => {
             const version2 = data.toString().trim();
             new import_obsidian.Notice(`yt-dlp version: ${version2}`);
             if (version2.startsWith("2021") || version2.startsWith("2022") || version2.startsWith("2023")) {
               new import_obsidian.Notice("\u26A0\uFE0F Your yt-dlp is very old! Please update it.");
             }
           });
-          (_b = child.stderr) == null ? void 0 : _b.on("data", (data) => {
+          (_c = child.stderr) == null ? void 0 : _c.on("data", (data) => {
             new import_obsidian.Notice(`yt-dlp error: ${data.toString()}`);
           });
           child.on("error", (err) => {
@@ -2765,7 +2784,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             ffmpegChild.on("error", () => {
               new import_obsidian.Notice(`\u26A0\uFE0F FFmpeg not found at: ${ffmpegPath}`);
             });
-            (_c = ffmpegChild.stdout) == null ? void 0 : _c.on("data", (data) => {
+            (_d = ffmpegChild.stdout) == null ? void 0 : _d.on("data", (data) => {
               if (data.toString().includes("ffmpeg version")) {
               }
             });
@@ -3015,13 +3034,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         settings.watchedFolder = backupWatchedFolder;
       }
     }
-    this.data = Object.assign({
+    const baseData = {
       settings,
       queue: [],
       // Initialize playbackSpeed with default if not present
       playbackSpeed: settings.defaultPlaybackSpeed,
       consumptionStats: {}
-    }, loaded);
+    };
+    this.data = Object.assign(baseData, loaded);
     this.data.settings = settings;
     this.data.consumptionStats = this.data.consumptionStats || {};
     if (!this.data.deletedPaths || typeof this.data.deletedPaths !== "object") {
@@ -3181,7 +3201,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async getMediaDuration(file) {
     return new Promise((resolve) => {
-      const video = activeDocument.createElement("video");
+      const video = activeDocument.createEl("video");
       video.preload = "metadata";
       video.onloadedmetadata = () => {
         resolve(video.duration);
@@ -3229,8 +3249,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           this.scheduleDeferredMetadataHydration(3e3);
           break;
         }
-        const nextPath = this.deferredMetadataPaths.values().next().value;
-        if (!nextPath)
+        let nextPath;
+        this.deferredMetadataPaths.forEach((path) => {
+          if (nextPath === void 0)
+            nextPath = path;
+        });
+        if (nextPath === void 0)
           break;
         this.deferredMetadataPaths.delete(nextPath);
         const file = this.app.vault.getAbstractFileByPath(nextPath);
@@ -3347,7 +3371,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       return false;
     if (!this.isPathInsideWatchedFolder(file.path, folderPath))
       return false;
-    console.log(`[Cross Player] processing: ${file.path}`);
     const ext = file.extension.toLowerCase();
     if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext))
       return false;
@@ -3739,7 +3762,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async startDownload(link, quality, type, cwd, existingId) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f;
     if (!import_obsidian.Platform.isDesktop)
       return;
     const { youtubeDlpPath, ffmpegPath, jsRuntimePath } = this.data.settings;
@@ -3809,15 +3832,15 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
         return;
       }
-      console.log(`[Cross Player] Spawning in ${cwd}: ${ytPath} ${args.join(" ")}`);
-      const env = { ...process.env };
-      if (import_obsidian.Platform.isDesktop && process.platform === "darwin") {
+      const nodeProcess = this.getNodeProcess();
+      const env = { ...(_c = nodeProcess == null ? void 0 : nodeProcess.env) != null ? _c : {} };
+      if (import_obsidian.Platform.isDesktop && (nodeProcess == null ? void 0 : nodeProcess.platform) === "darwin") {
         const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-        env.PATH = extraPaths.join(":") + (env.PATH ? ":" + env.PATH : "");
+        env["PATH"] = extraPaths.join(":") + (env["PATH"] ? ":" + env["PATH"] : "");
       }
       const child = spawn(ytPath, args, { cwd, env });
       downloadStatus.childProcess = child;
-      (_c = child.stdout) == null ? void 0 : _c.on("data", (data) => {
+      (_d = child.stdout) == null ? void 0 : _d.on("data", (data) => {
         var _a2, _b2, _c2, _d2;
         const lines = data.toString().split("\n");
         for (const line of lines) {
@@ -3873,7 +3896,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           }
         }
       });
-      (_d = child.stderr) == null ? void 0 : _d.on("data", (data) => {
+      (_e = child.stderr) == null ? void 0 : _e.on("data", (data) => {
         var _a2;
         const errorMsg = data.toString();
         console.error(`yt-dlp stderr: ${errorMsg}`);
@@ -3897,7 +3920,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         if (code === 0) {
           downloadStatus.status = "completed";
           downloadStatus.progress = "100%";
-          console.log(`Download completed for: ${downloadStatus.name}`);
           const { watchedFolder } = this.data.settings;
           if (watchedFolder) {
             window.setTimeout(() => {
@@ -3923,7 +3945,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(`Failed to download: ${link}`);
       downloadStatus.status = "error";
       downloadStatus.error = "Failed to start";
-      (_e = this.listView) == null ? void 0 : _e.updateDownloadProgress();
+      (_f = this.listView) == null ? void 0 : _f.updateDownloadProgress();
     }
   }
   cancelDownload(id) {
@@ -3950,7 +3972,12 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   retryDownload(id) {
     const dl = this.activeDownloads.find((d) => d.id === id);
     if (dl && dl.status === "error") {
-      const { url, quality, type } = dl.params;
+      const params = dl.params;
+      if (!params)
+        return;
+      const url = params.url;
+      const quality = params.quality;
+      const type = params.type;
       const { downloadFolder, watchedFolder } = this.data.settings;
       const targetFolder = downloadFolder || watchedFolder;
       const absolutePath = this.buildAbsoluteVaultPath(targetFolder);
@@ -4115,91 +4142,119 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
   }
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("Playback").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root).").addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
+  // Each wire method attaches only the controls for one row. display()
+  // (pre-1.13) and getSettingDefinitions() render callbacks (1.13+)
+  // share them, so both paths behave identically.
+  wireWatchedFolderRow(setting) {
+    setting.addText((text) => text.setPlaceholder("No folder set").setValue(this.plugin.data.settings.watchedFolder).setDisabled(true)).addButton((button) => button.setButtonText("Set Watched Folder").onClick(() => {
       new FolderSuggestModal(this.app, this.plugin).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets.").addSlider((slider) => slider.setLimits(0.5, 5, 0.1).setValue(this.plugin.data.settings.defaultPlaybackSpeed).onChange(async (value) => {
+  }
+  wirePlaybackSpeedRow(setting) {
+    setting.addSlider((slider) => slider.setLimits(0.5, 5, 0.1).setValue(this.plugin.data.settings.defaultPlaybackSpeed).onChange(async (value) => {
       this.plugin.data.settings.defaultPlaybackSpeed = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Seek Forward Seconds").setDesc("Number of seconds to seek forward.").addText((text) => text.setValue(String(this.plugin.data.settings.seekSecondsForward)).onChange(async (value) => {
+  }
+  wireSeekForwardRow(setting) {
+    setting.addText((text) => text.setValue(String(this.plugin.data.settings.seekSecondsForward)).onChange(async (value) => {
       const parsed = parseInt(value);
       if (!isNaN(parsed) && parsed > 0) {
         this.plugin.data.settings.seekSecondsForward = parsed;
         await this.plugin.saveData();
       }
     }));
-    new import_obsidian.Setting(containerEl).setName("Seek Backward Seconds").setDesc("Number of seconds to seek backward.").addText((text) => text.setValue(String(this.plugin.data.settings.seekSecondsBackward)).onChange(async (value) => {
+  }
+  wireSeekBackwardRow(setting) {
+    setting.addText((text) => text.setValue(String(this.plugin.data.settings.seekSecondsBackward)).onChange(async (value) => {
       const parsed = parseInt(value);
       if (!isNaN(parsed) && parsed > 0) {
         this.plugin.data.settings.seekSecondsBackward = parsed;
         await this.plugin.saveData();
       }
     }));
-    new import_obsidian.Setting(containerEl).setName("Show Media Indicator").setDesc("Show audio/video icon in the queue list.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.showMediaIndicator).onChange(async (value) => {
+  }
+  wireMediaIndicatorRow(setting) {
+    setting.addToggle((toggle) => toggle.setValue(this.plugin.data.settings.showMediaIndicator).onChange(async (value) => {
       this.plugin.data.settings.showMediaIndicator = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Show Progress Color in Queue").setDesc("Color the queue items based on playback progress.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.showProgressColor).onChange(async (value) => {
+  }
+  wireProgressColorRow(setting) {
+    setting.addToggle((toggle) => toggle.setValue(this.plugin.data.settings.showProgressColor).onChange(async (value) => {
       var _a;
       this.plugin.data.settings.showProgressColor = value;
       await this.plugin.saveData();
       (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
     }));
-    new import_obsidian.Setting(containerEl).setName("Autoplay Next Video").setDesc("Automatically play the next video in the queue when the current one finishes.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.autoplayNext).onChange(async (value) => {
+  }
+  wireAutoplayRow(setting) {
+    setting.addToggle((toggle) => toggle.setValue(this.plugin.data.settings.autoplayNext).onChange(async (value) => {
       this.plugin.data.settings.autoplayNext = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Pause on Mobile Tap").setDesc("Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.pauseOnMobileTap).onChange(async (value) => {
+  }
+  wirePauseOnTapRow(setting) {
+    setting.addToggle((toggle) => toggle.setValue(this.plugin.data.settings.pauseOnMobileTap).onChange(async (value) => {
       this.plugin.data.settings.pauseOnMobileTap = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Wrap Queue Item Text").setDesc("Show full queue item names on multiple lines instead of truncating them.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.wrapQueueText).onChange(async (value) => {
+  }
+  wireWrapTextRow(setting) {
+    setting.addToggle((toggle) => toggle.setValue(this.plugin.data.settings.wrapQueueText).onChange(async (value) => {
       var _a;
       this.plugin.data.settings.wrapQueueText = value;
       await this.plugin.saveData();
       (_a = this.plugin.listView) == null ? void 0 : _a.refresh();
     }));
-    new import_obsidian.Setting(containerEl).setName("Audio").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion.").addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).onChange(async (value) => {
+  }
+  wireVolumeBoostRow(setting) {
+    setting.addSlider((slider) => slider.setLimits(100, 300, 10).setValue(this.plugin.data.settings.volumeBoostPercent).onChange(async (value) => {
       var _a;
       this.plugin.data.settings.volumeBoostPercent = value;
       await this.plugin.saveData(false);
       (_a = this.plugin.mainView) == null ? void 0 : _a.applyAudioSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Sound Normalization").setDesc("Apply dynamic range compression to make low-volume media easier to hear.").addToggle((toggle) => toggle.setValue(this.plugin.data.settings.soundNormalization).onChange(async (value) => {
+  }
+  wireSoundNormalizationRow(setting) {
+    setting.addToggle((toggle) => toggle.setValue(this.plugin.data.settings.soundNormalization).onChange(async (value) => {
       var _a;
       this.plugin.data.settings.soundNormalization = value;
       await this.plugin.saveData(false);
       (_a = this.plugin.mainView) == null ? void 0 : _a.applyAudioSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Consumption Statistics").setHeading();
-    const allTime = this.plugin.getConsumptionSummary();
-    new import_obsidian.Setting(containerEl).setName("Usage Summary").setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`).addButton((button) => button.setButtonText("View Statistics").onClick(() => {
+  }
+  wireUsageSummaryRow(setting) {
+    setting.addButton((button) => button.setButtonText("View Statistics").onClick(() => {
       new ConsumptionStatsModal(this.app, this.plugin).open();
     }));
-    new import_obsidian.Setting(containerEl).setName("Downloads & Storage").setHeading();
-    new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).').addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
+  }
+  wireYtDlpPathRow(setting) {
+    setting.addText((text) => text.setValue(this.plugin.data.settings.youtubeDlpPath).onChange(async (value) => {
       this.plugin.data.settings.youtubeDlpPath = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("FFmpeg Binary Path").setDesc("Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.").addText((text) => text.setValue(this.plugin.data.settings.ffmpegPath).onChange(async (value) => {
+  }
+  wireFfmpegPathRow(setting) {
+    setting.addText((text) => text.setValue(this.plugin.data.settings.ffmpegPath).onChange(async (value) => {
       this.plugin.data.settings.ffmpegPath = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("JS Runtime Path").setDesc("Absolute path to node, deno or bun (required for YouTube signature extraction).").addText((text) => text.setPlaceholder("e.g. /usr/local/bin/node").setValue(this.plugin.data.settings.jsRuntimePath).onChange(async (value) => {
+  }
+  wireJsRuntimeRow(setting) {
+    setting.addText((text) => text.setPlaceholder("e.g. /usr/local/bin/node").setValue(this.plugin.data.settings.jsRuntimePath).onChange(async (value) => {
       this.plugin.data.settings.jsRuntimePath = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Download Folder").setDesc("Folder to save downloads (relative to vault). Leave empty to use Watched Folder.").addText((text) => text.setValue(this.plugin.data.settings.downloadFolder).onChange(async (value) => {
+  }
+  wireDownloadFolderRow(setting) {
+    setting.addText((text) => text.setValue(this.plugin.data.settings.downloadFolder).onChange(async (value) => {
       this.plugin.data.settings.downloadFolder = value;
       await this.plugin.saveData();
     }));
-    new import_obsidian.Setting(containerEl).setName("Storage Limit (GB)").setDesc("Manual storage limit in Gigabytes.").addText((text) => text.setPlaceholder("10").setValue(String(this.plugin.data.settings.storageLimitGB || 10)).onChange(async (value) => {
+  }
+  wireStorageLimitRow(setting) {
+    setting.addText((text) => text.setPlaceholder("10").setValue(String(this.plugin.data.settings.storageLimitGB || 10)).onChange(async (value) => {
       const limit = parseFloat(value);
       if (!isNaN(limit) && limit > 0) {
         this.plugin.data.settings.storageLimitGB = limit;
@@ -4207,6 +4262,82 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
         void this.plugin.calculateDynamicLimit();
       }
     }));
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    new import_obsidian.Setting(containerEl).setName("Playback").setHeading();
+    this.wireWatchedFolderRow(new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root)."));
+    this.wirePlaybackSpeedRow(new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets."));
+    this.wireSeekForwardRow(new import_obsidian.Setting(containerEl).setName("Seek Forward Seconds").setDesc("Number of seconds to seek forward."));
+    this.wireSeekBackwardRow(new import_obsidian.Setting(containerEl).setName("Seek Backward Seconds").setDesc("Number of seconds to seek backward."));
+    this.wireMediaIndicatorRow(new import_obsidian.Setting(containerEl).setName("Show Media Indicator").setDesc("Show audio/video icon in the queue list."));
+    this.wireProgressColorRow(new import_obsidian.Setting(containerEl).setName("Show Progress Color in Queue").setDesc("Color the queue items based on playback progress."));
+    this.wireAutoplayRow(new import_obsidian.Setting(containerEl).setName("Autoplay Next Video").setDesc("Automatically play the next video in the queue when the current one finishes."));
+    this.wirePauseOnTapRow(new import_obsidian.Setting(containerEl).setName("Pause on Mobile Tap").setDesc("Pause the player when tapping the video on mobile. If disabled, tapping only shows controls."));
+    this.wireWrapTextRow(new import_obsidian.Setting(containerEl).setName("Wrap Queue Item Text").setDesc("Show full queue item names on multiple lines instead of truncating them."));
+    new import_obsidian.Setting(containerEl).setName("Audio").setHeading();
+    this.wireVolumeBoostRow(new import_obsidian.Setting(containerEl).setName("Volume Boost").setDesc("Boost playback above 100% for quiet media. Higher values may cause distortion."));
+    this.wireSoundNormalizationRow(new import_obsidian.Setting(containerEl).setName("Sound Normalization").setDesc("Apply dynamic range compression to make low-volume media easier to hear."));
+    new import_obsidian.Setting(containerEl).setName("Consumption Statistics").setHeading();
+    const allTime = this.plugin.getConsumptionSummary();
+    this.wireUsageSummaryRow(new import_obsidian.Setting(containerEl).setName("Usage Summary").setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`));
+    new import_obsidian.Setting(containerEl).setName("Downloads & Storage").setHeading();
+    this.wireYtDlpPathRow(new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).'));
+    this.wireFfmpegPathRow(new import_obsidian.Setting(containerEl).setName("FFmpeg Binary Path").setDesc("Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed."));
+    this.wireJsRuntimeRow(new import_obsidian.Setting(containerEl).setName("JS Runtime Path").setDesc("Absolute path to node, deno or bun (required for YouTube signature extraction)."));
+    this.wireDownloadFolderRow(new import_obsidian.Setting(containerEl).setName("Download Folder").setDesc("Folder to save downloads (relative to vault). Leave empty to use Watched Folder."));
+    this.wireStorageLimitRow(new import_obsidian.Setting(containerEl).setName("Storage Limit (GB)").setDesc("Manual storage limit in Gigabytes."));
+  }
+  // Declarative settings for Obsidian 1.13+ settings search. Each row
+  // reuses the same wire methods as display(), so the rendered controls
+  // behave identically. display() above remains the renderer on
+  // pre-1.13 clients (dual support, minAppVersion unchanged).
+  getSettingDefinitions() {
+    const allTime = this.plugin.getConsumptionSummary();
+    return [
+      {
+        type: "group",
+        heading: "Playback",
+        items: [
+          { name: "Watched Folder", desc: "Current watched folder path (relative to vault root).", render: (setting) => this.wireWatchedFolderRow(setting) },
+          { name: "Default Playback Speed", desc: "The default speed when the player starts or resets.", render: (setting) => this.wirePlaybackSpeedRow(setting) },
+          { name: "Seek Forward Seconds", desc: "Number of seconds to seek forward.", render: (setting) => this.wireSeekForwardRow(setting) },
+          { name: "Seek Backward Seconds", desc: "Number of seconds to seek backward.", render: (setting) => this.wireSeekBackwardRow(setting) },
+          { name: "Show Media Indicator", desc: "Show audio/video icon in the queue list.", render: (setting) => this.wireMediaIndicatorRow(setting) },
+          { name: "Show Progress Color in Queue", desc: "Color the queue items based on playback progress.", render: (setting) => this.wireProgressColorRow(setting) },
+          { name: "Autoplay Next Video", desc: "Automatically play the next video in the queue when the current one finishes.", render: (setting) => this.wireAutoplayRow(setting) },
+          { name: "Pause on Mobile Tap", desc: "Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.", render: (setting) => this.wirePauseOnTapRow(setting) },
+          { name: "Wrap Queue Item Text", desc: "Show full queue item names on multiple lines instead of truncating them.", render: (setting) => this.wireWrapTextRow(setting) }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Audio",
+        items: [
+          { name: "Volume Boost", desc: "Boost playback above 100% for quiet media. Higher values may cause distortion.", render: (setting) => this.wireVolumeBoostRow(setting) },
+          { name: "Sound Normalization", desc: "Apply dynamic range compression to make low-volume media easier to hear.", render: (setting) => this.wireSoundNormalizationRow(setting) }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Consumption Statistics",
+        items: [
+          { name: "Usage Summary", desc: `${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`, render: (setting) => this.wireUsageSummaryRow(setting) }
+        ]
+      },
+      {
+        type: "group",
+        heading: "Downloads & Storage",
+        items: [
+          { name: "yt-dlp Binary Path", desc: 'Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).', render: (setting) => this.wireYtDlpPathRow(setting) },
+          { name: "FFmpeg Binary Path", desc: "Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.", render: (setting) => this.wireFfmpegPathRow(setting) },
+          { name: "JS Runtime Path", desc: "Absolute path to node, deno or bun (required for YouTube signature extraction).", render: (setting) => this.wireJsRuntimeRow(setting) },
+          { name: "Download Folder", desc: "Folder to save downloads (relative to vault). Leave empty to use Watched Folder.", render: (setting) => this.wireDownloadFolderRow(setting) },
+          { name: "Storage Limit (GB)", desc: "Manual storage limit in Gigabytes.", render: (setting) => this.wireStorageLimitRow(setting) }
+        ]
+      }
+    ];
   }
 };
 var CrossPlayerListView = class extends import_obsidian.ItemView {
@@ -5212,9 +5343,13 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     const minutes = Math.floor(totalSeconds % 3600 / 60);
     const secs = totalSeconds % 60;
     if (hours > 0) {
-      return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+      return `${hours}:${this.padTimeUnit(minutes)}:${this.padTimeUnit(secs)}`;
     }
-    return `${minutes}:${secs.toString().padStart(2, "0")}`;
+    return `${minutes}:${this.padTimeUnit(secs)}`;
+  }
+  padTimeUnit(value) {
+    const text = `0${value}`;
+    return text.slice(text.length - 2);
   }
   ensureAudioNodes() {
     var _a;

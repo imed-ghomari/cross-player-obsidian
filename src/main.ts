@@ -45,6 +45,11 @@ interface ChildProcessModule {
     spawn: SpawnFunction;
 }
 
+interface NodeProcessInfo {
+    env: Record<string, string | undefined>;
+    platform: string;
+}
+
 interface AudioContextWindow extends Window {
     AudioContext?: typeof AudioContext;
     webkitAudioContext?: typeof AudioContext;
@@ -138,6 +143,26 @@ export default class CrossPlayerPlugin extends Plugin {
         return typeof runtimeWindow.require === 'function' ? runtimeWindow.require : null;
     }
 
+    private getNodeProcess(): NodeProcessInfo | null {
+        // Read the Node.js process object without referencing the `process`
+        // global directly, so TypeScript never resolves it as `any`
+        // (community review: no-unsafe-member-access on process.env).
+        const holder = globalThis as unknown as { process?: unknown };
+        const proc = holder.process;
+        if (!proc || typeof proc !== 'object') return null;
+        const record = proc as Record<string, unknown>;
+        const env: Record<string, string | undefined> = {};
+        const rawEnv = record['env'];
+        if (rawEnv && typeof rawEnv === 'object') {
+            for (const key of Object.keys(rawEnv)) {
+                const value: unknown = (rawEnv as Record<string, unknown>)[key];
+                env[key] = typeof value === 'string' ? value : undefined;
+            }
+        }
+        const platformRaw: unknown = record['platform'];
+        return { env, platform: typeof platformRaw === 'string' ? platformRaw : '' };
+    }
+
     private getMediaItemKeys(item: MediaItem): string[] {
         return [`id:${item.id}`, `path:${item.path}`];
     }
@@ -190,7 +215,7 @@ export default class CrossPlayerPlugin extends Plugin {
         if (!this.data.deletedPaths || typeof this.data.deletedPaths !== 'object') {
             this.data.deletedPaths = {};
         }
-        return this.data.deletedPaths as Record<string, number>;
+        return this.data.deletedPaths;
     }
 
     private markPathDeleted(path: string, timestamp: number = Date.now()) {
@@ -226,8 +251,9 @@ export default class CrossPlayerPlugin extends Plugin {
     private mergeDeletedPaths(diskDeleted?: Record<string, number>): Record<string, number> {
         const local = this.getDeletedPaths();
         const merged: Record<string, number> = { ...(diskDeleted ?? {}) };
-        for (const [path, ts] of Object.entries(local)) {
-            merged[path] = Math.max(merged[path] || 0, ts || 0);
+        for (const path of Object.keys(local)) {
+            const ts: number = local[path] || 0;
+            merged[path] = Math.max(merged[path] || 0, ts);
         }
         this.data.deletedPaths = merged;
         this.pruneDeletedPaths();
@@ -593,10 +619,11 @@ export default class CrossPlayerPlugin extends Plugin {
                     }
 
                     // Fix PATH for macOS GUI
-                    const env = { ...process.env };
-                    if (Platform.isDesktop && process.platform === 'darwin') {
+                    const nodeProcess = this.getNodeProcess();
+                    const env: Record<string, string | undefined> = { ...(nodeProcess?.env ?? {}) };
+                    if (Platform.isDesktop && nodeProcess?.platform === 'darwin') {
                         const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-                        env.PATH = extraPaths.join(':') + (env.PATH ? ':' + env.PATH : '');
+                        env['PATH'] = extraPaths.join(':') + (env['PATH'] ? ':' + env['PATH'] : '');
                     }
 
                     const { jsRuntimePath } = this.data.settings;
@@ -933,13 +960,14 @@ export default class CrossPlayerPlugin extends Plugin {
             }
         }
 
-        this.data = Object.assign({
+        const baseData: CrossPlayerData = {
             settings: settings,
             queue: [],
             // Initialize playbackSpeed with default if not present
             playbackSpeed: settings.defaultPlaybackSpeed,
             consumptionStats: {}
-        }, loaded) as CrossPlayerData;
+        };
+        this.data = Object.assign(baseData, loaded);
 
         // Ensure settings are definitely correct in data object
         this.data.settings = settings;
@@ -1146,7 +1174,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async getMediaDuration(file: TFile): Promise<number> {
         return new Promise((resolve) => {
-            const video = activeDocument.createElement('video');
+            const video = activeDocument.createEl('video');
             video.preload = 'metadata';
             video.onloadedmetadata = () => {
                 resolve(video.duration);
@@ -1198,8 +1226,11 @@ export default class CrossPlayerPlugin extends Plugin {
                     break;
                 }
 
-                const nextPath = this.deferredMetadataPaths.values().next().value as string | undefined;
-                if (!nextPath) break;
+                let nextPath: string | undefined;
+                this.deferredMetadataPaths.forEach((path) => {
+                    if (nextPath === undefined) nextPath = path;
+                });
+                if (nextPath === undefined) break;
 
                 this.deferredMetadataPaths.delete(nextPath);
 
@@ -1379,8 +1410,6 @@ export default class CrossPlayerPlugin extends Plugin {
 
         // Double check it is in the folder
         if (!this.isPathInsideWatchedFolder(file.path, folderPath)) return false;
-
-        console.log(`[Cross Player] processing: ${file.path}`);
 
         const ext = file.extension.toLowerCase();
         if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return false;
@@ -1924,13 +1953,13 @@ export default class CrossPlayerPlugin extends Plugin {
                 this.listView?.updateDownloadProgress();
                 return;
             }
-            console.log(`[Cross Player] Spawning in ${cwd}: ${ytPath} ${args.join(' ')}`);
 
             // Fix PATH for macOS GUI
-            const env = { ...process.env };
-            if (Platform.isDesktop && process.platform === 'darwin') {
+            const nodeProcess = this.getNodeProcess();
+            const env: Record<string, string | undefined> = { ...(nodeProcess?.env ?? {}) };
+            if (Platform.isDesktop && nodeProcess?.platform === 'darwin') {
                 const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-                env.PATH = extraPaths.join(':') + (env.PATH ? ':' + env.PATH : '');
+                env['PATH'] = extraPaths.join(':') + (env['PATH'] ? ':' + env['PATH'] : '');
             }
 
             const child = spawn(ytPath, args, { cwd: cwd, env });
@@ -2033,7 +2062,6 @@ export default class CrossPlayerPlugin extends Plugin {
                 if (code === 0) {
                     downloadStatus.status = 'completed';
                     downloadStatus.progress = '100%';
-                    console.log(`Download completed for: ${downloadStatus.name}`);
 
                     // Refresh watched folder after a slight delay to let Obsidian see the file
                     const { watchedFolder } = this.data.settings;
@@ -2093,7 +2121,11 @@ export default class CrossPlayerPlugin extends Plugin {
     retryDownload(id: string) {
         const dl = this.activeDownloads.find(d => d.id === id);
         if (dl && dl.status === 'error') {
-            const { url, quality, type } = dl.params;
+            const params = dl.params;
+            if (!params) return;
+            const url: string = params.url;
+            const quality: string = params.quality;
+            const type: 'video' | 'audio' = params.type;
 
             // Re-resolve cwd just in case, though we could store it in params too
             const { downloadFolder, watchedFolder } = this.data.settings;
@@ -2334,6 +2366,17 @@ class ConsumptionStatsModal extends Modal {
     }
 }
 
+type DeclarativeSettingRender = (setting: Setting) => void;
+
+interface DeclarativeSettingDefinition {
+    name?: string;
+    desc?: string;
+    type?: 'group';
+    heading?: string;
+    items?: DeclarativeSettingDefinition[];
+    render?: DeclarativeSettingRender;
+}
+
 class CrossPlayerSettingTab extends PluginSettingTab {
     plugin: CrossPlayerPlugin;
 
@@ -2342,15 +2385,11 @@ class CrossPlayerSettingTab extends PluginSettingTab {
         this.plugin = plugin;
     }
 
-    display(): void {
-        const { containerEl } = this;
-        containerEl.empty();
-
-        new Setting(containerEl).setName('Playback').setHeading();
-
-        new Setting(containerEl)
-            .setName('Watched Folder')
-            .setDesc('Current watched folder path (relative to vault root).')
+    // Each wire method attaches only the controls for one row. display()
+    // (pre-1.13) and getSettingDefinitions() render callbacks (1.13+)
+    // share them, so both paths behave identically.
+    private wireWatchedFolderRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setPlaceholder('No folder set')
                 .setValue(this.plugin.data.settings.watchedFolder)
@@ -2360,10 +2399,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 .onClick(() => {
                     new FolderSuggestModal(this.app, this.plugin).open();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Default Playback Speed')
-            .setDesc('The default speed when the player starts or resets.')
+    private wirePlaybackSpeedRow(setting: Setting): void {
+        setting
             .addSlider(slider => slider
                 .setLimits(0.5, 5.0, 0.1)
                 .setValue(this.plugin.data.settings.defaultPlaybackSpeed)
@@ -2371,10 +2410,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     this.plugin.data.settings.defaultPlaybackSpeed = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Seek Forward Seconds')
-            .setDesc('Number of seconds to seek forward.')
+    private wireSeekForwardRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setValue(String(this.plugin.data.settings.seekSecondsForward))
                 .onChange(async (value) => {
@@ -2384,10 +2423,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                         await this.plugin.saveData();
                     }
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Seek Backward Seconds')
-            .setDesc('Number of seconds to seek backward.')
+    private wireSeekBackwardRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setValue(String(this.plugin.data.settings.seekSecondsBackward))
                 .onChange(async (value) => {
@@ -2397,20 +2436,20 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                         await this.plugin.saveData();
                     }
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Show Media Indicator')
-            .setDesc('Show audio/video icon in the queue list.')
+    private wireMediaIndicatorRow(setting: Setting): void {
+        setting
             .addToggle(toggle => toggle
                 .setValue(this.plugin.data.settings.showMediaIndicator)
                 .onChange(async (value) => {
                     this.plugin.data.settings.showMediaIndicator = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Show Progress Color in Queue')
-            .setDesc('Color the queue items based on playback progress.')
+    private wireProgressColorRow(setting: Setting): void {
+        setting
             .addToggle(toggle => toggle
                 .setValue(this.plugin.data.settings.showProgressColor)
                 .onChange(async (value) => {
@@ -2418,30 +2457,30 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveData();
                     this.plugin.listView?.refresh();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Autoplay Next Video')
-            .setDesc('Automatically play the next video in the queue when the current one finishes.')
+    private wireAutoplayRow(setting: Setting): void {
+        setting
             .addToggle(toggle => toggle
                 .setValue(this.plugin.data.settings.autoplayNext)
                 .onChange(async (value) => {
                     this.plugin.data.settings.autoplayNext = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Pause on Mobile Tap')
-            .setDesc('Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.')
+    private wirePauseOnTapRow(setting: Setting): void {
+        setting
             .addToggle(toggle => toggle
                 .setValue(this.plugin.data.settings.pauseOnMobileTap)
                 .onChange(async (value) => {
                     this.plugin.data.settings.pauseOnMobileTap = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Wrap Queue Item Text')
-            .setDesc('Show full queue item names on multiple lines instead of truncating them.')
+    private wireWrapTextRow(setting: Setting): void {
+        setting
             .addToggle(toggle => toggle
                 .setValue(this.plugin.data.settings.wrapQueueText)
                 .onChange(async (value) => {
@@ -2449,12 +2488,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveData();
                     this.plugin.listView?.refresh();
                 }));
+    }
 
-        new Setting(containerEl).setName('Audio').setHeading();
-
-        new Setting(containerEl)
-            .setName('Volume Boost')
-            .setDesc('Boost playback above 100% for quiet media. Higher values may cause distortion.')
+    private wireVolumeBoostRow(setting: Setting): void {
+        setting
             .addSlider(slider => slider
                 .setLimits(100, 300, 10)
                 .setValue(this.plugin.data.settings.volumeBoostPercent)
@@ -2463,10 +2500,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveData(false);
                     this.plugin.mainView?.applyAudioSettings();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Sound Normalization')
-            .setDesc('Apply dynamic range compression to make low-volume media easier to hear.')
+    private wireSoundNormalizationRow(setting: Setting): void {
+        setting
             .addToggle(toggle => toggle
                 .setValue(this.plugin.data.settings.soundNormalization)
                 .onChange(async (value) => {
@@ -2474,44 +2511,39 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     await this.plugin.saveData(false);
                     this.plugin.mainView?.applyAudioSettings();
                 }));
+    }
 
-        new Setting(containerEl).setName('Consumption Statistics').setHeading();
-
-        const allTime = this.plugin.getConsumptionSummary();
-        new Setting(containerEl)
-            .setName('Usage Summary')
-            .setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`)
+    private wireUsageSummaryRow(setting: Setting): void {
+        setting
             .addButton(button => button
                 .setButtonText('View Statistics')
                 .onClick(() => {
                     new ConsumptionStatsModal(this.app, this.plugin).open();
                 }));
+    }
 
-        new Setting(containerEl).setName('Downloads & Storage').setHeading();
-
-        new Setting(containerEl)
-            .setName('yt-dlp Binary Path')
-            .setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).')
+    private wireYtDlpPathRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setValue(this.plugin.data.settings.youtubeDlpPath)
                 .onChange(async (value) => {
                     this.plugin.data.settings.youtubeDlpPath = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('FFmpeg Binary Path')
-            .setDesc('Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.')
+    private wireFfmpegPathRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setValue(this.plugin.data.settings.ffmpegPath)
                 .onChange(async (value) => {
                     this.plugin.data.settings.ffmpegPath = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('JS Runtime Path')
-            .setDesc('Absolute path to node, deno or bun (required for YouTube signature extraction).')
+    private wireJsRuntimeRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setPlaceholder('e.g. /usr/local/bin/node')
                 .setValue(this.plugin.data.settings.jsRuntimePath)
@@ -2519,20 +2551,20 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     this.plugin.data.settings.jsRuntimePath = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Download Folder')
-            .setDesc('Folder to save downloads (relative to vault). Leave empty to use Watched Folder.')
+    private wireDownloadFolderRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setValue(this.plugin.data.settings.downloadFolder)
                 .onChange(async (value) => {
                     this.plugin.data.settings.downloadFolder = value;
                     await this.plugin.saveData();
                 }));
+    }
 
-        new Setting(containerEl)
-            .setName('Storage Limit (GB)')
-            .setDesc('Manual storage limit in Gigabytes.')
+    private wireStorageLimitRow(setting: Setting): void {
+        setting
             .addText(text => text
                 .setPlaceholder('10')
                 .setValue(String(this.plugin.data.settings.storageLimitGB || 10))
@@ -2544,6 +2576,139 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                         void this.plugin.calculateDynamicLimit();
                     }
                 }));
+    }
+
+    display(): void {
+        const { containerEl } = this;
+        containerEl.empty();
+
+        new Setting(containerEl).setName('Playback').setHeading();
+
+        this.wireWatchedFolderRow(new Setting(containerEl)
+            .setName('Watched Folder')
+            .setDesc('Current watched folder path (relative to vault root).'));
+
+        this.wirePlaybackSpeedRow(new Setting(containerEl)
+            .setName('Default Playback Speed')
+            .setDesc('The default speed when the player starts or resets.'));
+
+        this.wireSeekForwardRow(new Setting(containerEl)
+            .setName('Seek Forward Seconds')
+            .setDesc('Number of seconds to seek forward.'));
+
+        this.wireSeekBackwardRow(new Setting(containerEl)
+            .setName('Seek Backward Seconds')
+            .setDesc('Number of seconds to seek backward.'));
+
+        this.wireMediaIndicatorRow(new Setting(containerEl)
+            .setName('Show Media Indicator')
+            .setDesc('Show audio/video icon in the queue list.'));
+
+        this.wireProgressColorRow(new Setting(containerEl)
+            .setName('Show Progress Color in Queue')
+            .setDesc('Color the queue items based on playback progress.'));
+
+        this.wireAutoplayRow(new Setting(containerEl)
+            .setName('Autoplay Next Video')
+            .setDesc('Automatically play the next video in the queue when the current one finishes.'));
+
+        this.wirePauseOnTapRow(new Setting(containerEl)
+            .setName('Pause on Mobile Tap')
+            .setDesc('Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.'));
+
+        this.wireWrapTextRow(new Setting(containerEl)
+            .setName('Wrap Queue Item Text')
+            .setDesc('Show full queue item names on multiple lines instead of truncating them.'));
+
+        new Setting(containerEl).setName('Audio').setHeading();
+
+        this.wireVolumeBoostRow(new Setting(containerEl)
+            .setName('Volume Boost')
+            .setDesc('Boost playback above 100% for quiet media. Higher values may cause distortion.'));
+
+        this.wireSoundNormalizationRow(new Setting(containerEl)
+            .setName('Sound Normalization')
+            .setDesc('Apply dynamic range compression to make low-volume media easier to hear.'));
+
+        new Setting(containerEl).setName('Consumption Statistics').setHeading();
+
+        const allTime = this.plugin.getConsumptionSummary();
+        this.wireUsageSummaryRow(new Setting(containerEl)
+            .setName('Usage Summary')
+            .setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`));
+
+        new Setting(containerEl).setName('Downloads & Storage').setHeading();
+
+        this.wireYtDlpPathRow(new Setting(containerEl)
+            .setName('yt-dlp Binary Path')
+            .setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).'));
+
+        this.wireFfmpegPathRow(new Setting(containerEl)
+            .setName('FFmpeg Binary Path')
+            .setDesc('Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.'));
+
+        this.wireJsRuntimeRow(new Setting(containerEl)
+            .setName('JS Runtime Path')
+            .setDesc('Absolute path to node, deno or bun (required for YouTube signature extraction).'));
+
+        this.wireDownloadFolderRow(new Setting(containerEl)
+            .setName('Download Folder')
+            .setDesc('Folder to save downloads (relative to vault). Leave empty to use Watched Folder.'));
+
+        this.wireStorageLimitRow(new Setting(containerEl)
+            .setName('Storage Limit (GB)')
+            .setDesc('Manual storage limit in Gigabytes.'));
+    }
+
+    // Declarative settings for Obsidian 1.13+ settings search. Each row
+    // reuses the same wire methods as display(), so the rendered controls
+    // behave identically. display() above remains the renderer on
+    // pre-1.13 clients (dual support, minAppVersion unchanged).
+    getSettingDefinitions(): DeclarativeSettingDefinition[] {
+        const allTime = this.plugin.getConsumptionSummary();
+        return [
+            {
+                type: 'group',
+                heading: 'Playback',
+                items: [
+                    { name: 'Watched Folder', desc: 'Current watched folder path (relative to vault root).', render: (setting) => this.wireWatchedFolderRow(setting) },
+                    { name: 'Default Playback Speed', desc: 'The default speed when the player starts or resets.', render: (setting) => this.wirePlaybackSpeedRow(setting) },
+                    { name: 'Seek Forward Seconds', desc: 'Number of seconds to seek forward.', render: (setting) => this.wireSeekForwardRow(setting) },
+                    { name: 'Seek Backward Seconds', desc: 'Number of seconds to seek backward.', render: (setting) => this.wireSeekBackwardRow(setting) },
+                    { name: 'Show Media Indicator', desc: 'Show audio/video icon in the queue list.', render: (setting) => this.wireMediaIndicatorRow(setting) },
+                    { name: 'Show Progress Color in Queue', desc: 'Color the queue items based on playback progress.', render: (setting) => this.wireProgressColorRow(setting) },
+                    { name: 'Autoplay Next Video', desc: 'Automatically play the next video in the queue when the current one finishes.', render: (setting) => this.wireAutoplayRow(setting) },
+                    { name: 'Pause on Mobile Tap', desc: 'Pause the player when tapping the video on mobile. If disabled, tapping only shows controls.', render: (setting) => this.wirePauseOnTapRow(setting) },
+                    { name: 'Wrap Queue Item Text', desc: 'Show full queue item names on multiple lines instead of truncating them.', render: (setting) => this.wireWrapTextRow(setting) },
+                ],
+            },
+            {
+                type: 'group',
+                heading: 'Audio',
+                items: [
+                    { name: 'Volume Boost', desc: 'Boost playback above 100% for quiet media. Higher values may cause distortion.', render: (setting) => this.wireVolumeBoostRow(setting) },
+                    { name: 'Sound Normalization', desc: 'Apply dynamic range compression to make low-volume media easier to hear.', render: (setting) => this.wireSoundNormalizationRow(setting) },
+                ],
+            },
+            {
+                type: 'group',
+                heading: 'Consumption Statistics',
+                items: [
+                    { name: 'Usage Summary', desc: `${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`, render: (setting) => this.wireUsageSummaryRow(setting) },
+                ],
+            },
+            {
+                type: 'group',
+                heading: 'Downloads & Storage',
+                items: [
+                    { name: 'yt-dlp Binary Path', desc: 'Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).', render: (setting) => this.wireYtDlpPathRow(setting) },
+                    { name: 'FFmpeg Binary Path', desc: 'Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.', render: (setting) => this.wireFfmpegPathRow(setting) },
+                    { name: 'JS Runtime Path', desc: 'Absolute path to node, deno or bun (required for YouTube signature extraction).', render: (setting) => this.wireJsRuntimeRow(setting) },
+                    { name: 'Download Folder', desc: 'Folder to save downloads (relative to vault). Leave empty to use Watched Folder.', render: (setting) => this.wireDownloadFolderRow(setting) },
+                    { name: 'Storage Limit (GB)', desc: 'Manual storage limit in Gigabytes.', render: (setting) => this.wireStorageLimitRow(setting) },
+                ],
+            },
+        ];
     }
 }
 
@@ -3819,10 +3984,15 @@ class CrossPlayerMainView extends ItemView {
         const secs = totalSeconds % 60;
 
         if (hours > 0) {
-            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            return `${hours}:${this.padTimeUnit(minutes)}:${this.padTimeUnit(secs)}`;
         }
 
-        return `${minutes}:${secs.toString().padStart(2, '0')}`;
+        return `${minutes}:${this.padTimeUnit(secs)}`;
+    }
+
+    private padTimeUnit(value: number): string {
+        const text = `0${value}`;
+        return text.slice(text.length - 2);
     }
 
     ensureAudioNodes() {
