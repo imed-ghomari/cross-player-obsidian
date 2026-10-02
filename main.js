@@ -3201,7 +3201,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async getMediaDuration(file) {
     return new Promise((resolve) => {
-      const video = activeDocument.createEl("video");
+      let video;
+      try {
+        video = createEl("video");
+      } catch (error) {
+        console.warn("[Cross Player] Could not probe media duration", error);
+        resolve(0);
+        return;
+      }
       video.preload = "metadata";
       video.onloadedmetadata = () => {
         resolve(video.duration);
@@ -3211,7 +3218,13 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         resolve(0);
         video.remove();
       };
-      video.src = this.app.vault.getResourcePath(file);
+      try {
+        video.src = this.app.vault.getResourcePath(file);
+      } catch (error) {
+        console.warn("[Cross Player] Could not load media for duration probe", error);
+        video.remove();
+        resolve(0);
+      }
     });
   }
   isAndroidPlaybackProbeSensitive() {

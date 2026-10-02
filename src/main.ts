@@ -1174,7 +1174,16 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async getMediaDuration(file: TFile): Promise<number> {
         return new Promise((resolve) => {
-            const video = activeDocument.createEl('video');
+            let video: HTMLVideoElement;
+            try {
+                // Global Obsidian helper (not Document.createElement): satisfies
+                // the prefer-create-el review rule and always exists.
+                video = createEl('video');
+            } catch (error) {
+                console.warn('[Cross Player] Could not probe media duration', error);
+                resolve(0);
+                return;
+            }
             video.preload = 'metadata';
             video.onloadedmetadata = () => {
                 resolve(video.duration);
@@ -1184,7 +1193,13 @@ export default class CrossPlayerPlugin extends Plugin {
                 resolve(0);
                 video.remove();
             };
-            video.src = this.app.vault.getResourcePath(file);
+            try {
+                video.src = this.app.vault.getResourcePath(file);
+            } catch (error) {
+                console.warn('[Cross Player] Could not load media for duration probe', error);
+                video.remove();
+                resolve(0);
+            }
         });
     }
 
