@@ -2282,6 +2282,7 @@ var VIEW_TYPE_CROSS_PLAYER_MAIN = "cross-player-main-view";
 var DEFAULT_SETTINGS = {
   watchedFolder: "",
   defaultPlaybackSpeed: 2,
+  speedPresets: "1, 1.5, 2, 2.5",
   seekSecondsForward: 10,
   seekSecondsBackward: 10,
   youtubeDlpPath: "yt-dlp",
@@ -2360,7 +2361,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     return typeof runtimeWindow.require === "function" ? runtimeWindow.require : null;
   }
   getNodeProcess() {
-    const holder = globalThis;
+    const scope = typeof activeWindow !== "undefined" ? activeWindow : window;
+    const holder = scope;
     const proc = holder.process;
     if (!proc || typeof proc !== "object")
       return null;
@@ -3564,6 +3566,25 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       await this.playMedia(this.data.queue[prevIndex], true);
     }
   }
+  getSpeedPresets() {
+    var _a;
+    const raw = (_a = this.data.settings.speedPresets) != null ? _a : "";
+    const seen = {};
+    const presets = [];
+    for (const part of raw.split(",")) {
+      const parsed = parseFloat(part.trim());
+      if (!isFinite(parsed))
+        continue;
+      const clamped = Math.min(10, Math.max(0.1, Math.round(parsed * 10) / 10));
+      const key = clamped.toFixed(1);
+      if (seen[key])
+        continue;
+      seen[key] = true;
+      presets.push(clamped);
+    }
+    presets.sort((a, b) => a - b);
+    return presets;
+  }
   async updateStatus(id, status) {
     const item = this.data.queue.find((i) => i.id === id);
     if (item && item.status !== status) {
@@ -4169,6 +4190,12 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
       await this.plugin.saveData();
     }));
   }
+  wireSpeedPresetsRow(setting) {
+    setting.addText((text) => text.setPlaceholder("e.g. 1, 1.5, 2, 2.5").setValue(this.plugin.data.settings.speedPresets).onChange(async (value) => {
+      this.plugin.data.settings.speedPresets = value;
+      await this.plugin.saveData();
+    }));
+  }
   wireSeekForwardRow(setting) {
     setting.addText((text) => text.setValue(String(this.plugin.data.settings.seekSecondsForward)).onChange(async (value) => {
       const parsed = parseInt(value);
@@ -4282,6 +4309,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     new import_obsidian.Setting(containerEl).setName("Playback").setHeading();
     this.wireWatchedFolderRow(new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root)."));
     this.wirePlaybackSpeedRow(new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets."));
+    this.wireSpeedPresetsRow(new import_obsidian.Setting(containerEl).setName("Speed Presets").setDesc("Comma-separated speeds for the queue presets dropdown. Leave empty to hide it."));
     this.wireSeekForwardRow(new import_obsidian.Setting(containerEl).setName("Seek Forward Seconds").setDesc("Number of seconds to seek forward."));
     this.wireSeekBackwardRow(new import_obsidian.Setting(containerEl).setName("Seek Backward Seconds").setDesc("Number of seconds to seek backward."));
     this.wireMediaIndicatorRow(new import_obsidian.Setting(containerEl).setName("Show Media Indicator").setDesc("Show audio/video icon in the queue list."));
@@ -4315,6 +4343,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
         items: [
           { name: "Watched Folder", desc: "Current watched folder path (relative to vault root).", render: (setting) => this.wireWatchedFolderRow(setting) },
           { name: "Default Playback Speed", desc: "The default speed when the player starts or resets.", render: (setting) => this.wirePlaybackSpeedRow(setting) },
+          { name: "Speed Presets", desc: "Comma-separated speeds for the queue presets dropdown. Leave empty to hide it.", render: (setting) => this.wireSpeedPresetsRow(setting) },
           { name: "Seek Forward Seconds", desc: "Number of seconds to seek forward.", render: (setting) => this.wireSeekForwardRow(setting) },
           { name: "Seek Backward Seconds", desc: "Number of seconds to seek backward.", render: (setting) => this.wireSeekBackwardRow(setting) },
           { name: "Show Media Indicator", desc: "Show audio/video icon in the queue list.", render: (setting) => this.wireMediaIndicatorRow(setting) },
@@ -4494,6 +4523,30 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
         this.updateSpeedDisplay();
       }
     };
+    const presets = this.plugin.getSpeedPresets();
+    if (presets.length > 0) {
+      const presetSelect = speedContainer.createEl("select", { cls: "cross-player-speed-presets" });
+      presetSelect.ariaLabel = "Speed presets";
+      const placeholder = presetSelect.createEl("option", { text: "Presets", value: "" });
+      placeholder.disabled = true;
+      for (const preset of presets) {
+        presetSelect.createEl("option", { text: `${preset.toFixed(1)}x`, value: preset.toFixed(1) });
+      }
+      this.syncPresetSelection(presetSelect, speed);
+      presetSelect.onchange = async () => {
+        const parsed = parseFloat(presetSelect.value);
+        if (!isFinite(parsed))
+          return;
+        this.captureScrollPosition();
+        if (this.plugin.mainView) {
+          await this.plugin.mainView.setPlaybackSpeed(parsed);
+        } else {
+          this.plugin.data.playbackSpeed = Math.min(10, Math.max(0.1, parsed));
+          await this.plugin.saveData(false);
+          this.updateSpeedDisplay();
+        }
+      };
+    }
     const stats = this.plugin.getQueueStats();
     const adjustedDuration = stats.totalDuration / speed;
     const limitBytes = this.plugin.dynamicStorageLimit;
@@ -4740,6 +4793,22 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
       this.updateStatsDisplay();
     }
+    const presetSelect = this.contentEl.querySelector(".cross-player-speed-presets");
+    if (presetSelect) {
+      this.syncPresetSelection(presetSelect, this.plugin.data.playbackSpeed || 1);
+    }
+  }
+  syncPresetSelection(select, speed) {
+    const key = speed.toFixed(1);
+    let matched = false;
+    for (let i = 0; i < select.options.length; i++) {
+      const option2 = select.options[i];
+      if (option2.value !== "" && option2.value === key) {
+        matched = true;
+        break;
+      }
+    }
+    select.value = matched ? key : "";
   }
 };
 var CrossPlayerMainView = class extends import_obsidian.ItemView {
@@ -5603,6 +5672,17 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       return;
     const newSpeed = Math.max(0.1, this.videoEl.playbackRate + delta);
     this.videoEl.playbackRate = newSpeed;
+    this.plugin.data.playbackSpeed = newSpeed;
+    await this.plugin.saveData(false);
+    if (this.plugin.listView) {
+      this.plugin.listView.updateSpeedDisplay();
+    }
+  }
+  async setPlaybackSpeed(speed) {
+    const newSpeed = Math.min(10, Math.max(0.1, speed));
+    if (this.videoEl) {
+      this.videoEl.playbackRate = newSpeed;
+    }
     this.plugin.data.playbackSpeed = newSpeed;
     await this.plugin.saveData(false);
     if (this.plugin.listView) {

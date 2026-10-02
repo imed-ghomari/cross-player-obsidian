@@ -20,6 +20,7 @@ export interface ConsumptionStatBucket {
 export interface CrossPlayerSettings {
     watchedFolder: string;
     defaultPlaybackSpeed: number;
+    speedPresets: string;
     seekSecondsForward: number;
     seekSecondsBackward: number;
     // YouTube Download Settings

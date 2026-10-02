@@ -46,6 +46,16 @@
     font-weight: bold;
 }
 
+.cross-player-speed-presets {
+    font-size: 0.8em;
+    color: var(--text-muted);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 2px 4px;
+    max-width: 110px;
+}
+
 .cross-player-stats {
     margin-top: 5px;
 }

@@ -62,6 +62,7 @@ const VIEW_TYPE_CROSS_PLAYER_MAIN = "cross-player-main-view";
 const DEFAULT_SETTINGS: CrossPlayerSettings = {
     watchedFolder: '',
     defaultPlaybackSpeed: 2.0,
+    speedPresets: '1, 1.5, 2, 2.5',
     seekSecondsForward: 10,
     seekSecondsBackward: 10,
     youtubeDlpPath: 'yt-dlp',
@@ -147,7 +148,9 @@ export default class CrossPlayerPlugin extends Plugin {
         // Read the Node.js process object without referencing the `process`
         // global directly, so TypeScript never resolves it as `any`
         // (community review: no-unsafe-member-access on process.env).
-        const holder = globalThis as unknown as { process?: unknown };
+        // Prefer activeWindow for popout compatibility, fall back to window.
+        const scope = typeof activeWindow !== 'undefined' ? activeWindow : window;
+        const holder = scope as unknown as { process?: unknown };
         const proc = holder.process;
         if (!proc || typeof proc !== 'object') return null;
         const record = proc as Record<string, unknown>;
@@ -1643,8 +1646,28 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async updateStatus(id: string, status: 'pending' | 'playing' | 'completed') {
-        const item = this.data.queue.find(i => i.id === id);
+    getSpeedPresets(): number[] {
+        // Parse the comma-separated presets setting into a sorted list of
+        // unique speeds. Invalid entries are ignored; an empty setting
+        // disables the presets dropdown. Values round to 0.1 to match the
+        // speed display format.
+        const raw = this.data.settings.speedPresets ?? '';
+        const seen: Record<string, boolean> = {};
+        const presets: number[] = [];
+        for (const part of raw.split(',')) {
+            const parsed = parseFloat(part.trim());
+            if (!isFinite(parsed)) continue;
+            const clamped = Math.min(10, Math.max(0.1, Math.round(parsed * 10) / 10));
+            const key = clamped.toFixed(1);
+            if (seen[key]) continue;
+            seen[key] = true;
+            presets.push(clamped);
+        }
+        presets.sort((a, b) => a - b);
+        return presets;
+    }
+
+    async updateStatus(id: string, status: 'pending' | 'playing' | 'completed') {       const item = this.data.queue.find(i => i.id === id);
         if (item && item.status !== status) {
             const previousStatus = item.status;
             item.status = status;
@@ -2427,6 +2450,17 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 }));
     }
 
+    private wireSpeedPresetsRow(setting: Setting): void {
+        setting
+            .addText(text => text
+                .setPlaceholder('e.g. 1, 1.5, 2, 2.5')
+                .setValue(this.plugin.data.settings.speedPresets)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.speedPresets = value;
+                    await this.plugin.saveData();
+                }));
+    }
+
     private wireSeekForwardRow(setting: Setting): void {
         setting
             .addText(text => text
@@ -2607,6 +2641,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
             .setName('Default Playback Speed')
             .setDesc('The default speed when the player starts or resets.'));
 
+        this.wireSpeedPresetsRow(new Setting(containerEl)
+            .setName('Speed Presets')
+            .setDesc('Comma-separated speeds for the queue presets dropdown. Leave empty to hide it.'));
+
         this.wireSeekForwardRow(new Setting(containerEl)
             .setName('Seek Forward Seconds')
             .setDesc('Number of seconds to seek forward.'));
@@ -2688,6 +2726,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 items: [
                     { name: 'Watched Folder', desc: 'Current watched folder path (relative to vault root).', render: (setting) => this.wireWatchedFolderRow(setting) },
                     { name: 'Default Playback Speed', desc: 'The default speed when the player starts or resets.', render: (setting) => this.wirePlaybackSpeedRow(setting) },
+                    { name: 'Speed Presets', desc: 'Comma-separated speeds for the queue presets dropdown. Leave empty to hide it.', render: (setting) => this.wireSpeedPresetsRow(setting) },
                     { name: 'Seek Forward Seconds', desc: 'Number of seconds to seek forward.', render: (setting) => this.wireSeekForwardRow(setting) },
                     { name: 'Seek Backward Seconds', desc: 'Number of seconds to seek backward.', render: (setting) => this.wireSeekBackwardRow(setting) },
                     { name: 'Show Media Indicator', desc: 'Show audio/video icon in the queue list.', render: (setting) => this.wireMediaIndicatorRow(setting) },
@@ -2922,6 +2961,30 @@ class CrossPlayerListView extends ItemView {
                 this.updateSpeedDisplay();
             }
         };
+
+        const presets = this.plugin.getSpeedPresets();
+        if (presets.length > 0) {
+            const presetSelect = speedContainer.createEl('select', { cls: 'cross-player-speed-presets' });
+            presetSelect.ariaLabel = 'Speed presets';
+            const placeholder = presetSelect.createEl('option', { text: 'Presets', value: '' });
+            placeholder.disabled = true;
+            for (const preset of presets) {
+                presetSelect.createEl('option', { text: `${preset.toFixed(1)}x`, value: preset.toFixed(1) });
+            }
+            this.syncPresetSelection(presetSelect, speed);
+            presetSelect.onchange = async () => {
+                const parsed = parseFloat(presetSelect.value);
+                if (!isFinite(parsed)) return;
+                this.captureScrollPosition();
+                if (this.plugin.mainView) {
+                    await this.plugin.mainView.setPlaybackSpeed(parsed);
+                } else {
+                    this.plugin.data.playbackSpeed = Math.min(10, Math.max(0.1, parsed));
+                    await this.plugin.saveData(false);
+                    this.updateSpeedDisplay();
+                }
+            };
+        }
 
         // Stats Display
         const stats = this.plugin.getQueueStats();
@@ -3273,6 +3336,26 @@ class CrossPlayerListView extends ItemView {
             speedEl.setText(`Speed: ${speed.toFixed(1)}x`);
             this.updateStatsDisplay();
         }
+        const presetSelect = this.contentEl.querySelector<HTMLSelectElement>(".cross-player-speed-presets");
+        if (presetSelect) {
+            this.syncPresetSelection(presetSelect, this.plugin.data.playbackSpeed || 1.0);
+        }
+    }
+
+    private syncPresetSelection(select: HTMLSelectElement, speed: number) {
+        // Show the matching preset when the current speed equals one,
+        // otherwise fall back to the placeholder so the dropdown never
+        // displays a preset that isn't active.
+        const key = speed.toFixed(1);
+        let matched = false;
+        for (let i = 0; i < select.options.length; i++) {
+            const option = select.options[i];
+            if (option.value !== '' && option.value === key) {
+                matched = true;
+                break;
+            }
+        }
+        select.value = matched ? key : '';
     }
 
 }
@@ -4296,6 +4379,22 @@ class CrossPlayerMainView extends ItemView {
         if (!this.videoEl) return;
         const newSpeed = Math.max(0.1, this.videoEl.playbackRate + delta);
         this.videoEl.playbackRate = newSpeed;
+
+        // Update persistent data
+        this.plugin.data.playbackSpeed = newSpeed;
+        await this.plugin.saveData(false);
+
+        // No Notice, update UI in list view
+        if (this.plugin.listView) {
+            this.plugin.listView.updateSpeedDisplay();
+        }
+    }
+
+    async setPlaybackSpeed(speed: number) {
+        const newSpeed = Math.min(10, Math.max(0.1, speed));
+        if (this.videoEl) {
+            this.videoEl.playbackRate = newSpeed;
+        }
 
         // Update persistent data
         this.plugin.data.playbackSpeed = newSpeed;
