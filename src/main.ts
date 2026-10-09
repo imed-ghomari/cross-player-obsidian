@@ -498,11 +498,64 @@ export default class CrossPlayerPlugin extends Plugin {
 
         if (!changed) return;
 
+        // Stash in-memory state before the destructive loadData().
+        // Resilio Sync uses file-level LWW, and an offline peer coming back
+        // online wins even over newer online edits (overwritten versions go
+        // to .sync/Archive). So disk can revert to a stale fork with older
+        // playbackUpdatedAt but newer-or-equal mtime. Wholesale loadData()
+        // would then discard newer local playback from memory too.
+        const prevQueue: MediaItem[] = this.data?.queue ?? [];
+        const prevDeleted: Record<string, number> = { ...(this.data?.deletedPaths ?? {}) };
+        const prevStats: Record<string, ConsumptionStatBucket> = { ...(this.data?.consumptionStats ?? {}) };
+
         this.isReloadingSyncedData = true;
         try {
             await this.loadData();
+            // Union tombstones + stats so both sides learn deletes/completions
+            // even when the queue itself keeps disk's order (existing LWW).
+            this.mergeDeletedPaths(prevDeleted);
+            if (Object.keys(prevStats).length > 0) {
+                this.data.consumptionStats = Object.assign({}, this.data.consumptionStats ?? {}, prevStats);
+            }
+
+            // Restore any in-memory playback that is newer than what disk
+            // now holds (i.e. disk reverted to a stale fork). Queue
+            // order/membership intentionally stays as disk's: this changes no
+            // ordering semantics, it only prevents progress loss.
+            let healedPlayback = false;
+            for (const newItem of this.data.queue) {
+                const oldItem = this.findMatchingQueueItem(prevQueue, newItem);
+                if (!oldItem) continue;
+                const newTs = newItem.playbackUpdatedAt || 0;
+                const oldTs = oldItem.playbackUpdatedAt || 0;
+                if (oldTs > newTs) {
+                    const isCurrentlyPlayingLocally = this.mainView?.currentItem?.id === newItem.id
+                        && !!this.mainView?.isActivelyPlayingLocally();
+                    if (!isCurrentlyPlayingLocally) {
+                        this.copyPlaybackState(newItem, oldItem);
+                        this.markPlaybackStateChanged(newItem, newItem.playbackUpdatedAt || Date.now());
+                        healedPlayback = true;
+                    }
+                }
+                if ((!newItem.duration || newItem.duration <= 0) && oldItem.duration && oldItem.duration > 0) {
+                    newItem.duration = oldItem.duration;
+                }
+                if (!newItem.size && oldItem.size) {
+                    newItem.size = oldItem.size;
+                }
+            }
+
             await this.validatePluginSyncHealth();
-            await this.refreshTrackedDataFileState();
+            if (healedPlayback) {
+                // Persist the healed version so Resilio propagates it back.
+                // saveData() refreshes tracked mtime/size, so the next tick
+                // sees no change (no reload/save loop). Pending keys were
+                // re-armed above, so a concurrent reload would skip until
+                // this save completes.
+                await this.saveData(false);
+            } else {
+                await this.refreshTrackedDataFileState();
+            }
 
             if (this.mainView) {
                 this.mainView.handleSyncedDataReload();
@@ -858,7 +911,15 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerWatchers();
 
         if (this.data.settings.watchedFolder) {
-            void this.scanFolder(this.data.settings.watchedFolder);
+            // Delay the first scan so Resilio Sync has time to deliver an
+            // updated data.json from another device before we bump
+            // queueUpdatedAt. scanFolder() itself force-reloads first; this
+            // delay covers the case where Resilio hasn't even written the
+            // file to disk yet when Obsidian opens.
+            const watched = this.data.settings.watchedFolder;
+            window.setTimeout(() => {
+                void this.scanFolder(watched);
+            }, 8000);
         }
 
         // Initialize Device Status
@@ -1158,6 +1219,17 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async scanFolder(folderPath: string) {
+        // Resilio Sync (and Obsidian Sync) can deliver a fresher data.json to
+        // disk after our last poll. A scan that adds a file bumps
+        // queueUpdatedAt, so saving on a stale copy forks and lets file-level
+        // LWW discard the other device's playback. Reload first when possible;
+        // the reload above preserves newer in-memory playback, so forcing it
+        // here is safe even when dirty.
+        try {
+            await this.reloadSyncedDataIfChanged(true);
+        } catch (error) {
+            console.warn('[Cross Player] Pre-scan reload failed', error);
+        }
         const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
         if (folder instanceof TFolder) {
             const filesInFolder = this.collectMediaFiles(folder);

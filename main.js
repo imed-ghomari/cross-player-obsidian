@@ -2636,7 +2636,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.lastKnownDataSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
   }
   async reloadSyncedDataIfChanged(force = false) {
-    var _a, _b;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
     if (this.isReloadingSyncedData)
       return;
     if (this.saveInProgress > 0)
@@ -2649,11 +2649,44 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const changed = force || nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
     if (!changed)
       return;
+    const prevQueue = (_d = (_c = this.data) == null ? void 0 : _c.queue) != null ? _d : [];
+    const prevDeleted = { ...(_f = (_e = this.data) == null ? void 0 : _e.deletedPaths) != null ? _f : {} };
+    const prevStats = { ...(_h = (_g = this.data) == null ? void 0 : _g.consumptionStats) != null ? _h : {} };
     this.isReloadingSyncedData = true;
     try {
       await this.loadData();
+      this.mergeDeletedPaths(prevDeleted);
+      if (Object.keys(prevStats).length > 0) {
+        this.data.consumptionStats = Object.assign({}, (_i = this.data.consumptionStats) != null ? _i : {}, prevStats);
+      }
+      let healedPlayback = false;
+      for (const newItem of this.data.queue) {
+        const oldItem = this.findMatchingQueueItem(prevQueue, newItem);
+        if (!oldItem)
+          continue;
+        const newTs = newItem.playbackUpdatedAt || 0;
+        const oldTs = oldItem.playbackUpdatedAt || 0;
+        if (oldTs > newTs) {
+          const isCurrentlyPlayingLocally = ((_k = (_j = this.mainView) == null ? void 0 : _j.currentItem) == null ? void 0 : _k.id) === newItem.id && !!((_l = this.mainView) == null ? void 0 : _l.isActivelyPlayingLocally());
+          if (!isCurrentlyPlayingLocally) {
+            this.copyPlaybackState(newItem, oldItem);
+            this.markPlaybackStateChanged(newItem, newItem.playbackUpdatedAt || Date.now());
+            healedPlayback = true;
+          }
+        }
+        if ((!newItem.duration || newItem.duration <= 0) && oldItem.duration && oldItem.duration > 0) {
+          newItem.duration = oldItem.duration;
+        }
+        if (!newItem.size && oldItem.size) {
+          newItem.size = oldItem.size;
+        }
+      }
       await this.validatePluginSyncHealth();
-      await this.refreshTrackedDataFileState();
+      if (healedPlayback) {
+        await this.saveData(false);
+      } else {
+        await this.refreshTrackedDataFileState();
+      }
       if (this.mainView) {
         this.mainView.handleSyncedDataReload();
       }
@@ -2958,7 +2991,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }, 5e3));
     this.registerWatchers();
     if (this.data.settings.watchedFolder) {
-      void this.scanFolder(this.data.settings.watchedFolder);
+      const watched = this.data.settings.watchedFolder;
+      window.setTimeout(() => {
+        void this.scanFolder(watched);
+      }, 8e3);
     }
     await this.loadDeviceId();
     void this.updateDeviceStatus();
@@ -3189,6 +3225,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async scanFolder(folderPath) {
+    try {
+      await this.reloadSyncedDataIfChanged(true);
+    } catch (error) {
+      console.warn("[Cross Player] Pre-scan reload failed", error);
+    }
     const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
     if (folder instanceof import_obsidian.TFolder) {
       const filesInFolder = this.collectMediaFiles(folder);
