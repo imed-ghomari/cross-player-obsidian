@@ -328,7 +328,6 @@ export default class CrossPlayerPlugin extends Plugin {
                     const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
                     const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
                     const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-                    const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
 
                     // Don't yank position out from under actively playing
                     // media: the local player will save its own progress on
@@ -337,7 +336,14 @@ export default class CrossPlayerPlugin extends Plugin {
                     const isCurrentlyPlayingLocally = this.mainView?.currentItem?.id === localItem.id
                         && !!this.mainView?.isActivelyPlayingLocally();
 
-                    if (!isCurrentlyPlayingLocally && (diskIsNewer || (!localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem)))) {
+                    // Playback is last-writer-wins by playbackUpdatedAt: only
+                    // accept disk when its timestamp is strictly newer. A
+                    // stale disk copy (older timestamp, e.g. sync delivering
+                    // an outdated data.json after external downloads +
+                    // restart) must never clobber newer local progress, even
+                    // when the local change was already saved (no pending
+                    // keys) and the item is not currently playing.
+                    if (!isCurrentlyPlayingLocally && diskIsNewer) {
                         this.copyPlaybackState(localItem, diskItem);
                     }
 

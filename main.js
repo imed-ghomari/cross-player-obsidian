@@ -2510,9 +2510,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
           const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
           const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-          const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
           const isCurrentlyPlayingLocally = ((_d = (_c = this.mainView) == null ? void 0 : _c.currentItem) == null ? void 0 : _d.id) === localItem.id && !!((_e = this.mainView) == null ? void 0 : _e.isActivelyPlayingLocally());
-          if (!isCurrentlyPlayingLocally && (diskIsNewer || !localChangedPlayback && this.hasDifferentPlaybackState(localItem, diskItem))) {
+          if (!isCurrentlyPlayingLocally && diskIsNewer) {
             this.copyPlaybackState(localItem, diskItem);
           }
           if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration && diskItem.duration > 0) {
