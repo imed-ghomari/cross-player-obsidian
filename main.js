@@ -2877,24 +2877,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
     });
     this.addCommand({
-      id: "seek-forward",
-      name: "Seek Forward",
-      callback: () => {
-        if (this.mainView) {
-          this.mainView.seek(this.data.settings.seekSecondsForward);
-        }
-      }
-    });
-    this.addCommand({
-      id: "seek-backward",
-      name: "Seek Backward",
-      callback: () => {
-        if (this.mainView) {
-          this.mainView.seek(-this.data.settings.seekSecondsBackward);
-        }
-      }
-    });
-    this.addCommand({
       id: "delete-current-file",
       name: "Delete Current File",
       callback: () => this.deleteCurrentFile()
@@ -5024,6 +5006,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       const playerLeafActive = this.app.workspace.activeLeaf === this.leaf;
       if (!focusInPlayer && !playerLeafActive)
         return;
+      const { seekSecondsForward, seekSecondsBackward } = this.plugin.data.settings;
       switch (e.key) {
         case " ":
         case "Spacebar":
@@ -5038,11 +5021,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           break;
         case "ArrowRight":
           e.preventDefault();
-          this.seek(this.getArrowSeekStep());
+          this.seek(seekSecondsForward);
           break;
         case "ArrowLeft":
           e.preventDefault();
-          this.seek(-this.getArrowSeekStep());
+          this.seek(-seekSecondsBackward);
           break;
       }
     });
@@ -5737,19 +5720,6 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (this.plugin.listView) {
       this.plugin.listView.updateSpeedDisplay();
     }
-  }
-  /**
-   * Seek step used by the left/right arrow keys. It scales with the media
-   * length so short clips and long movies both feel right. The fixed Seek
-   * Forward/Backward settings are intentionally not used here: those belong
-   * to the Seek Forward/Backward commands and the on-screen seek buttons.
-   * Returns 0 while the duration is still unknown.
-   */
-  getArrowSeekStep() {
-    const duration = this.videoEl ? this.videoEl.duration : NaN;
-    if (!Number.isFinite(duration) || duration <= 0)
-      return 0;
-    return Math.min(30, Math.max(5, Math.round(duration * 0.05)));
   }
   seek(seconds) {
     if (!this.videoEl || !Number.isFinite(this.videoEl.duration))

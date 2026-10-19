@@ -61,7 +61,7 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
    - Files from your watched folder appear automatically.
 3. **Playback**:
    - Click an item to play it in the main view.
-   - Use the player controls or commands to seek and change speed.
+   - Use the player controls, the left/right arrow keys, or commands to seek and change speed.
    - Move between desktop and mobile with the same vault to continue playback with synced queue state and progress.
    - On mobile, tap the video area to pause and show large overlay controls.
 
@@ -73,7 +73,6 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 - `Reload Data from Disk`: Manually re-loads data and scans the folder for new files.
 - `Set Watched Folder`: Picker to select a folder via UI.
 - `Increase/Decrease Playback Speed`: Adjust speed by 0.1x steps.
-- `Seek Forward/Backward`: Jump by configured seconds.
 - `Go to Next/Previous File`: Skip through your queue.
 - `Delete Current File`: Permanently delete the currently playing file immediately.
 - `Set Current File as Unread`: Reset status to pending.
@@ -88,7 +87,7 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 - **Watched Folder**: The absolute path to your media folder.
 - **Default Playback Speed**: Speed to start new files at.
 - **Auto-play Next**: Toggle automatic playback of the next unread item.
-- **Seek Intervals**: Custom seconds for forward/back.
+- **Seek Intervals**: Custom seconds used by the left/right arrow keys and the on-screen seek buttons.
 - **Show Media Indicator**: Toggle audio/video icons in the queue.
 - **Show Progress Color**: Toggle the background progress bar in the queue list.
 
