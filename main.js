@@ -5009,17 +5009,26 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     container.addClass("cross-player-main-view");
     container.tabIndex = 0;
     container.addClass("cross-player-no-outline");
-    container.addEventListener("keydown", (e) => {
-      if (!this.videoEl)
+    const keyDoc = container.ownerDocument;
+    this.registerDomEvent(keyDoc, "keydown", (e) => {
+      var _a;
+      if (!this.videoEl || !this.currentItem)
         return;
-      if (activeDocument.activeElement === this.videoEl)
+      if (!this.containerEl.isShown())
         return;
-      if (e.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(e.target.tagName))
+      const targetEl = e.target;
+      if ((_a = targetEl == null ? void 0 : targetEl.closest) == null ? void 0 : _a.call(targetEl, 'input, textarea, select, [contenteditable="true"], .cm-editor'))
         return;
-      const { seekSecondsForward, seekSecondsBackward } = this.plugin.data.settings;
+      const activeEl = keyDoc.activeElement;
+      const focusInPlayer = !!activeEl && this.containerEl.contains(activeEl);
+      const playerLeafActive = this.app.workspace.activeLeaf === this.leaf;
+      if (!focusInPlayer && !playerLeafActive)
+        return;
       switch (e.key) {
         case " ":
         case "Spacebar":
+          if (activeEl === this.videoEl)
+            return;
           e.preventDefault();
           if (this.videoEl.paused) {
             void this.videoEl.play();
@@ -5029,11 +5038,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
           break;
         case "ArrowRight":
           e.preventDefault();
-          this.videoEl.currentTime = Math.min(this.videoEl.duration, this.videoEl.currentTime + seekSecondsForward);
+          this.seek(this.getArrowSeekStep());
           break;
         case "ArrowLeft":
           e.preventDefault();
-          this.videoEl.currentTime = Math.max(0, this.videoEl.currentTime - seekSecondsBackward);
+          this.seek(-this.getArrowSeekStep());
           break;
       }
     });
@@ -5729,8 +5738,21 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       this.plugin.listView.updateSpeedDisplay();
     }
   }
+  /**
+   * Seek step used by the left/right arrow keys. It scales with the media
+   * length so short clips and long movies both feel right. The fixed Seek
+   * Forward/Backward settings are intentionally not used here: those belong
+   * to the Seek Forward/Backward commands and the on-screen seek buttons.
+   * Returns 0 while the duration is still unknown.
+   */
+  getArrowSeekStep() {
+    const duration = this.videoEl ? this.videoEl.duration : NaN;
+    if (!Number.isFinite(duration) || duration <= 0)
+      return 0;
+    return Math.min(30, Math.max(5, Math.round(duration * 0.05)));
+  }
   seek(seconds) {
-    if (!this.videoEl)
+    if (!this.videoEl || !Number.isFinite(this.videoEl.duration))
       return;
     const newTime = Math.max(0, Math.min(this.videoEl.duration, this.videoEl.currentTime + seconds));
     this.videoEl.currentTime = newTime;
