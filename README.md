@@ -37,6 +37,7 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 - **Drag & Drop**: Reorder your queue manually to prioritize content. Optimized for mobile touch dragging.
 - **Visual Indicators**: Distinct icons for audio (headphones) and video (film) files (toggleable in settings).
 - **ETC & Storage**: Displays "Estimated Time to Complete" based on current playback speed and warns when storage limits are exceeded.
+- **Sleep Timer**: Pause playback after a set number of minutes, or stop after the current file, straight from the queue header. The countdown stays visible in the header while the timer is active.
 
 ### ⬇️ YouTube Integration
 - **Built-in Downloader**: Download videos or audio directly from YouTube using `yt-dlp`.
@@ -79,6 +80,8 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 - `Toggle Fullscreen`: Enter or exit fullscreen mode.
 - `Toggle Subtitles`: Enable/disable subtitle tracks.
 - `Switch Subtitle Track`: Cycle through available subtitle tracks.
+- `Set Sleep Timer`: Opens the queue and shows the sleep timer menu.
+- `Cancel Sleep Timer`: Turns off an active sleep timer (hidden when no timer is active).
 - `Test yt-dlp Configuration`: Verify that `yt-dlp` is correctly installed and accessible (Desktop only).
 
 ## Settings
@@ -87,6 +90,7 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 - **Watched Folder**: The absolute path to your media folder.
 - **Default Playback Speed**: Speed to start new files at.
 - **Auto-play Next**: Toggle automatic playback of the next unread item.
+- **Sleep Timer Presets**: Comma-separated minutes shown in the sleep timer menu (leave empty to only offer Custom and End of current file).
 - **Seek Intervals**: Custom seconds used by the left/right arrow keys and the on-screen seek buttons.
 - **Show Media Indicator**: Toggle audio/video icons in the queue.
 - **Show Progress Color**: Toggle the background progress bar in the queue list.

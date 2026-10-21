@@ -65,6 +65,61 @@
     font-weight: bold;
 }
 
+.cross-player-sleep-timer {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 24px;
+    border-radius: 999px;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.cross-player-sleep-timer-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cross-player-sleep-timer-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.cross-player-sleep-timer-label {
+    display: none;
+    font-size: 0.75em;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.cross-player-sleep-timer.is-active {
+    padding: 2px 8px 2px 6px;
+    color: var(--interactive-accent);
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+}
+
+.cross-player-sleep-timer.is-active:hover {
+    background: var(--background-modifier-hover);
+}
+
+.cross-player-sleep-timer.is-active .cross-player-sleep-timer-label {
+    display: inline-block;
+}
+
+.cross-player-sleep-timer.is-ending {
+    color: var(--text-warning, var(--text-error));
+    border-color: var(--text-warning, var(--text-error));
+}
+
+.cross-player-sleep-custom-input {
+    width: 100%;
+    margin: 10px 0 4px;
+}
+
 .cross-player-item {
     position: relative;
     display: flex;

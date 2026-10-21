@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
     watchedFolder: '',
     defaultPlaybackSpeed: 2.0,
     speedPresets: '1, 1.5, 2, 2.5',
+    sleepTimerPresets: '5, 15, 30, 45, 60, 90',
     seekSecondsForward: 10,
     seekSecondsBackward: 10,
     youtubeDlpPath: 'yt-dlp',
@@ -109,6 +110,12 @@ export default class CrossPlayerPlugin extends Plugin {
     private deferredMetadataTimer: number | null = null;
     private isHydratingDeferredMetadata: boolean = false;
     private pendingPlaybackStateKeys: Set<string> = new Set();
+
+    // Sleep timer state is intentionally in-memory only: it is device-local
+    // and must not be synced through data.json.
+    private sleepTimerEndsAt: number | null = null;
+    private sleepTimerMinutes: number | null = null;
+    private sleepTimerStopAtFileEnd: boolean = false;
 
     private getLocalStorage(): Storage | null {
         if (typeof window === 'undefined') return null;
@@ -877,6 +884,29 @@ export default class CrossPlayerPlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'set-sleep-timer',
+            name: 'Set Sleep Timer',
+            callback: async () => {
+                await this.activateListView();
+                // The list view may have just been created; give it a frame to
+                // render the sleep-timer button before anchoring the menu.
+                window.setTimeout(() => {
+                    this.listView?.openSleepTimerMenu();
+                }, 80);
+            }
+        });
+
+        this.addCommand({
+            id: 'cancel-sleep-timer',
+            name: 'Cancel Sleep Timer',
+            checkCallback: (checking: boolean) => {
+                if (!this.isSleepTimerActive()) return false;
+                if (!checking) this.cancelSleepTimer();
+                return true;
+            }
+        });
+
         this.debouncedReload = debounce(async () => {
             await this.reloadSyncedDataIfChanged();
         }, 1000, true);
@@ -884,15 +914,20 @@ export default class CrossPlayerPlugin extends Plugin {
         // Also reload when window gains focus (best for switching devices)
         this.registerDomEvent(window, 'focus', () => {
             this.debouncedReload();
+            this.tickSleepTimer();
         });
         this.registerDomEvent(activeDocument, 'visibilitychange', () => {
             if (activeDocument.visibilityState === 'visible') {
                 this.debouncedReload();
+                this.tickSleepTimer();
             }
         });
         this.registerInterval(window.setInterval(() => {
             this.debouncedReload();
         }, 5000));
+        this.registerInterval(window.setInterval(() => {
+            this.tickSleepTimer();
+        }, 1000));
 
         this.registerWatchers();
 
@@ -915,7 +950,13 @@ export default class CrossPlayerPlugin extends Plugin {
         // Removed interval check as requested, relying on file events
     }
 
-    onunload() {}
+    onunload() {
+        // Sleep timers are session-only. Never persist the deadline; a stale
+        // timer should not pause playback after Obsidian restarts.
+        this.sleepTimerEndsAt = null;
+        this.sleepTimerMinutes = null;
+        this.sleepTimerStopAtFileEnd = false;
+    }
 
     async loadDeviceId() {
         // Try to load from localStorage
@@ -1725,6 +1766,155 @@ export default class CrossPlayerPlugin extends Plugin {
         return presets;
     }
 
+    getSleepTimerPresets(): number[] {
+        // Same compact, tolerant parsing as the speed presets. Values are
+        // whole minutes: 1 minute minimum, 12 hours maximum.
+        const raw = this.data.settings.sleepTimerPresets ?? '';
+        const seen: Record<string, boolean> = {};
+        const presets: number[] = [];
+        for (const part of raw.split(',')) {
+            const parsed = parseInt(part.trim(), 10);
+            if (!isFinite(parsed)) continue;
+            const clamped = Math.min(720, Math.max(1, parsed));
+            const key = String(clamped);
+            if (seen[key]) continue;
+            seen[key] = true;
+            presets.push(clamped);
+        }
+        presets.sort((a, b) => a - b);
+        return presets;
+    }
+
+    formatSleepTimerPresetLabel(minutes: number): string {
+        const total = Math.max(1, Math.floor(minutes));
+        if (total < 60) {
+            return total === 1 ? '1 minute' : `${total} minutes`;
+        }
+
+        const hours = Math.floor(total / 60);
+        const remainder = total % 60;
+        const hourLabel = hours === 1 ? '1 hour' : `${hours} hours`;
+        if (remainder === 0) return hourLabel;
+        const minuteLabel = remainder === 1 ? '1 minute' : `${remainder} minutes`;
+        return `${hourLabel} ${minuteLabel}`;
+    }
+
+    formatSleepTimerRemaining(remainingMs: number): string {
+        const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+        if (totalSeconds <= 60) {
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            const paddedSeconds = seconds < 10 ? `0${seconds}` : String(seconds);
+            return `${minutes}:${paddedSeconds}`;
+        }
+
+        const totalMinutes = Math.ceil(totalSeconds / 60);
+        if (totalMinutes < 60) return `${totalMinutes}m`;
+
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+    }
+
+    isSleepTimerActive(): boolean {
+        return this.sleepTimerEndsAt !== null || this.sleepTimerStopAtFileEnd;
+    }
+
+    isSleepTimerEndOfFile(): boolean {
+        return this.sleepTimerStopAtFileEnd;
+    }
+
+    getSleepTimerRemainingMs(): number | null {
+        if (this.sleepTimerEndsAt === null) return null;
+        return Math.max(0, this.sleepTimerEndsAt - Date.now());
+    }
+
+    getActiveSleepTimerMinutes(): number | null {
+        return this.sleepTimerEndsAt !== null ? this.sleepTimerMinutes : null;
+    }
+
+    setSleepTimer(minutes: number): void {
+        const safeMinutes = Math.min(720, Math.max(1, Math.floor(minutes)));
+        if (!isFinite(safeMinutes)) return;
+
+        this.sleepTimerEndsAt = Date.now() + safeMinutes * 60_000;
+        this.sleepTimerMinutes = safeMinutes;
+        this.sleepTimerStopAtFileEnd = false;
+        this.updateSleepTimerDisplays();
+        new Notice(`Sleep timer set for ${this.formatSleepTimerPresetLabel(safeMinutes)}.`);
+    }
+
+    setSleepTimerToEndOfFile(): void {
+        this.sleepTimerEndsAt = null;
+        this.sleepTimerMinutes = null;
+        this.sleepTimerStopAtFileEnd = true;
+        this.updateSleepTimerDisplays();
+        new Notice('Sleep timer: playback will stop after the current file.');
+    }
+
+    cancelSleepTimer(notify: boolean = true): void {
+        const wasActive = this.isSleepTimerActive();
+        this.sleepTimerEndsAt = null;
+        this.sleepTimerMinutes = null;
+        this.sleepTimerStopAtFileEnd = false;
+        this.updateSleepTimerDisplays();
+
+        if (wasActive && notify) {
+            new Notice('Sleep timer cancelled.');
+        }
+    }
+
+    tickSleepTimer(): void {
+        if (this.sleepTimerEndsAt === null) return;
+
+        if (Date.now() >= this.sleepTimerEndsAt) {
+            this.fireSleepTimer();
+            return;
+        }
+
+        this.updateSleepTimerDisplays();
+    }
+
+    checkSleepTimerDeadline(): void {
+        if (this.sleepTimerEndsAt === null) return;
+        if (Date.now() >= this.sleepTimerEndsAt) {
+            this.fireSleepTimer();
+        }
+    }
+
+    handleSleepTimerFileEnded(): boolean {
+        if (!this.sleepTimerStopAtFileEnd) return false;
+
+        this.sleepTimerStopAtFileEnd = false;
+        this.updateSleepTimerDisplays();
+        new Notice('Sleep timer ended. Playback stopped after the current file.');
+        return true;
+    }
+
+    private fireSleepTimer(): void {
+        const mainView = this.mainView;
+        const wasPlaying = !!mainView && mainView.isActivelyPlayingLocally();
+
+        this.sleepTimerEndsAt = null;
+        this.sleepTimerMinutes = null;
+        this.sleepTimerStopAtFileEnd = false;
+        this.updateSleepTimerDisplays();
+
+        if (wasPlaying && mainView) {
+            mainView.videoEl.pause();
+            new Notice('Sleep timer ended. Playback paused.');
+        }
+    }
+
+    updateSleepTimerDisplays(): void {
+        const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CROSS_PLAYER_LIST);
+        for (const leaf of leaves) {
+            if (leaf.view instanceof CrossPlayerListView) {
+                leaf.view.updateSleepTimerDisplay();
+            }
+        }
+    }
+
     async updateStatus(id: string, status: 'pending' | 'playing' | 'completed') {       const item = this.data.queue.find(i => i.id === id);
         if (item && item.status !== status) {
             const previousStatus = item.status;
@@ -2462,6 +2652,71 @@ class ConsumptionStatsModal extends Modal {
     }
 }
 
+class SleepTimerCustomModal extends Modal {
+    plugin: CrossPlayerPlugin;
+
+    constructor(app: App, plugin: CrossPlayerPlugin) {
+        super(app);
+        this.plugin = plugin;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h3', { text: 'Sleep Timer' });
+        contentEl.createEl('p', {
+            text: 'Pause playback after a custom number of minutes.',
+            cls: 'cross-player-muted-text'
+        });
+
+        const input = contentEl.createEl('input', {
+            type: 'number',
+            cls: 'cross-player-sleep-custom-input',
+            attr: {
+                min: '1',
+                max: '720',
+                step: '1',
+                placeholder: 'Minutes'
+            }
+        });
+        input.value = '30';
+
+        const actions = contentEl.createDiv({ cls: 'cross-player-modal-actions' });
+
+        const cancelBtn = actions.createEl('button', { text: 'Cancel' });
+        cancelBtn.onclick = () => this.close();
+
+        const setBtn = actions.createEl('button', { text: 'Set Timer', cls: 'mod-cta' });
+        const submit = () => {
+            const minutes = parseInt(input.value, 10);
+            if (!isFinite(minutes) || minutes < 1 || minutes > 720) {
+                new Notice('Enter a number of minutes between 1 and 720.');
+                input.focus();
+                return;
+            }
+            this.plugin.setSleepTimer(minutes);
+            this.close();
+        };
+        setBtn.onclick = submit;
+
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                submit();
+            }
+        });
+
+        window.setTimeout(() => {
+            input.focus();
+            input.select();
+        }, 0);
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
 type DeclarativeSettingRender = (setting: Setting) => void;
 
 interface DeclarativeSettingDefinition {
@@ -2515,6 +2770,17 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.data.settings.speedPresets)
                 .onChange(async (value) => {
                     this.plugin.data.settings.speedPresets = value;
+                    await this.plugin.saveData();
+                }));
+    }
+
+    private wireSleepTimerPresetsRow(setting: Setting): void {
+        setting
+            .addText(text => text
+                .setPlaceholder('e.g. 5, 15, 30, 45, 60, 90')
+                .setValue(this.plugin.data.settings.sleepTimerPresets)
+                .onChange(async (value) => {
+                    this.plugin.data.settings.sleepTimerPresets = value;
                     await this.plugin.saveData();
                 }));
     }
@@ -2703,6 +2969,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
             .setName('Speed Presets')
             .setDesc('Comma-separated speeds for the queue presets dropdown. Leave empty to hide it.'));
 
+        this.wireSleepTimerPresetsRow(new Setting(containerEl)
+            .setName('Sleep Timer Presets')
+            .setDesc('Comma-separated minutes for the sleep timer menu. Leave empty to only offer Custom and End of current file.'));
+
         this.wireSeekForwardRow(new Setting(containerEl)
             .setName('Seek Forward Seconds')
             .setDesc('Number of seconds to seek forward.'));
@@ -2785,6 +3055,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                     { name: 'Watched Folder', desc: 'Current watched folder path (relative to vault root).', render: (setting) => this.wireWatchedFolderRow(setting) },
                     { name: 'Default Playback Speed', desc: 'The default speed when the player starts or resets.', render: (setting) => this.wirePlaybackSpeedRow(setting) },
                     { name: 'Speed Presets', desc: 'Comma-separated speeds for the queue presets dropdown. Leave empty to hide it.', render: (setting) => this.wireSpeedPresetsRow(setting) },
+                    { name: 'Sleep Timer Presets', desc: 'Comma-separated minutes for the sleep timer menu. Leave empty to only offer Custom and End of current file.', render: (setting) => this.wireSleepTimerPresetsRow(setting) },
                     { name: 'Seek Forward Seconds', desc: 'Number of seconds to seek forward.', render: (setting) => this.wireSeekForwardRow(setting) },
                     { name: 'Seek Backward Seconds', desc: 'Number of seconds to seek backward.', render: (setting) => this.wireSeekBackwardRow(setting) },
                     { name: 'Show Media Indicator', desc: 'Show audio/video icon in the queue list.', render: (setting) => this.wireMediaIndicatorRow(setting) },
@@ -2827,6 +3098,10 @@ class CrossPlayerSettingTab extends PluginSettingTab {
 class CrossPlayerListView extends ItemView {
     plugin: CrossPlayerPlugin;
     private savedScrollTop: number = 0;
+    private sleepTimerButtonEl: HTMLElement | null = null;
+    private sleepTimerIconEl: HTMLElement | null = null;
+    private sleepTimerLabelEl: HTMLElement | null = null;
+    private sleepTimerIconName: string | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: CrossPlayerPlugin) {
         super(leaf);
@@ -2883,6 +3158,92 @@ class CrossPlayerListView extends ItemView {
         if (sizeEl) {
             sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
             sizeEl.toggleClass('is-over-limit', sizeInGB > limitGB);
+        }
+    }
+
+    updateSleepTimerDisplay() {
+        const button = this.sleepTimerButtonEl;
+        const icon = this.sleepTimerIconEl;
+        const label = this.sleepTimerLabelEl;
+        if (!button || !icon || !label || !button.isConnected) return;
+
+        const active = this.plugin.isSleepTimerActive();
+        const endOfFile = this.plugin.isSleepTimerEndOfFile();
+        const remaining = this.plugin.getSleepTimerRemainingMs();
+
+        let labelText = '';
+        let tooltip = 'Set sleep timer';
+
+        if (endOfFile) {
+            labelText = 'End';
+            tooltip = 'Sleep timer: stop after the current file';
+        } else if (remaining !== null) {
+            labelText = this.plugin.formatSleepTimerRemaining(remaining);
+            const pauseAt = new Date(Date.now() + remaining).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+            tooltip = `Sleep timer: ${labelText} remaining (pauses at ${pauseAt})`;
+        }
+
+        button.toggleClass('is-active', active);
+        button.toggleClass('is-ending', remaining !== null && remaining <= 60_000);
+        button.ariaLabel = tooltip;
+
+        const iconName = active ? 'moon-star' : 'moon';
+        if (this.sleepTimerIconName !== iconName) {
+            this.sleepTimerIconName = iconName;
+            setIcon(icon, iconName);
+        }
+
+        if (label.textContent !== labelText) {
+            label.setText(labelText);
+        }
+    }
+
+    openSleepTimerMenu(evt?: MouseEvent) {
+        const menu = new Menu();
+        const presets = this.plugin.getSleepTimerPresets();
+        const activeMinutes = this.plugin.getActiveSleepTimerMinutes();
+
+        for (const minutes of presets) {
+            menu.addItem(item => item
+                .setTitle(this.plugin.formatSleepTimerPresetLabel(minutes))
+                .setChecked(activeMinutes === minutes)
+                .onClick(() => this.plugin.setSleepTimer(minutes)));
+        }
+
+        if (presets.length > 0) {
+            menu.addSeparator();
+        }
+
+        menu.addItem(item => item
+            .setTitle('End of current file')
+            .setIcon('file-check')
+            .setChecked(this.plugin.isSleepTimerEndOfFile())
+            .onClick(() => this.plugin.setSleepTimerToEndOfFile()));
+
+        menu.addItem(item => item
+            .setTitle('Custom…')
+            .setIcon('pencil')
+            .onClick(() => new SleepTimerCustomModal(this.app, this.plugin).open()));
+
+        if (this.plugin.isSleepTimerActive()) {
+            menu.addSeparator();
+            menu.addItem(item => item
+                .setTitle('Turn off')
+                .setIcon('x')
+                .onClick(() => this.plugin.cancelSleepTimer()));
+        }
+
+        const anchor = this.sleepTimerButtonEl;
+        if (anchor) {
+            const rect = anchor.getBoundingClientRect();
+            menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+        } else if (evt) {
+            menu.showAtMouseEvent(evt);
+        } else {
+            menu.showAtPosition({ x: 24, y: 80 });
         }
     }
 
@@ -2983,6 +3344,20 @@ class CrossPlayerListView extends ItemView {
         cleanBtn.onclick = () => {
             new ConfirmCleanConsumedMediaModal(this.app, this.plugin).open();
         };
+
+        const sleepBtn = titleRow.createDiv({ cls: "clickable-icon cross-player-sleep-timer" });
+        const sleepIcon = sleepBtn.createSpan({ cls: "cross-player-sleep-timer-icon" });
+        const sleepLabel = sleepBtn.createSpan({ cls: "cross-player-sleep-timer-label" });
+        this.sleepTimerButtonEl = sleepBtn;
+        this.sleepTimerIconEl = sleepIcon;
+        this.sleepTimerLabelEl = sleepLabel;
+        this.sleepTimerIconName = null;
+        sleepBtn.ariaLabel = "Set sleep timer";
+        sleepBtn.onclick = (evt) => {
+            evt.stopPropagation();
+            this.openSleepTimerMenu(evt);
+        };
+        this.updateSleepTimerDisplay();
 
         const speed = this.plugin.data.playbackSpeed || 1.0;
         const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
@@ -3689,8 +4064,12 @@ class CrossPlayerMainView extends ItemView {
                     await this.plugin.updateStatus(this.currentItem.id, 'completed');
                 }
 
+                // End-of-file sleep timers suppress the normal autoplay-next
+                // behavior, so playback does not continue while the user sleeps.
+                const stoppedBySleepTimer = this.plugin.handleSleepTimerFileEnded();
+
                 // Check autoplay regardless of whether it was already marked completed
-                if (this.plugin.data.settings.autoplayNext) {
+                if (!stoppedBySleepTimer && this.plugin.data.settings.autoplayNext) {
                     void this.plugin.playNextUnread();
                 }
             }
@@ -3700,6 +4079,11 @@ class CrossPlayerMainView extends ItemView {
 
         this.videoEl.ontimeupdate = async () => {
             if (this.currentItem && this.isCurrentPlaybackSource()) {
+                // Check the wall-clock deadline on every media tick as a
+                // fallback for backgrounded mobile WebViews that throttle
+                // JS timers while audio keeps playing.
+                this.plugin.checkSleepTimerDeadline();
+
                 // Throttled ETC update in List View
                 const now = Date.now();
                 // Update every 5 seconds (5000ms) to reflect progress in ETC without spamming updates

@@ -2283,6 +2283,7 @@ var DEFAULT_SETTINGS = {
   watchedFolder: "",
   defaultPlaybackSpeed: 2,
   speedPresets: "1, 1.5, 2, 2.5",
+  sleepTimerPresets: "5, 15, 30, 45, 60, 90",
   seekSecondsForward: 10,
   seekSecondsBackward: 10,
   youtubeDlpPath: "yt-dlp",
@@ -2327,6 +2328,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.deferredMetadataTimer = null;
     this.isHydratingDeferredMetadata = false;
     this.pendingPlaybackStateKeys = /* @__PURE__ */ new Set();
+    // Sleep timer state is intentionally in-memory only: it is device-local
+    // and must not be synced through data.json.
+    this.sleepTimerEndsAt = null;
+    this.sleepTimerMinutes = null;
+    this.sleepTimerStopAtFileEnd = false;
   }
   getLocalStorage() {
     if (typeof window === "undefined")
@@ -2956,20 +2962,47 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         }
       }
     });
+    this.addCommand({
+      id: "set-sleep-timer",
+      name: "Set Sleep Timer",
+      callback: async () => {
+        await this.activateListView();
+        window.setTimeout(() => {
+          var _a;
+          (_a = this.listView) == null ? void 0 : _a.openSleepTimerMenu();
+        }, 80);
+      }
+    });
+    this.addCommand({
+      id: "cancel-sleep-timer",
+      name: "Cancel Sleep Timer",
+      checkCallback: (checking) => {
+        if (!this.isSleepTimerActive())
+          return false;
+        if (!checking)
+          this.cancelSleepTimer();
+        return true;
+      }
+    });
     this.debouncedReload = (0, import_obsidian.debounce)(async () => {
       await this.reloadSyncedDataIfChanged();
     }, 1e3, true);
     this.registerDomEvent(window, "focus", () => {
       this.debouncedReload();
+      this.tickSleepTimer();
     });
     this.registerDomEvent(activeDocument, "visibilitychange", () => {
       if (activeDocument.visibilityState === "visible") {
         this.debouncedReload();
+        this.tickSleepTimer();
       }
     });
     this.registerInterval(window.setInterval(() => {
       this.debouncedReload();
     }, 5e3));
+    this.registerInterval(window.setInterval(() => {
+      this.tickSleepTimer();
+    }, 1e3));
     this.registerWatchers();
     if (this.data.settings.watchedFolder) {
       const watched = this.data.settings.watchedFolder;
@@ -2981,6 +3014,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     void this.updateDeviceStatus();
   }
   onunload() {
+    this.sleepTimerEndsAt = null;
+    this.sleepTimerMinutes = null;
+    this.sleepTimerStopAtFileEnd = false;
   }
   async loadDeviceId() {
     let id = this.getStoredString("cross-player-device-id");
@@ -3607,6 +3643,138 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     presets.sort((a, b) => a - b);
     return presets;
   }
+  getSleepTimerPresets() {
+    var _a;
+    const raw = (_a = this.data.settings.sleepTimerPresets) != null ? _a : "";
+    const seen = {};
+    const presets = [];
+    for (const part of raw.split(",")) {
+      const parsed = parseInt(part.trim(), 10);
+      if (!isFinite(parsed))
+        continue;
+      const clamped = Math.min(720, Math.max(1, parsed));
+      const key = String(clamped);
+      if (seen[key])
+        continue;
+      seen[key] = true;
+      presets.push(clamped);
+    }
+    presets.sort((a, b) => a - b);
+    return presets;
+  }
+  formatSleepTimerPresetLabel(minutes) {
+    const total = Math.max(1, Math.floor(minutes));
+    if (total < 60) {
+      return total === 1 ? "1 minute" : `${total} minutes`;
+    }
+    const hours = Math.floor(total / 60);
+    const remainder = total % 60;
+    const hourLabel = hours === 1 ? "1 hour" : `${hours} hours`;
+    if (remainder === 0)
+      return hourLabel;
+    const minuteLabel = remainder === 1 ? "1 minute" : `${remainder} minutes`;
+    return `${hourLabel} ${minuteLabel}`;
+  }
+  formatSleepTimerRemaining(remainingMs) {
+    const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1e3));
+    if (totalSeconds <= 60) {
+      const minutes2 = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      const paddedSeconds = seconds < 10 ? `0${seconds}` : String(seconds);
+      return `${minutes2}:${paddedSeconds}`;
+    }
+    const totalMinutes = Math.ceil(totalSeconds / 60);
+    if (totalMinutes < 60)
+      return `${totalMinutes}m`;
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  isSleepTimerActive() {
+    return this.sleepTimerEndsAt !== null || this.sleepTimerStopAtFileEnd;
+  }
+  isSleepTimerEndOfFile() {
+    return this.sleepTimerStopAtFileEnd;
+  }
+  getSleepTimerRemainingMs() {
+    if (this.sleepTimerEndsAt === null)
+      return null;
+    return Math.max(0, this.sleepTimerEndsAt - Date.now());
+  }
+  getActiveSleepTimerMinutes() {
+    return this.sleepTimerEndsAt !== null ? this.sleepTimerMinutes : null;
+  }
+  setSleepTimer(minutes) {
+    const safeMinutes = Math.min(720, Math.max(1, Math.floor(minutes)));
+    if (!isFinite(safeMinutes))
+      return;
+    this.sleepTimerEndsAt = Date.now() + safeMinutes * 6e4;
+    this.sleepTimerMinutes = safeMinutes;
+    this.sleepTimerStopAtFileEnd = false;
+    this.updateSleepTimerDisplays();
+    new import_obsidian.Notice(`Sleep timer set for ${this.formatSleepTimerPresetLabel(safeMinutes)}.`);
+  }
+  setSleepTimerToEndOfFile() {
+    this.sleepTimerEndsAt = null;
+    this.sleepTimerMinutes = null;
+    this.sleepTimerStopAtFileEnd = true;
+    this.updateSleepTimerDisplays();
+    new import_obsidian.Notice("Sleep timer: playback will stop after the current file.");
+  }
+  cancelSleepTimer(notify = true) {
+    const wasActive = this.isSleepTimerActive();
+    this.sleepTimerEndsAt = null;
+    this.sleepTimerMinutes = null;
+    this.sleepTimerStopAtFileEnd = false;
+    this.updateSleepTimerDisplays();
+    if (wasActive && notify) {
+      new import_obsidian.Notice("Sleep timer cancelled.");
+    }
+  }
+  tickSleepTimer() {
+    if (this.sleepTimerEndsAt === null)
+      return;
+    if (Date.now() >= this.sleepTimerEndsAt) {
+      this.fireSleepTimer();
+      return;
+    }
+    this.updateSleepTimerDisplays();
+  }
+  checkSleepTimerDeadline() {
+    if (this.sleepTimerEndsAt === null)
+      return;
+    if (Date.now() >= this.sleepTimerEndsAt) {
+      this.fireSleepTimer();
+    }
+  }
+  handleSleepTimerFileEnded() {
+    if (!this.sleepTimerStopAtFileEnd)
+      return false;
+    this.sleepTimerStopAtFileEnd = false;
+    this.updateSleepTimerDisplays();
+    new import_obsidian.Notice("Sleep timer ended. Playback stopped after the current file.");
+    return true;
+  }
+  fireSleepTimer() {
+    const mainView = this.mainView;
+    const wasPlaying = !!mainView && mainView.isActivelyPlayingLocally();
+    this.sleepTimerEndsAt = null;
+    this.sleepTimerMinutes = null;
+    this.sleepTimerStopAtFileEnd = false;
+    this.updateSleepTimerDisplays();
+    if (wasPlaying && mainView) {
+      mainView.videoEl.pause();
+      new import_obsidian.Notice("Sleep timer ended. Playback paused.");
+    }
+  }
+  updateSleepTimerDisplays() {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CROSS_PLAYER_LIST);
+    for (const leaf of leaves) {
+      if (leaf.view instanceof CrossPlayerListView) {
+        leaf.view.updateSleepTimerDisplay();
+      }
+    }
+  }
   async updateStatus(id, status) {
     const item = this.data.queue.find((i) => i.id === id);
     if (item && item.status !== status) {
@@ -4193,6 +4361,60 @@ var ConsumptionStatsModal = class extends import_obsidian.Modal {
     this.contentEl.empty();
   }
 };
+var SleepTimerCustomModal = class extends import_obsidian.Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: "Sleep Timer" });
+    contentEl.createEl("p", {
+      text: "Pause playback after a custom number of minutes.",
+      cls: "cross-player-muted-text"
+    });
+    const input = contentEl.createEl("input", {
+      type: "number",
+      cls: "cross-player-sleep-custom-input",
+      attr: {
+        min: "1",
+        max: "720",
+        step: "1",
+        placeholder: "Minutes"
+      }
+    });
+    input.value = "30";
+    const actions = contentEl.createDiv({ cls: "cross-player-modal-actions" });
+    const cancelBtn = actions.createEl("button", { text: "Cancel" });
+    cancelBtn.onclick = () => this.close();
+    const setBtn = actions.createEl("button", { text: "Set Timer", cls: "mod-cta" });
+    const submit = () => {
+      const minutes = parseInt(input.value, 10);
+      if (!isFinite(minutes) || minutes < 1 || minutes > 720) {
+        new import_obsidian.Notice("Enter a number of minutes between 1 and 720.");
+        input.focus();
+        return;
+      }
+      this.plugin.setSleepTimer(minutes);
+      this.close();
+    };
+    setBtn.onclick = submit;
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        submit();
+      }
+    });
+    window.setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -4215,6 +4437,12 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
   wireSpeedPresetsRow(setting) {
     setting.addText((text) => text.setPlaceholder("e.g. 1, 1.5, 2, 2.5").setValue(this.plugin.data.settings.speedPresets).onChange(async (value) => {
       this.plugin.data.settings.speedPresets = value;
+      await this.plugin.saveData();
+    }));
+  }
+  wireSleepTimerPresetsRow(setting) {
+    setting.addText((text) => text.setPlaceholder("e.g. 5, 15, 30, 45, 60, 90").setValue(this.plugin.data.settings.sleepTimerPresets).onChange(async (value) => {
+      this.plugin.data.settings.sleepTimerPresets = value;
       await this.plugin.saveData();
     }));
   }
@@ -4332,6 +4560,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     this.wireWatchedFolderRow(new import_obsidian.Setting(containerEl).setName("Watched Folder").setDesc("Current watched folder path (relative to vault root)."));
     this.wirePlaybackSpeedRow(new import_obsidian.Setting(containerEl).setName("Default Playback Speed").setDesc("The default speed when the player starts or resets."));
     this.wireSpeedPresetsRow(new import_obsidian.Setting(containerEl).setName("Speed Presets").setDesc("Comma-separated speeds for the queue presets dropdown. Leave empty to hide it."));
+    this.wireSleepTimerPresetsRow(new import_obsidian.Setting(containerEl).setName("Sleep Timer Presets").setDesc("Comma-separated minutes for the sleep timer menu. Leave empty to only offer Custom and End of current file."));
     this.wireSeekForwardRow(new import_obsidian.Setting(containerEl).setName("Seek Forward Seconds").setDesc("Number of seconds to seek forward."));
     this.wireSeekBackwardRow(new import_obsidian.Setting(containerEl).setName("Seek Backward Seconds").setDesc("Number of seconds to seek backward."));
     this.wireMediaIndicatorRow(new import_obsidian.Setting(containerEl).setName("Show Media Indicator").setDesc("Show audio/video icon in the queue list."));
@@ -4366,6 +4595,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
           { name: "Watched Folder", desc: "Current watched folder path (relative to vault root).", render: (setting) => this.wireWatchedFolderRow(setting) },
           { name: "Default Playback Speed", desc: "The default speed when the player starts or resets.", render: (setting) => this.wirePlaybackSpeedRow(setting) },
           { name: "Speed Presets", desc: "Comma-separated speeds for the queue presets dropdown. Leave empty to hide it.", render: (setting) => this.wireSpeedPresetsRow(setting) },
+          { name: "Sleep Timer Presets", desc: "Comma-separated minutes for the sleep timer menu. Leave empty to only offer Custom and End of current file.", render: (setting) => this.wireSleepTimerPresetsRow(setting) },
           { name: "Seek Forward Seconds", desc: "Number of seconds to seek forward.", render: (setting) => this.wireSeekForwardRow(setting) },
           { name: "Seek Backward Seconds", desc: "Number of seconds to seek backward.", render: (setting) => this.wireSeekBackwardRow(setting) },
           { name: "Show Media Indicator", desc: "Show audio/video icon in the queue list.", render: (setting) => this.wireMediaIndicatorRow(setting) },
@@ -4408,6 +4638,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.savedScrollTop = 0;
+    this.sleepTimerButtonEl = null;
+    this.sleepTimerIconEl = null;
+    this.sleepTimerLabelEl = null;
+    this.sleepTimerIconName = null;
     this.plugin = plugin;
     this.savedScrollTop = this.plugin.data.queueScrollTop || 0;
   }
@@ -4452,6 +4686,66 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     if (sizeEl) {
       sizeEl.setText(`Size: ${sizeInGB.toFixed(2)} GB / ${limitGB.toFixed(1)} GB`);
       sizeEl.toggleClass("is-over-limit", sizeInGB > limitGB);
+    }
+  }
+  updateSleepTimerDisplay() {
+    const button = this.sleepTimerButtonEl;
+    const icon = this.sleepTimerIconEl;
+    const label = this.sleepTimerLabelEl;
+    if (!button || !icon || !label || !button.isConnected)
+      return;
+    const active = this.plugin.isSleepTimerActive();
+    const endOfFile = this.plugin.isSleepTimerEndOfFile();
+    const remaining = this.plugin.getSleepTimerRemainingMs();
+    let labelText = "";
+    let tooltip = "Set sleep timer";
+    if (endOfFile) {
+      labelText = "End";
+      tooltip = "Sleep timer: stop after the current file";
+    } else if (remaining !== null) {
+      labelText = this.plugin.formatSleepTimerRemaining(remaining);
+      const pauseAt = new Date(Date.now() + remaining).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+      tooltip = `Sleep timer: ${labelText} remaining (pauses at ${pauseAt})`;
+    }
+    button.toggleClass("is-active", active);
+    button.toggleClass("is-ending", remaining !== null && remaining <= 6e4);
+    button.ariaLabel = tooltip;
+    const iconName = active ? "moon-star" : "moon";
+    if (this.sleepTimerIconName !== iconName) {
+      this.sleepTimerIconName = iconName;
+      (0, import_obsidian.setIcon)(icon, iconName);
+    }
+    if (label.textContent !== labelText) {
+      label.setText(labelText);
+    }
+  }
+  openSleepTimerMenu(evt) {
+    const menu = new import_obsidian.Menu();
+    const presets = this.plugin.getSleepTimerPresets();
+    const activeMinutes = this.plugin.getActiveSleepTimerMinutes();
+    for (const minutes of presets) {
+      menu.addItem((item) => item.setTitle(this.plugin.formatSleepTimerPresetLabel(minutes)).setChecked(activeMinutes === minutes).onClick(() => this.plugin.setSleepTimer(minutes)));
+    }
+    if (presets.length > 0) {
+      menu.addSeparator();
+    }
+    menu.addItem((item) => item.setTitle("End of current file").setIcon("file-check").setChecked(this.plugin.isSleepTimerEndOfFile()).onClick(() => this.plugin.setSleepTimerToEndOfFile()));
+    menu.addItem((item) => item.setTitle("Custom\u2026").setIcon("pencil").onClick(() => new SleepTimerCustomModal(this.app, this.plugin).open()));
+    if (this.plugin.isSleepTimerActive()) {
+      menu.addSeparator();
+      menu.addItem((item) => item.setTitle("Turn off").setIcon("x").onClick(() => this.plugin.cancelSleepTimer()));
+    }
+    const anchor = this.sleepTimerButtonEl;
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+    } else if (evt) {
+      menu.showAtMouseEvent(evt);
+    } else {
+      menu.showAtPosition({ x: 24, y: 80 });
     }
   }
   getDisplayNameParts(name) {
@@ -4513,6 +4807,19 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     cleanBtn.onclick = () => {
       new ConfirmCleanConsumedMediaModal(this.app, this.plugin).open();
     };
+    const sleepBtn = titleRow.createDiv({ cls: "clickable-icon cross-player-sleep-timer" });
+    const sleepIcon = sleepBtn.createSpan({ cls: "cross-player-sleep-timer-icon" });
+    const sleepLabel = sleepBtn.createSpan({ cls: "cross-player-sleep-timer-label" });
+    this.sleepTimerButtonEl = sleepBtn;
+    this.sleepTimerIconEl = sleepIcon;
+    this.sleepTimerLabelEl = sleepLabel;
+    this.sleepTimerIconName = null;
+    sleepBtn.ariaLabel = "Set sleep timer";
+    sleepBtn.onclick = (evt) => {
+      evt.stopPropagation();
+      this.openSleepTimerMenu(evt);
+    };
+    this.updateSleepTimerDisplay();
     const speed = this.plugin.data.playbackSpeed || 1;
     const speedContainer = headerContainer.createDiv({ cls: "cross-player-speed-container" });
     const minusBtn = speedContainer.createDiv({ cls: "clickable-icon" });
@@ -5050,7 +5357,8 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         if (this.currentItem.status !== "completed") {
           await this.plugin.updateStatus(this.currentItem.id, "completed");
         }
-        if (this.plugin.data.settings.autoplayNext) {
+        const stoppedBySleepTimer = this.plugin.handleSleepTimerFileEnded();
+        if (!stoppedBySleepTimer && this.plugin.data.settings.autoplayNext) {
           void this.plugin.playNextUnread();
         }
       }
@@ -5058,6 +5366,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     };
     this.videoEl.ontimeupdate = async () => {
       if (this.currentItem && this.isCurrentPlaybackSource()) {
+        this.plugin.checkSleepTimerDeadline();
         const now = Date.now();
         if (now - this.lastEtcUpdate > 5e3) {
           this.lastEtcUpdate = now;

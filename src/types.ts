@@ -21,6 +21,7 @@ export interface CrossPlayerSettings {
     watchedFolder: string;
     defaultPlaybackSpeed: number;
     speedPresets: string;
+    sleepTimerPresets: string;
     seekSecondsForward: number;
     seekSecondsBackward: number;
     // YouTube Download Settings
