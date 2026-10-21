@@ -37,6 +37,16 @@ jobs:
             manifest.json
             styles.css
 
+      - name: Build release notes body
+        run: |
+          NOTES_FILE="RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" release-body.md
+          else
+            printf '# Cross Player %s\n\nSee the full changelog at https://github.com/%s/commits/%s\n' \
+              "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" > release-body.md
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -44,6 +54,7 @@ jobs:
             main.js
             manifest.json
             styles.css
-          generate_release_notes: true
+          body_path: release-body.md
+          generate_release_notes: false
           draft: false
           prerelease: false
