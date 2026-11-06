@@ -1,6 +1,7 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, setIcon, Notice, TFolder, TFile, FuzzySuggestModal, TAbstractFile, Menu, Modal, Platform, debounce } from 'obsidian';
 // import ffmpegStatic from 'ffmpeg-static';
-import { MediaItem, CrossPlayerData, CrossPlayerSettings, DownloadStatus, ConsumptionStatBucket } from './types';
+import { MediaItem, CrossPlayerData, CrossPlayerSettings, CrossPlayerSharedData, DeviceStateFile, DownloadStatus, ConsumptionStatBucket } from './types';
+import { buildSharedDataPayload, mergeDeviceStates, isFileDeletionAuthoritative, DEFAULT_DELETED_FILE_GUARD_MS, DEFAULT_RECREATED_FILE_TOLERANCE_MS } from './sync';
 import Sortable from 'sortablejs';
 
 interface ActiveDownload extends DownloadStatus {
@@ -82,9 +83,15 @@ const DEFAULT_SETTINGS: CrossPlayerSettings = {
 
 const LAST_WATCHED_FOLDER_KEY = 'cross-player:last-good-watched-folder';
 const REQUIRED_PLUGIN_FILES = ['manifest.json', 'main.js'];
+const DEVICE_STATE_DIR = 'state';
+const DEVICE_STATE_SCHEMA_VERSION = 1;
+const DELETED_PATH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const RECENT_DOWNLOAD_OUTPUT_TTL_MS = 15 * 60 * 1000;
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'm4b', 'weba', 'aac', 'flac', 'aif', 'aiff', 'caf'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mkv', '3gp'];
 const SUPPORTED_MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS];
+
+type FileDeletionDisposition = 'keep' | 'wait' | 'delete';
 
 export default class CrossPlayerPlugin extends Plugin {
     data: CrossPlayerData;
@@ -110,6 +117,17 @@ export default class CrossPlayerPlugin extends Plugin {
     private deferredMetadataTimer: number | null = null;
     private isHydratingDeferredMetadata: boolean = false;
     private pendingPlaybackStateKeys: Set<string> = new Set();
+
+    // Per-device sync state. Every device is the only writer of its own
+    // state file, so sync tools never have to resolve concurrent writes.
+    private deviceStateWriteChain: Promise<void> = Promise.resolve();
+    private deviceStateSaveInProgress: number = 0;
+    private lastKnownStateFileStat: Record<string, string> = {};
+    private lastSharedDataJson: string = '';
+    private lastPersistedDeviceStateComparable: string = '';
+    private sharedDataRepairPending: boolean = false;
+    private recentDownloadOutputs: Map<string, number> = new Map();
+    private tombstoneRecheckTimers: Map<string, number> = new Map();
 
     // Sleep timer state is intentionally in-memory only: it is device-local
     // and must not be synced through data.json.
@@ -178,14 +196,14 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     markPlaybackStateChanged(item: MediaItem, timestamp: number = Date.now()) {
-        item.playbackUpdatedAt = Math.max(item.playbackUpdatedAt || 0, timestamp);
+        // Strictly increase relative to the newest value this device has seen.
+        // Wall clocks can be skewed between devices; without the bump, a device
+        // whose clock is behind would keep producing "older" progress and its
+        // playback would lose every merge until the clock caught up.
+        item.playbackUpdatedAt = Math.max(timestamp, (item.playbackUpdatedAt || 0) + 1);
         for (const key of this.getMediaItemKeys(item)) {
             this.pendingPlaybackStateKeys.add(key);
         }
-    }
-
-    private hasPendingPlaybackStateChange(item: MediaItem): boolean {
-        return this.getMediaItemKeys(item).some(key => this.pendingPlaybackStateKeys.has(key));
     }
 
     private findMatchingQueueItem(queue: MediaItem[] | undefined, item: MediaItem): MediaItem | undefined {
@@ -193,12 +211,55 @@ export default class CrossPlayerPlugin extends Plugin {
             || queue?.find(candidate => candidate.path === item.path);
     }
 
-    private hasDifferentPlaybackState(a: MediaItem, b: MediaItem): boolean {
-        return Math.abs((a.position || 0) - (b.position || 0)) > 1
-            || a.status !== b.status
-            || !!a.finished !== !!b.finished
-            || !!a.countedAsConsumed !== !!b.countedAsConsumed
-            || (a.consumedAt || '') !== (b.consumedAt || '');
+    findQueueItem(idOrPath: string, path?: string): MediaItem | undefined {
+        return this.data.queue.find(item => item.id === idOrPath)
+            || (path ? this.data.queue.find(item => item.path === path) : undefined)
+            || this.data.queue.find(item => item.path === idOrPath);
+    }
+
+    private getCurrentQueueIndex(): number {
+        const currentItem = this.mainView?.currentItem;
+        if (!currentItem) return -1;
+        return this.data.queue.findIndex(item =>
+            item.id === currentItem.id || item.path === currentItem.path
+        );
+    }
+
+    /**
+     * Two devices can end up with the same path under different item ids
+     * (an independently discovered file, or a rename arriving via sync).
+     * Keep one entry per path, preferring the newest playback snapshot, so
+     * the queue never shows duplicates and progress cannot split in two.
+     */
+    private dedupeQueueByPath(): boolean {
+        const byPath = new Map<string, MediaItem>();
+        const deduped: MediaItem[] = [];
+        let changed = false;
+
+        for (const item of this.data.queue) {
+            const existing = byPath.get(item.path);
+            if (!existing) {
+                byPath.set(item.path, item);
+                deduped.push(item);
+                continue;
+            }
+
+            changed = true;
+            if ((item.playbackUpdatedAt || 0) > (existing.playbackUpdatedAt || 0)) {
+                this.copyPlaybackState(existing, item);
+            }
+            if ((item.duration || 0) > (existing.duration || 0)) {
+                existing.duration = item.duration;
+            }
+            if ((item.size || 0) > (existing.size || 0)) {
+                existing.size = item.size;
+            }
+        }
+
+        if (changed) {
+            this.data.queue = deduped;
+        }
+        return changed;
     }
 
     private copyPlaybackState(target: MediaItem, source: MediaItem) {
@@ -211,7 +272,9 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     markQueueChanged() {
-        this.data.queueUpdatedAt = Date.now();
+        // Same monotonic rule as playback: a local queue edit must beat every
+        // snapshot this device has already merged, even with clock skew.
+        this.data.queueUpdatedAt = Math.max(Date.now(), (this.data.queueUpdatedAt || 0) + 1);
         this.pendingQueueChange = true;
     }
 
@@ -228,16 +291,31 @@ export default class CrossPlayerPlugin extends Plugin {
         return this.data.deletedPaths;
     }
 
-    private markPathDeleted(path: string, timestamp: number = Date.now()) {
-        const deleted = this.getDeletedPaths();
-        deleted[path] = Math.max(deleted[path] || 0, timestamp);
+    private getDeletedFiles(): Record<string, number> {
+        if (!this.data.deletedFiles || typeof this.data.deletedFiles !== 'object') {
+            this.data.deletedFiles = {};
+        }
+        return this.data.deletedFiles;
+    }
+
+    private setTombstone(target: Record<string, number>, path: string, timestamp: number) {
+        target[path] = Math.max(target[path] || 0, timestamp);
         // Bound growth: keep at most 200 most recent entries.
-        const keys = Object.keys(deleted);
+        const keys = Object.keys(target);
         if (keys.length > 200) {
-            keys.sort((a, b) => (deleted[a] || 0) - (deleted[b] || 0));
+            keys.sort((a, b) => (target[a] || 0) - (target[b] || 0));
             for (let i = 0; i < keys.length - 200; i++) {
-                delete deleted[keys[i]];
+                delete target[keys[i]];
             }
+        }
+    }
+
+    private markPathDeleted(path: string, timestamp: number = Date.now(), deleteFile: boolean = false) {
+        this.setTombstone(this.getDeletedPaths(), path, timestamp);
+        if (deleteFile) {
+            // A stronger tombstone: this path was explicitly removed from disk,
+            // so stale copies restored by a sync tool must be deleted too.
+            this.setTombstone(this.getDeletedFiles(), path, timestamp);
         }
     }
 
@@ -246,140 +324,344 @@ export default class CrossPlayerPlugin extends Plugin {
         if (deleted[path] !== undefined) {
             delete deleted[path];
         }
+        const deletedFiles = this.getDeletedFiles();
+        if (deletedFiles[path] !== undefined) {
+            delete deletedFiles[path];
+        }
     }
 
-    private pruneDeletedPaths(maxAgeMs: number = 30 * 24 * 60 * 60 * 1000) {
-        const deleted = this.getDeletedPaths();
+    private pruneDeletedPaths(maxAgeMs: number = DELETED_PATH_MAX_AGE_MS) {
         const cutoff = Date.now() - maxAgeMs;
-        for (const path of Object.keys(deleted)) {
-            if ((deleted[path] || 0) < cutoff) {
-                delete deleted[path];
+        for (const tombstones of [this.getDeletedPaths(), this.getDeletedFiles()]) {
+            for (const path of Object.keys(tombstones)) {
+                if ((tombstones[path] || 0) < cutoff) {
+                    delete tombstones[path];
+                }
             }
         }
     }
 
-    private mergeDeletedPaths(diskDeleted?: Record<string, number>): Record<string, number> {
-        const local = this.getDeletedPaths();
+    private mergeTombstoneMap(
+        diskDeleted: Record<string, number> | undefined,
+        localDeleted: Record<string, number>
+    ): Record<string, number> {
         const merged: Record<string, number> = { ...(diskDeleted ?? {}) };
-        for (const path of Object.keys(local)) {
-            const ts: number = local[path] || 0;
+        for (const path of Object.keys(localDeleted)) {
+            const ts: number = localDeleted[path] || 0;
             merged[path] = Math.max(merged[path] || 0, ts);
         }
-        this.data.deletedPaths = merged;
+        return merged;
+    }
+
+    private mergeDeletedPaths(diskDeleted?: Record<string, number>): Record<string, number> {
+        this.data.deletedPaths = this.mergeTombstoneMap(diskDeleted, this.getDeletedPaths());
         this.pruneDeletedPaths();
         return this.getDeletedPaths();
     }
 
-    private isPathTombstoned(path: string): boolean {
-        return this.getDeletedPaths()[path] !== undefined;
+    private mergeDeletedFiles(diskDeleted?: Record<string, number>): Record<string, number> {
+        this.data.deletedFiles = this.mergeTombstoneMap(diskDeleted, this.getDeletedFiles());
+        this.pruneDeletedPaths();
+        return this.getDeletedFiles();
     }
 
-    private async mergeFresherPlaybackStateFromDisk() {
-        const stat = await this.getPluginDataStat();
-        const nextMtime = stat?.mtime ?? 0;
-        const nextSize = stat?.size ?? 0;
-        const changed = nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
-        if (!changed) return;
+    private isPathTombstoned(path: string): boolean {
+        return this.getDeletedPaths()[path] !== undefined
+            || this.getDeletedFiles()[path] !== undefined;
+    }
+
+    private isRecentDownloadOutput(path: string): boolean {
+        const expiresAt = this.recentDownloadOutputs.get(path);
+        if (expiresAt === undefined) return false;
+        if (expiresAt < Date.now()) {
+            this.recentDownloadOutputs.delete(path);
+            return false;
+        }
+        return true;
+    }
+
+    private rememberDownloadOutput(rawPath: string, cwd: string) {
+        let candidate = rawPath.trim().replace(/^["']+|["']+$/g, '');
+        if (!candidate) return;
+
+        const isAbsolute = candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate);
+        if (!isAbsolute) {
+            candidate = `${cwd.replace(/[\\/]+$/, '')}/${candidate}`;
+        }
+
+        const relative = this.getVaultRelativePath(candidate);
+        if (!relative) return;
+
+        const normalized = relative.replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!normalized || normalized.split('/').includes('..')) return;
+
+        this.recentDownloadOutputs.set(normalized, Date.now() + RECENT_DOWNLOAD_OUTPUT_TTL_MS);
+
+        // A fresh download is an intentional recreation, not a sync
+        // resurrection. Let it queue normally even if the same path was
+        // deleted moments earlier.
+        if (this.isPathTombstoned(normalized)) {
+            this.clearPathDeleted(normalized);
+            void this.saveData(false);
+        }
+    }
+
+    private getFileDeletionDisposition(path: string, fileModifiedAt: number): FileDeletionDisposition {
+        const deletedAt = this.getDeletedFiles()[path];
+        if (deletedAt === undefined) return 'keep';
+        if (this.isRecentDownloadOutput(path)) return 'keep';
+
+        const authoritative = isFileDeletionAuthoritative(deletedAt, fileModifiedAt, {
+            now: Date.now(),
+            guardMs: DEFAULT_DELETED_FILE_GUARD_MS,
+            recreateToleranceMs: DEFAULT_RECREATED_FILE_TOLERANCE_MS
+        });
+        if (!authoritative) return 'keep';
+
+        if (fileModifiedAt <= deletedAt + DEFAULT_RECREATED_FILE_TOLERANCE_MS) {
+            // Clearly an older copy brought back by a sync tool.
+            return 'delete';
+        }
+        // The file has a fresh mtime, but the delete is still recent. A sync
+        // tool may have recreated it; hide it now and re-check after the
+        // guard window so an intentional new download is not lost.
+        return 'wait';
+    }
+
+    private scheduleTombstoneRecheck(path: string, delayMs: number) {
+        if (this.tombstoneRecheckTimers.has(path)) return;
+
+        const timer = window.setTimeout(() => {
+            this.tombstoneRecheckTimers.delete(path);
+            const file = this.app.vault.getAbstractFileByPath(path);
+            if (file instanceof TFile) {
+                void this.handleFileChange(file);
+            }
+        }, Math.max(1000, delayMs));
+        this.tombstoneRecheckTimers.set(path, timer);
+    }
+
+    getDeviceStateDirPath(): string {
+        return `${this.manifest.dir}/${DEVICE_STATE_DIR}`;
+    }
+
+    getDeviceStatePath(deviceId: string = this.deviceId): string {
+        return `${this.getDeviceStateDirPath()}/${deviceId || 'unknown-device'}.json`;
+    }
+
+    isDeviceStatePath(path: string): boolean {
+        const dir = this.getDeviceStateDirPath();
+        return path.startsWith(dir + '/') && path.endsWith('.json') && !path.endsWith('.tmp');
+    }
+
+    private async ensureDeviceStateDir() {
+        const dir = this.getDeviceStateDirPath();
+        const adapter = this.app.vault.adapter;
+        if (await adapter.exists(dir)) return;
 
         try {
-            const dataText = await this.app.vault.adapter.read(this.getPluginDataPath());
-            const diskData = (dataText.trim() ? JSON.parse(dataText) : {}) as Partial<CrossPlayerData>;
-            if (!Array.isArray(diskData.queue)) return;
-
-            const diskQueueUpdatedAt = diskData.queueUpdatedAt || 0;
-            const localQueueUpdatedAt = this.data.queueUpdatedAt || 0;
-            const diskQueueIsNewer = diskQueueUpdatedAt > localQueueUpdatedAt;
-
-            // Union deletion tombstones so both sides learn about confirmed
-            // deletes even when the queue order itself loses LWW.
-            const mergedDeleted = this.mergeDeletedPaths(diskData.deletedPaths);
-            const isConfirmedDelete = (path: string): boolean => {
-                if (mergedDeleted[path] === undefined) return false;
-                // Only treat as confirmed delete when the file is actually
-                // gone from this vault. Missing-without-tombstone is left
-                // alone to survive partial sync (file not downloaded yet).
-                return !this.app.vault.getAbstractFileByPath(path);
-            };
-
-            if (diskQueueIsNewer) {
-                for (const diskItem of diskData.queue) {
-                    const localItem = this.findMatchingQueueItem(this.data.queue, diskItem);
-                    if (!localItem) continue;
-
-                    const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
-                    const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
-                    const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-                    const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
-
-                    if (!diskIsNewer && (localPlaybackUpdatedAt > diskPlaybackUpdatedAt || localChangedPlayback)) {
-                        this.copyPlaybackState(diskItem, localItem);
-                    }
-
-                    if ((!diskItem.duration || diskItem.duration <= 0) && localItem.duration && localItem.duration > 0) {
-                        diskItem.duration = localItem.duration;
-                    }
-
-                    if (!diskItem.size && localItem.size) {
-                        diskItem.size = localItem.size;
-                    }
-                }
-                this.data.queue = diskData.queue.filter(
-                    (item) => !isConfirmedDelete(item.path)
-                );
-                this.data.queueUpdatedAt = diskQueueUpdatedAt;
-            } else {
-                for (const localItem of this.data.queue) {
-                    const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
-                    if (!diskItem) continue;
-
-                    const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
-                    const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
-                    const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-
-                    // Don't yank position out from under actively playing
-                    // media: the local player will save its own progress on
-                    // pause/close/throttle. Prevents mid-playback jumps when
-                    // a peer saves a newer timestamp for the same file.
-                    const isCurrentlyPlayingLocally = this.mainView?.currentItem?.id === localItem.id
-                        && !!this.mainView?.isActivelyPlayingLocally();
-
-                    // Playback is last-writer-wins by playbackUpdatedAt: only
-                    // accept disk when its timestamp is strictly newer. A
-                    // stale disk copy (older timestamp, e.g. sync delivering
-                    // an outdated data.json after external downloads +
-                    // restart) must never clobber newer local progress, even
-                    // when the local change was already saved (no pending
-                    // keys) and the item is not currently playing.
-                    if (!isCurrentlyPlayingLocally && diskIsNewer) {
-                        this.copyPlaybackState(localItem, diskItem);
-                    }
-
-                    if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration && diskItem.duration > 0) {
-                        localItem.duration = diskItem.duration;
-                    }
-
-                    if (!localItem.size && diskItem.size) {
-                        localItem.size = diskItem.size;
-                    }
-                }
-                // Drop locally queued items that a peer confirmed deleted
-                // (tombstoned + file actually gone). Keeps stale data.json
-                // from resurrecting cleaned files.
-                const beforePrune = this.data.queue.length;
-                this.data.queue = this.data.queue.filter(
-                    (item) => !isConfirmedDelete(item.path)
-                );
-                if (this.data.queue.length !== beforePrune) {
-                    this.pendingQueueChange = true;
-                }
-            }
-
-            if (diskData.consumptionStats) {
-                this.data.consumptionStats = Object.assign({}, diskData.consumptionStats, this.data.consumptionStats ?? {});
-            }
+            await adapter.mkdir(dir);
         } catch (error) {
-            console.warn('[Cross Player] Failed to merge synced playback state before save', error);
+            // Another call may have created it between exists() and mkdir().
+            if (!(await adapter.exists(dir))) {
+                throw error;
+            }
         }
+    }
+
+    private parseDeviceState(text: string): DeviceStateFile | null {
+        try {
+            const parsed = (text.trim() ? JSON.parse(text) : null) as Partial<DeviceStateFile> | null;
+            if (!parsed || typeof parsed !== 'object') return null;
+            if (typeof parsed.deviceId !== 'string' || !Array.isArray(parsed.queue)) return null;
+
+            return {
+                schemaVersion: typeof parsed.schemaVersion === 'number' ? parsed.schemaVersion : 1,
+                deviceId: parsed.deviceId,
+                deviceName: typeof parsed.deviceName === 'string' ? parsed.deviceName : undefined,
+                updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+                queueUpdatedAt: typeof parsed.queueUpdatedAt === 'number' ? parsed.queueUpdatedAt : 0,
+                queue: parsed.queue,
+                deletedPaths: parsed.deletedPaths && typeof parsed.deletedPaths === 'object'
+                    ? parsed.deletedPaths
+                    : {},
+                deletedFiles: parsed.deletedFiles && typeof parsed.deletedFiles === 'object'
+                    ? parsed.deletedFiles
+                    : {},
+                queueScrollTop: typeof parsed.queueScrollTop === 'number' ? parsed.queueScrollTop : 0
+            };
+        } catch (error) {
+            console.warn('[Cross Player] Could not parse a device state file', error);
+            return null;
+        }
+    }
+
+    private async readDeviceStateFiles(): Promise<DeviceStateFile[]> {
+        const dir = this.getDeviceStateDirPath();
+        const adapter = this.app.vault.adapter;
+        if (!(await adapter.exists(dir))) return [];
+
+        let listing: { files: string[]; folders: string[] };
+        try {
+            listing = await adapter.list(dir);
+        } catch (error) {
+            console.warn('[Cross Player] Could not list device state directory', error);
+            return [];
+        }
+
+        const states: DeviceStateFile[] = [];
+        for (const path of listing.files) {
+            if (!this.isDeviceStatePath(path)) continue;
+            try {
+                const text = await adapter.read(path);
+                const state = this.parseDeviceState(text);
+                if (state) states.push(state);
+            } catch (error) {
+                // A sync tool can expose a file mid-write. Keep the other
+                // devices' state and retry on the next poll.
+                console.warn('[Cross Player] Could not read device state file', path, error);
+            }
+        }
+
+        return states;
+    }
+
+    private async getDeviceStateFingerprints(): Promise<Record<string, string>> {
+        const dir = this.getDeviceStateDirPath();
+        const adapter = this.app.vault.adapter;
+        const fingerprints: Record<string, string> = {};
+        if (!(await adapter.exists(dir))) return fingerprints;
+
+        let listing: { files: string[]; folders: string[] };
+        try {
+            listing = await adapter.list(dir);
+        } catch (error) {
+            console.warn('[Cross Player] Could not list device state directory', error);
+            return fingerprints;
+        }
+
+        for (const path of listing.files) {
+            if (!this.isDeviceStatePath(path)) continue;
+            const stat = await adapter.stat(path);
+            if (stat) {
+                fingerprints[path] = `${stat.mtime}:${stat.size}`;
+            }
+        }
+
+        return fingerprints;
+    }
+
+    private buildDeviceState(): DeviceStateFile {
+        return {
+            schemaVersion: DEVICE_STATE_SCHEMA_VERSION,
+            deviceId: this.deviceId || 'unknown-device',
+            deviceName: this.deviceName,
+            updatedAt: Date.now(),
+            queueUpdatedAt: this.data.queueUpdatedAt || 0,
+            queue: this.data.queue.map(item => ({ ...item })),
+            deletedPaths: { ...this.getDeletedPaths() },
+            deletedFiles: { ...this.getDeletedFiles() },
+            queueScrollTop: this.data.queueScrollTop || 0
+        };
+    }
+
+    private async persistDeviceState(): Promise<void> {
+        const runWrite = async (): Promise<void> => {
+            this.deviceStateSaveInProgress++;
+            try {
+                const state = this.buildDeviceState();
+                const comparable = JSON.stringify({ ...state, updatedAt: 0 });
+                const statePath = this.getDeviceStatePath(state.deviceId);
+
+                // Avoid rewriting an identical snapshot on every settings
+                // save. If the file disappeared or was replaced by a sync
+                // tool, the fingerprint check forces a rewrite.
+                const existingStat = await this.app.vault.adapter.stat(statePath);
+                const existingFingerprint = existingStat
+                    ? `${existingStat.mtime}:${existingStat.size}`
+                    : '';
+                if (
+                    comparable === this.lastPersistedDeviceStateComparable
+                    && existingFingerprint === (this.lastKnownStateFileStat[statePath] || '')
+                    && existingFingerprint !== ''
+                ) {
+                    return;
+                }
+
+                await this.ensureDeviceStateDir();
+                const text = JSON.stringify(state, null, 2);
+                const tempPath = `${statePath}.tmp`;
+
+                try {
+                    await this.app.vault.adapter.write(tempPath, text);
+                    await this.app.vault.adapter.rename(tempPath, statePath);
+                } catch (error) {
+                    // Some adapters do not allow rename() to overwrite an
+                    // existing file. Fall back to a direct write and clean up
+                    // the temporary file.
+                    await this.app.vault.adapter.write(statePath, text);
+                    try {
+                        await this.app.vault.adapter.remove(tempPath);
+                    } catch (cleanupError) {
+                        // Ignore: the temp file is ignored by readers.
+                    }
+                }
+
+                const stat = await this.app.vault.adapter.stat(statePath);
+                this.lastKnownStateFileStat[statePath] = stat
+                    ? `${stat.mtime}:${stat.size}`
+                    : '';
+                this.lastPersistedDeviceStateComparable = comparable;
+            } finally {
+                this.deviceStateSaveInProgress--;
+            }
+        };
+
+        const queuedWrite: Promise<void> = this.deviceStateWriteChain
+            .catch(() => {})
+            .then(runWrite);
+        this.deviceStateWriteChain = queuedWrite.catch(() => {});
+        await queuedWrite;
+    }
+
+    private buildSharedPayload(): CrossPlayerSharedData {
+        return buildSharedDataPayload(
+            this.data.settings,
+            this.data.playbackSpeed,
+            this.data.consumptionStats
+        );
+    }
+
+    private async persistSharedDataIfChanged(force: boolean = false): Promise<void> {
+        const payload = this.buildSharedPayload();
+        const serialized = JSON.stringify(payload);
+        if (!force && serialized === this.lastSharedDataJson) return;
+
+        await super.saveData(payload);
+        this.lastSharedDataJson = serialized;
+        await this.refreshTrackedDataFileState();
+    }
+
+    private async haveSyncedFilesChanged(): Promise<boolean> {
+        const dataStat = await this.getPluginDataStat();
+        const nextMtime = dataStat?.mtime ?? 0;
+        const nextSize = dataStat?.size ?? 0;
+        if (nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize) {
+            return true;
+        }
+
+        const fingerprints = await this.getDeviceStateFingerprints();
+        const oldKeys = Object.keys(this.lastKnownStateFileStat);
+        const newKeys = Object.keys(fingerprints);
+        if (oldKeys.length !== newKeys.length) return true;
+
+        for (const path of newKeys) {
+            if (fingerprints[path] !== this.lastKnownStateFileStat[path]) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private loadDesktopModule<T>(moduleParts: string[]): T | null {
@@ -410,6 +692,17 @@ export default class CrossPlayerPlugin extends Plugin {
         const normalizedBase = basePath.replace(/[\\/]+$/, '');
         const normalizedRelative = relativePath.replace(/^[/\\]+/, '');
         return normalizedRelative ? `${normalizedBase}/${normalizedRelative}` : normalizedBase;
+    }
+
+    private getVaultRelativePath(absolutePath: string): string | null {
+        const basePath = this.getVaultBasePath();
+        if (!basePath) return null;
+
+        const normalizedBase = basePath.replace(/\\/g, '/').replace(/\/+$/, '');
+        const normalizedAbsolute = absolutePath.replace(/\\/g, '/');
+        if (normalizedAbsolute === normalizedBase) return '';
+        if (!normalizedAbsolute.startsWith(normalizedBase + '/')) return null;
+        return normalizedAbsolute.slice(normalizedBase.length + 1);
     }
 
     getLastGoodWatchedFolder(): string {
@@ -491,50 +784,113 @@ export default class CrossPlayerPlugin extends Plugin {
         const stat = await this.getPluginDataStat();
         this.lastKnownDataMtime = stat?.mtime ?? 0;
         this.lastKnownDataSize = stat?.size ?? 0;
+        this.lastKnownStateFileStat = await this.getDeviceStateFingerprints();
+    }
+
+    private isConfirmedDeletedPath(path: string): boolean {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        const fileDeletedAt = this.getDeletedFiles()[path];
+        if (fileDeletedAt !== undefined) {
+            if (!(file instanceof TFile)) return true;
+            return this.getFileDeletionDisposition(path, file.stat.mtime) !== 'keep';
+        }
+
+        if (this.getDeletedPaths()[path] === undefined) return false;
+        // Missing file + queue tombstone = confirmed delete. A file that
+        // still exists wins so partial sync cannot remove a real queue item.
+        return !file;
+    }
+
+    private pruneDeletedQueueItems(): boolean {
+        const before = this.data.queue.length;
+        this.data.queue = this.data.queue.filter(item => !this.isConfirmedDeletedPath(item.path));
+        return this.data.queue.length !== before;
+    }
+
+    /**
+     * Enforce explicit file deletions on this device. A peer may have
+     * received the delete while an older copy of the file was already on
+     * disk; deleting it here stops the sync tool from offering that copy
+     * back to the device where the user pressed Delete.
+     */
+    private async enforceFileDeletionTombstones(): Promise<boolean> {
+        let changed = false;
+
+        for (const path of Object.keys(this.getDeletedFiles())) {
+            const file = this.app.vault.getAbstractFileByPath(path);
+            if (!(file instanceof TFile)) continue;
+
+            const disposition = this.getFileDeletionDisposition(path, file.stat.mtime);
+            if (disposition === 'keep') {
+                this.clearPathDeleted(path);
+                changed = true;
+                continue;
+            }
+            if (disposition === 'wait') {
+                this.scheduleTombstoneRecheck(
+                    path,
+                    DEFAULT_DELETED_FILE_GUARD_MS - (Date.now() - this.getDeletedFiles()[path])
+                );
+                continue;
+            }
+
+            try {
+                await this.permanentlyDeleteVaultFile(file);
+                changed = true;
+            } catch (error) {
+                console.error('[Cross Player] Failed to remove a resurrected file', path, error);
+            }
+        }
+
+        if (this.pruneDeletedQueueItems()) {
+            this.markQueueChanged();
+            changed = true;
+        }
+
+        return changed;
     }
 
     async reloadSyncedDataIfChanged(force: boolean = false) {
         if (this.isReloadingSyncedData) return;
         // Never reload in the middle of a save: the on-disk read would be
         // stale and loadData() would discard what we are writing.
-        if (this.saveInProgress > 0) return;
+        if (this.saveInProgress > 0 || this.deviceStateSaveInProgress > 0) return;
         // Skip background reloads while local edits haven't been saved yet
         // (delete/reorder in flight, position dirty). The next 5s tick or
         // focus event retries after the save completes. Explicit force
         // reloads (manual command) still go through.
         if (!force && this.hasUnsyncedChanges()) return;
 
-        const stat = await this.getPluginDataStat();
-        const nextMtime = stat?.mtime ?? 0;
-        const nextSize = stat?.size ?? 0;
-        const changed = force || nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
-
+        const changed = force || await this.haveSyncedFilesChanged();
         if (!changed) return;
 
-        // Stash in-memory state before the destructive loadData().
-        // Resilio Sync uses file-level LWW, and an offline peer coming back
-        // online wins even over newer online edits (overwritten versions go
-        // to .sync/Archive). So disk can revert to a stale fork with older
-        // playbackUpdatedAt but newer-or-equal mtime. Wholesale loadData()
-        // would then discard newer local playback from memory too.
+        // Stash in-memory state before the destructive loadData(). Even with
+        // per-device files, a save can be in flight when a sync tool lands a
+        // newer snapshot; keeping the newer in-memory playback prevents a
+        // short window of progress loss.
         const prevQueue: MediaItem[] = this.data?.queue ?? [];
         const prevDeleted: Record<string, number> = { ...(this.data?.deletedPaths ?? {}) };
+        const prevDeletedFiles: Record<string, number> = { ...(this.data?.deletedFiles ?? {}) };
         const prevStats: Record<string, ConsumptionStatBucket> = { ...(this.data?.consumptionStats ?? {}) };
 
         this.isReloadingSyncedData = true;
         try {
             await this.loadData();
             // Union tombstones + stats so both sides learn deletes/completions
-            // even when the queue itself keeps disk's order (existing LWW).
+            // even if a state file was delivered late.
             this.mergeDeletedPaths(prevDeleted);
+            this.mergeDeletedFiles(prevDeletedFiles);
             if (Object.keys(prevStats).length > 0) {
                 this.data.consumptionStats = Object.assign({}, this.data.consumptionStats ?? {}, prevStats);
             }
 
-            // Restore any in-memory playback that is newer than what disk
-            // now holds (i.e. disk reverted to a stale fork). Queue
-            // order/membership intentionally stays as disk's: this changes no
-            // ordering semantics, it only prevents progress loss.
+            const enforcedDeletions = await this.enforceFileDeletionTombstones();
+            if (enforcedDeletions) {
+                this.pendingQueueChange = true;
+            }
+
+            // Restore any in-memory playback that is newer than the merged
+            // state (for example, a save that had not reached disk yet).
             let healedPlayback = false;
             for (const newItem of this.data.queue) {
                 const oldItem = this.findMatchingQueueItem(prevQueue, newItem);
@@ -542,8 +898,13 @@ export default class CrossPlayerPlugin extends Plugin {
                 const newTs = newItem.playbackUpdatedAt || 0;
                 const oldTs = oldItem.playbackUpdatedAt || 0;
                 if (oldTs > newTs) {
-                    const isCurrentlyPlayingLocally = this.mainView?.currentItem?.id === newItem.id
-                        && !!this.mainView?.isActivelyPlayingLocally();
+                    const isCurrentlyPlayingLocally = !!this.mainView
+                        && !!this.mainView.currentItem
+                        && (
+                            this.mainView.currentItem.id === newItem.id
+                            || this.mainView.currentItem.path === newItem.path
+                        )
+                        && !!this.mainView.isActivelyPlayingLocally();
                     if (!isCurrentlyPlayingLocally) {
                         this.copyPlaybackState(newItem, oldItem);
                         this.markPlaybackStateChanged(newItem, newItem.playbackUpdatedAt || Date.now());
@@ -559,12 +920,10 @@ export default class CrossPlayerPlugin extends Plugin {
             }
 
             await this.validatePluginSyncHealth();
-            if (healedPlayback) {
-                // Persist the healed version so Resilio propagates it back.
-                // saveData() refreshes tracked mtime/size, so the next tick
-                // sees no change (no reload/save loop). Pending keys were
-                // re-armed above, so a concurrent reload would skip until
-                // this save completes.
+            if (healedPlayback || enforcedDeletions) {
+                // Persist the healed version / confirmed deletes back into
+                // this device's file. saveData() refreshes the tracked
+                // fingerprints, so the next tick sees no change.
                 await this.saveData(false);
             } else {
                 await this.refreshTrackedDataFileState();
@@ -655,6 +1014,24 @@ export default class CrossPlayerPlugin extends Plugin {
 
     async onload() {
         await this.loadData();
+        try {
+            if (await this.enforceFileDeletionTombstones()) {
+                await this.saveData(false);
+            }
+        } catch (error) {
+            console.error('[Cross Player] Failed to enforce deletion tombstones on startup', error);
+        }
+        if (this.sharedDataRepairPending) {
+            // Repairs from a partial sync used to be flushed by the next
+            // whole-data save. Progress no longer touches data.json, so write
+            // the repaired settings explicitly.
+            try {
+                await this.persistSharedDataIfChanged(true);
+                this.sharedDataRepairPending = false;
+            } catch (error) {
+                console.error('[Cross Player] Failed to persist repaired shared settings', error);
+            }
+        }
         await this.refreshTrackedDataFileState();
         await this.validatePluginSyncHealth();
         await this.calculateDynamicLimit();
@@ -932,11 +1309,11 @@ export default class CrossPlayerPlugin extends Plugin {
         this.registerWatchers();
 
         if (this.data.settings.watchedFolder) {
-            // Delay the first scan so Resilio Sync has time to deliver an
-            // updated data.json from another device before we bump
+            // Delay the first scan so Resilio Sync has time to deliver updated
+            // device state files from other devices before we bump
             // queueUpdatedAt. scanFolder() itself force-reloads first; this
             // delay covers the case where Resilio hasn't even written the
-            // file to disk yet when Obsidian opens.
+            // files to disk yet when Obsidian opens.
             const watched = this.data.settings.watchedFolder;
             window.setTimeout(() => {
                 void this.scanFolder(watched);
@@ -956,6 +1333,11 @@ export default class CrossPlayerPlugin extends Plugin {
         this.sleepTimerEndsAt = null;
         this.sleepTimerMinutes = null;
         this.sleepTimerStopAtFileEnd = false;
+
+        for (const timer of this.tombstoneRecheckTimers.values()) {
+            window.clearTimeout(timer);
+        }
+        this.tombstoneRecheckTimers.clear();
     }
 
     async loadDeviceId() {
@@ -1037,6 +1419,10 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async loadData() {
+        if (!this.deviceId) {
+            await this.loadDeviceId();
+        }
+
         const loaded = await super.loadData() as Partial<CrossPlayerData> | null;
 
         // Ensure settings are merged with defaults
@@ -1044,28 +1430,113 @@ export default class CrossPlayerPlugin extends Plugin {
 
         // Recover from partial sync / overwritten data.json by restoring the last valid
         // per-device watched folder when synced settings arrive blank.
+        const loadedWatchedFolder = typeof loaded?.settings?.watchedFolder === 'string'
+            ? loaded.settings.watchedFolder
+            : '';
         if (!settings.watchedFolder) {
             const backupWatchedFolder = this.getLastGoodWatchedFolder();
             if (backupWatchedFolder) {
                 settings.watchedFolder = backupWatchedFolder;
             }
         }
+        this.sharedDataRepairPending = !loadedWatchedFolder && !!settings.watchedFolder;
 
-        const baseData: CrossPlayerData = {
-            settings: settings,
-            queue: [],
-            // Initialize playbackSpeed with default if not present
-            playbackSpeed: settings.defaultPlaybackSpeed,
-            consumptionStats: {}
-        };
-        this.data = Object.assign(baseData, loaded);
+        const playbackSpeed = typeof loaded?.playbackSpeed === 'number'
+            ? loaded.playbackSpeed
+            : settings.defaultPlaybackSpeed;
+        const consumptionStats = loaded?.consumptionStats && typeof loaded.consumptionStats === 'object'
+            ? loaded.consumptionStats
+            : {};
 
-        // Ensure settings are definitely correct in data object
-        this.data.settings = settings;
-        this.data.consumptionStats = this.data.consumptionStats || {};
-        if (!this.data.deletedPaths || typeof this.data.deletedPaths !== 'object') {
-            this.data.deletedPaths = {};
+        const sharedPayload = buildSharedDataPayload(settings, playbackSpeed, consumptionStats);
+        // If the watched folder had to be recovered, do not treat the repaired
+        // payload as already saved: the first save must write it back so the
+        // other devices get the full settings again.
+        this.lastSharedDataJson = loaded && !this.sharedDataRepairPending
+            ? JSON.stringify(sharedPayload)
+            : '';
+
+        const states = await this.readDeviceStateFiles();
+        const ownState = states.find(state => state.deviceId === this.deviceId);
+        let performedLegacyMigration = false;
+
+        if (!ownState) {
+            // One-time migration: the first version of this device's state
+            // comes from the old shared data.json. Doing this per device (not
+            // globally) preserves each device's legacy progress during a
+            // staggered upgrade.
+            const legacyQueue = Array.isArray(loaded?.queue) ? loaded.queue : [];
+            const legacyDeletedPaths = loaded?.deletedPaths && typeof loaded.deletedPaths === 'object'
+                ? loaded.deletedPaths
+                : {};
+            const legacyDeletedFiles = loaded?.deletedFiles && typeof loaded.deletedFiles === 'object'
+                ? loaded.deletedFiles
+                : {};
+            const legacyQueueUpdatedAt = typeof loaded?.queueUpdatedAt === 'number'
+                ? loaded.queueUpdatedAt
+                : (legacyQueue.length > 0 ? Date.now() : 0);
+
+            states.push({
+                schemaVersion: DEVICE_STATE_SCHEMA_VERSION,
+                deviceId: this.deviceId || 'unknown-device',
+                deviceName: this.deviceName,
+                updatedAt: Date.now(),
+                queueUpdatedAt: legacyQueueUpdatedAt,
+                queue: legacyQueue,
+                deletedPaths: { ...legacyDeletedPaths },
+                deletedFiles: { ...legacyDeletedFiles },
+                queueScrollTop: typeof loaded?.queueScrollTop === 'number' ? loaded.queueScrollTop : 0
+            });
+            performedLegacyMigration = true;
+        } else if (Array.isArray(loaded?.queue) && loaded.queue.length > 0) {
+            // Keep the legacy data.json queue as a passive merge source for
+            // the upgrade window and for the rare fallback where a device
+            // could not write its state file. It has no writer semantics:
+            // newer per-device timestamps always win, and tombstones still
+            // remove deleted items.
+            states.push({
+                schemaVersion: DEVICE_STATE_SCHEMA_VERSION,
+                deviceId: '__legacy_data_json__',
+                deviceName: 'Legacy data.json',
+                updatedAt: 0,
+                queueUpdatedAt: typeof loaded?.queueUpdatedAt === 'number' ? loaded.queueUpdatedAt : 0,
+                queue: loaded.queue,
+                deletedPaths: {},
+                deletedFiles: loaded?.deletedFiles && typeof loaded.deletedFiles === 'object'
+                    ? loaded.deletedFiles
+                    : {},
+                queueScrollTop: 0
+            });
         }
+
+        const merged = mergeDeviceStates(states, {
+            isPathPresent: (path) => !!this.app.vault.getAbstractFileByPath(path),
+            isPathAllowed: (path) => !settings.watchedFolder
+                || this.isPathInsideWatchedFolder(path, settings.watchedFolder),
+            getPathModifiedTime: (path) => {
+                const file = this.app.vault.getAbstractFileByPath(path);
+                return file instanceof TFile ? file.stat.mtime : null;
+            },
+            isRecreatedPath: (path) => this.isRecentDownloadOutput(path),
+            localDeviceId: this.deviceId,
+            legacyDeletedPaths: loaded?.deletedPaths,
+            now: Date.now(),
+            maxTombstoneAgeMs: DELETED_PATH_MAX_AGE_MS,
+            tombstoneGuardMs: DEFAULT_DELETED_FILE_GUARD_MS,
+            recreateToleranceMs: DEFAULT_RECREATED_FILE_TOLERANCE_MS
+        });
+
+        this.data = {
+            settings,
+            queue: merged.queue,
+            queueUpdatedAt: merged.queueUpdatedAt,
+            deletedPaths: merged.deletedPaths,
+            deletedFiles: merged.deletedFiles,
+            playbackSpeed,
+            queueScrollTop: merged.queueScrollTop,
+            consumptionStats
+        };
+
         // A fresh load means nothing is pending from the previous in-memory
         // state: pending flags describe unsaved edits, which loadData()
         // discards by definition. Guarded reloads already skip when dirty.
@@ -1075,14 +1546,21 @@ export default class CrossPlayerPlugin extends Plugin {
             this.setLastGoodWatchedFolder(settings.watchedFolder);
         }
 
-        // Force playbackSpeed to respect default if it's the old default (1.0) and new default is different (2.0)
-        // Or if it was never set (which the above assignment handles for new users).
-        // But for existing users, loaded.playbackSpeed might be 1.0.
-        // The user asked to "set the default speed to 2x". 
-        // If I just rely on DEFAULT_SETTINGS, existing users won't see a change if they have saved data.
-        // I will trust that `loaded.playbackSpeed` is what the user *last used*.
-        // If it's missing, it defaults to settings.defaultPlaybackSpeed.
         await this.refreshTrackedDataFileState();
+
+        if (performedLegacyMigration) {
+            // Persist the migrated snapshot immediately so a crash does not
+            // leave the old data.json as the only copy of this device's queue.
+            this.lastPersistedDeviceStateComparable = '';
+            try {
+                await this.persistDeviceState();
+            } catch (error) {
+                // Keep the legacy queue in data.json as the only copy rather
+                // than letting the startup settings repair overwrite it.
+                this.sharedDataRepairPending = false;
+                console.error('[Cross Player] Failed to write initial device state', error);
+            }
+        }
     }
 
     getTodayStatKey(): string {
@@ -1160,10 +1638,27 @@ export default class CrossPlayerPlugin extends Plugin {
 
         const runSave = async (): Promise<void> => {
             this.saveInProgress++;
+            let usedFallback = false;
             try {
-                await this.mergeFresherPlaybackStateFromDisk();
-                await super.saveData(this.data);
-                await this.refreshTrackedDataFileState();
+                try {
+                    await this.persistDeviceState();
+                } catch (error) {
+                    // Last-resort compatibility path: if the state directory
+                    // is unavailable, keep the old behaviour and write the
+                    // full queue into data.json so no local work is lost.
+                    console.error('[Cross Player] Failed to write device state; falling back to data.json', error);
+                    await super.saveData(this.data);
+                    usedFallback = true;
+                    this.lastSharedDataJson = JSON.stringify(this.buildSharedPayload());
+                }
+
+                if (usedFallback) {
+                    // data.json now contains the full snapshot; do not
+                    // immediately overwrite it with a shared-only payload.
+                    await this.refreshTrackedDataFileState();
+                } else {
+                    await this.persistSharedDataIfChanged();
+                }
                 this.pendingPlaybackStateKeys.clear();
                 this.pendingQueueChange = false;
             } finally {
@@ -1181,6 +1676,11 @@ export default class CrossPlayerPlugin extends Plugin {
         // Register event
         this.registerEvent(
             this.app.vault.on('create', (file) => {
+                if (this.isDeviceStatePath(file.path) || file.path === this.getPluginDataPath()) {
+                    // Another device's state file (or data.json) arrived.
+                    this.debouncedReload();
+                    return;
+                }
                 void this.handleFileChange(file);
                 // Update device status if file added
                 this.debouncedUpdateDeviceStatus();
@@ -1189,6 +1689,15 @@ export default class CrossPlayerPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('rename', (file, oldPath) => {
+                if (
+                    this.isDeviceStatePath(file.path)
+                    || this.isDeviceStatePath(oldPath)
+                    || file.path === this.getPluginDataPath()
+                    || oldPath === this.getPluginDataPath()
+                ) {
+                    this.debouncedReload();
+                    return;
+                }
                 // Handle rename/move
                 void this.handleRename(file, oldPath);
             })
@@ -1196,6 +1705,10 @@ export default class CrossPlayerPlugin extends Plugin {
 
         this.registerEvent(
             this.app.vault.on('delete', (file) => {
+                if (this.isDeviceStatePath(file.path) || file.path === this.getPluginDataPath()) {
+                    this.debouncedReload();
+                    return;
+                }
                 void this.handleDelete(file);
                 // Update device status if file deleted
                 this.debouncedUpdateDeviceStatus();
@@ -1205,6 +1718,10 @@ export default class CrossPlayerPlugin extends Plugin {
         // Also watch for modifications to sync files from other devices
         this.registerEvent(
             this.app.vault.on('modify', (file) => {
+                if (this.isDeviceStatePath(file.path) || file.path === this.getPluginDataPath()) {
+                    this.debouncedReload();
+                    return;
+                }
                 const watchedFolder = this.data.settings.watchedFolder;
                 if (watchedFolder && file.path.startsWith(watchedFolder + "/.cross-player-devices/")) {
                     // Another device updated its status
@@ -1226,8 +1743,17 @@ export default class CrossPlayerPlugin extends Plugin {
         this.data.settings.watchedFolder = normalizedPath;
         this.setLastGoodWatchedFolder(normalizedPath);
 
-        // Remove stale queue items that were added while watching a different folder.
-        this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, normalizedPath));
+        // Remove stale queue items that were added while watching a different
+        // folder. Tombstone them so another device's stale state file cannot
+        // append them back through the merge.
+        const removedItems = this.data.queue.filter(item => !this.isPathInsideWatchedFolder(item.path, normalizedPath));
+        if (removedItems.length > 0) {
+            this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, normalizedPath));
+            for (const item of removedItems) {
+                this.markPathDeleted(item.path);
+            }
+            this.markQueueChanged();
+        }
 
         if (this.mainView?.currentItem && !this.isPathInsideWatchedFolder(this.mainView.currentItem.path, normalizedPath)) {
             this.mainView.clearCurrentMedia();
@@ -1246,12 +1772,12 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     async scanFolder(folderPath: string) {
-        // Resilio Sync (and Obsidian Sync) can deliver a fresher data.json to
-        // disk after our last poll. A scan that adds a file bumps
-        // queueUpdatedAt, so saving on a stale copy forks and lets file-level
-        // LWW discard the other device's playback. Reload first when possible;
-        // the reload above preserves newer in-memory playback, so forcing it
-        // here is safe even when dirty.
+        // A sync tool can deliver fresher device state files to disk after our
+        // last poll. A scan that adds a file bumps queueUpdatedAt, so working
+        // from a stale in-memory snapshot could produce a queue order that
+        // loses on the next merge. Reload first when possible; the reload
+        // preserves newer in-memory playback, so forcing it here is safe even
+        // when dirty.
         try {
             await this.reloadSyncedDataIfChanged(true);
         } catch (error) {
@@ -1445,6 +1971,10 @@ export default class CrossPlayerPlugin extends Plugin {
                 // item.path = "A/OldFolder/File.mp4"
                 // new item path = "A/NewFolder/File.mp4"
 
+                // Tombstone the old path so a device that missed the rename
+                // cannot append the old queue entry back after merging states.
+                this.markPathDeleted(item.path);
+
                 const newPath = item.path.replace(oldPath, file.path);
                 item.path = newPath;
 
@@ -1463,13 +1993,14 @@ export default class CrossPlayerPlugin extends Plugin {
             // Remove items that moved out
             const watchedFolder = this.data.settings.watchedFolder;
             if (watchedFolder) {
-                const initialLength = this.data.queue.length;
                 this.data.queue = this.data.queue.filter(item => this.isPathInsideWatchedFolder(item.path, watchedFolder));
-                if (this.data.queue.length !== initialLength) {
-                    this.markQueueChanged();
-                }
             }
 
+            // A synced rename can arrive as delete+create, leaving the same
+            // path under two ids until the next merge. Collapse it now.
+            this.dedupeQueueByPath();
+
+            this.markQueueChanged();
             await this.saveData();
         }
 
@@ -1531,11 +2062,46 @@ export default class CrossPlayerPlugin extends Plugin {
         const ext = file.extension.toLowerCase();
         if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return false;
 
-        // File exists in the vault: ground truth wins. A previous delete
-        // tombstone for this path refers to an older incarnation, so clear
-        // it (re-downloaded / restored files queue normally again).
-        if (this.isPathTombstoned(file.path)) {
+        // An explicit file deletion wins over a stale copy that a sync tool
+        // restored at the same path. Queue-only tombstones (renames, watched
+        // folder changes) still let an existing file queue normally.
+        let clearedTombstone = false;
+        if (this.getDeletedFiles()[file.path] !== undefined) {
+            const disposition = this.getFileDeletionDisposition(file.path, file.stat.mtime);
+            if (disposition !== 'keep') {
+                if (disposition === 'delete') {
+                    try {
+                        await this.permanentlyDeleteVaultFile(file);
+                    } catch (error) {
+                        console.error('[Cross Player] Failed to delete a resurrected file', file.path, error);
+                    }
+                } else {
+                    const deletedAt = this.getDeletedFiles()[file.path] || Date.now();
+                    this.scheduleTombstoneRecheck(
+                        file.path,
+                        DEFAULT_DELETED_FILE_GUARD_MS - (Date.now() - deletedAt)
+                    );
+                }
+
+                const before = this.data.queue.length;
+                this.data.queue = this.data.queue.filter(item => item.path !== file.path);
+                const removedFromQueue = this.data.queue.length !== before;
+                if (removedFromQueue) {
+                    this.markQueueChanged();
+                }
+                if (shouldSave && (disposition === 'delete' || removedFromQueue)) {
+                    await this.saveData(false);
+                }
+                return false;
+            }
+
             this.clearPathDeleted(file.path);
+            clearedTombstone = true;
+        } else if (this.getDeletedPaths()[file.path] !== undefined) {
+            // File exists in the vault: ground truth wins for queue-only
+            // tombstones. The file is a newer incarnation, so let it queue.
+            this.clearPathDeleted(file.path);
+            clearedTombstone = true;
         }
 
         // Check if already in queue
@@ -1593,8 +2159,8 @@ export default class CrossPlayerPlugin extends Plugin {
                 existing.size = file.stat.size;
                 changed = true;
             }
-            if (changed && shouldSave) await this.saveData();
-            return changed;
+            if ((changed || clearedTombstone) && shouldSave) await this.saveData();
+            return changed || clearedTombstone;
         }
     }
 
@@ -1689,10 +2255,7 @@ export default class CrossPlayerPlugin extends Plugin {
         this.rememberQueueScrollPosition();
 
         // Find the index of the last played item (which might be completed now)
-        let currentIndex = -1;
-        if (this.mainView && this.mainView.currentItem) {
-            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView.currentItem?.id);
-        }
+        let currentIndex = this.getCurrentQueueIndex();
 
         // If not found, fallback to searching from beginning
         if (currentIndex === -1) {
@@ -1718,10 +2281,7 @@ export default class CrossPlayerPlugin extends Plugin {
     async playNextItem() {
         this.rememberQueueScrollPosition();
 
-        let currentIndex = -1;
-        if (this.mainView && this.mainView.currentItem) {
-            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView.currentItem?.id);
-        }
+        const currentIndex = this.getCurrentQueueIndex();
 
         const nextIndex = currentIndex + 1;
         if (nextIndex < this.data.queue.length) {
@@ -1732,10 +2292,7 @@ export default class CrossPlayerPlugin extends Plugin {
     async playPreviousItem() {
         this.rememberQueueScrollPosition();
 
-        let currentIndex = -1;
-        if (this.mainView && this.mainView.currentItem) {
-            currentIndex = this.data.queue.findIndex(i => i.id === this.mainView.currentItem?.id);
-        }
+        const currentIndex = this.getCurrentQueueIndex();
 
         if (currentIndex === -1) return;
 
@@ -1915,7 +2472,8 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async updateStatus(id: string, status: 'pending' | 'playing' | 'completed') {       const item = this.data.queue.find(i => i.id === id);
+    async updateStatus(id: string, status: 'pending' | 'playing' | 'completed', path?: string) {
+        const item = this.findQueueItem(id, path);
         if (item && item.status !== status) {
             const previousStatus = item.status;
             item.status = status;
@@ -1930,8 +2488,8 @@ export default class CrossPlayerPlugin extends Plugin {
         }
     }
 
-    async updatePosition(id: string, position: number, force: boolean = false): Promise<boolean> {
-        const item = this.data.queue.find(i => i.id === id);
+    async updatePosition(id: string, position: number, force: boolean = false, path?: string): Promise<boolean> {
+        const item = this.findQueueItem(id, path);
         if (item && (force || Math.abs(item.position - position) > 1)) {
             item.position = position;
             this.markPlaybackStateChanged(item);
@@ -1996,7 +2554,8 @@ export default class CrossPlayerPlugin extends Plugin {
         let failedCount = 0;
         for (const item of toRemove) {
             try {
-                if (this.mainView?.currentItem?.id === item.id) {
+                if (this.mainView?.currentItem
+                    && (this.mainView.currentItem.id === item.id || this.mainView.currentItem.path === item.path)) {
                     this.mainView.clearCurrentMedia();
                 }
 
@@ -2017,7 +2576,7 @@ export default class CrossPlayerPlugin extends Plugin {
         this.data.queue = this.data.queue.filter(item => item.status !== 'completed' || !removedIds.has(item.id));
         for (const item of toRemove) {
             if (removedIds.has(item.id)) {
-                this.markPathDeleted(item.path);
+                this.markPathDeleted(item.path, Date.now(), true);
             }
         }
         this.markQueueChanged();
@@ -2033,12 +2592,13 @@ export default class CrossPlayerPlugin extends Plugin {
         this.rememberQueueScrollPosition();
 
         // If it's the current playing item, stop playback
-        const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
+        const isCurrent = !!this.mainView?.currentItem
+            && (this.mainView.currentItem.id === item.id || this.mainView.currentItem.path === item.path);
 
         // Find next item before mutating queue or clearing current playback.
         let nextItem: MediaItem | undefined;
         if (isCurrent) {
-            const currentIndex = this.data.queue.findIndex(i => i.id === item.id);
+            const currentIndex = this.data.queue.findIndex(i => i.id === item.id || i.path === item.path);
             nextItem = this.data.queue.find((i, index) => index > currentIndex && i.status === 'pending');
             this.mainView?.clearCurrentMedia();
         }
@@ -2063,8 +2623,8 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         // Remove from queue
-        this.data.queue = this.data.queue.filter(i => i.id !== item.id);
-        this.markPathDeleted(item.path);
+        this.data.queue = this.data.queue.filter(i => i.id !== item.id && i.path !== item.path);
+        this.markPathDeleted(item.path, Date.now(), true);
         this.markQueueChanged();
         await this.saveData();
         new Notice(`Permanently deleted: ${item.name}`);
@@ -2091,14 +2651,15 @@ export default class CrossPlayerPlugin extends Plugin {
 
         // Find the actual item in the queue to ensure we are modifying the source of truth
         // This prevents issues where 'item' might be a stale reference (e.g. from mainView.currentItem)
-        const queueItem = this.data.queue.find(i => i.id === item.id);
+        const queueItem = this.findQueueItem(item.id, item.path);
 
         if (!queueItem) {
             new Notice("Item not found in queue.");
             return;
         }
 
-        const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
+        const isCurrent = !!this.mainView?.currentItem
+            && (this.mainView.currentItem.id === item.id || this.mainView.currentItem.path === item.path);
 
         if (isCurrent && this.mainView) {
             // Stop playback without re-persisting the item we're resetting.
@@ -2206,7 +2767,6 @@ export default class CrossPlayerPlugin extends Plugin {
             '--newline',
             '--restrict-filenames',
             '--no-mtime',
-            '--extractor-args', 'youtube:player_client=android_vr',
             '--js-runtimes', jsRuntimePath ? `node:${jsRuntimePath}` : 'node',
             '--format-sort', 'ext:mp4:m4a'
         ];
@@ -2255,6 +2815,11 @@ export default class CrossPlayerPlugin extends Plugin {
                 const lines = data.toString().split('\n');
                 for (const line of lines) {
                     const trimmedLine = line.trim();
+
+                    const outputMatch = line.match(/(?:Destination:|Merging formats into)\s+"?([^"]+?)"?\s*$/);
+                    if (outputMatch && outputMatch[1]) {
+                        this.rememberDownloadOutput(outputMatch[1], cwd);
+                    }
 
                     // The first line might be the title due to --get-title
                     if (trimmedLine && !trimmedLine.startsWith('[') && downloadStatus.name === link) {
@@ -3026,7 +3591,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
 
         this.wireFfmpegPathRow(new Setting(containerEl)
             .setName('FFmpeg Binary Path')
-            .setDesc('Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.'));
+            .setDesc('Absolute path to ffmpeg executable (required for mp3 conversion and video merging). Leave empty if ffmpeg is on your PATH.'));
 
         this.wireJsRuntimeRow(new Setting(containerEl)
             .setName('JS Runtime Path')
@@ -3085,7 +3650,7 @@ class CrossPlayerSettingTab extends PluginSettingTab {
                 heading: 'Downloads & Storage',
                 items: [
                     { name: 'yt-dlp Binary Path', desc: 'Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).', render: (setting) => this.wireYtDlpPathRow(setting) },
-                    { name: 'FFmpeg Binary Path', desc: 'Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.', render: (setting) => this.wireFfmpegPathRow(setting) },
+                    { name: 'FFmpeg Binary Path', desc: 'Absolute path to ffmpeg executable (required for mp3 conversion and video merging). Leave empty if ffmpeg is on your PATH.', render: (setting) => this.wireFfmpegPathRow(setting) },
                     { name: 'JS Runtime Path', desc: 'Absolute path to node, deno or bun (required for YouTube signature extraction).', render: (setting) => this.wireJsRuntimeRow(setting) },
                     { name: 'Download Folder', desc: 'Folder to save downloads (relative to vault). Leave empty to use Watched Folder.', render: (setting) => this.wireDownloadFolderRow(setting) },
                     { name: 'Storage Limit (GB)', desc: 'Manual storage limit in Gigabytes.', render: (setting) => this.wireStorageLimitRow(setting) },
@@ -3454,7 +4019,10 @@ class CrossPlayerListView extends ItemView {
 
             // Check if item is currently playing (status 'playing' OR it is the active item in main view)
             // This prevents the "selection" color from disappearing when status changes to 'completed' at 95%
-            const isPlaying = item.status === 'playing' || (this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id);
+            const isPlaying = item.status === 'playing'
+                || (!!this.plugin.mainView?.currentItem
+                    && (this.plugin.mainView.currentItem.id === item.id
+                        || this.plugin.mainView.currentItem.path === item.path));
 
             if (isPlaying) {
                 itemEl.addClass('is-playing');
@@ -3893,7 +4461,14 @@ class CrossPlayerMainView extends ItemView {
             return false;
         }
 
-        return this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
+        // Do not persist the temporary 0:00 position while a new source is
+        // still loading or seeking to its resume point. Otherwise a pause/
+        // timeupdate during startup can overwrite valid synced progress.
+        if (this.videoEl.readyState < 1 || this.videoEl.seeking) {
+            return false;
+        }
+
+        return this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force, this.currentItem.path);
     }
 
     async syncCompletionStatusFromPlayback() {
@@ -3910,7 +4485,7 @@ class CrossPlayerMainView extends ItemView {
 
         const progress = this.videoEl.currentTime / this.videoEl.duration;
         if (progress > 0.95) {
-            await this.plugin.updateStatus(this.currentItem.id, 'completed');
+            await this.plugin.updateStatus(this.currentItem.id, 'completed', this.currentItem.path);
         }
     }
 
@@ -3921,10 +4496,17 @@ class CrossPlayerMainView extends ItemView {
             || this.plugin.data.queue.find(item => item.path === this.currentItem?.path);
         if (!queueItem) return;
 
-        const currentTime = this.videoEl && isFinite(this.videoEl.currentTime)
+        const hasLoadedSource = !!this.videoEl
+            && this.videoEl.readyState >= 1
+            && !this.videoEl.seeking
+            && isFinite(this.videoEl.currentTime);
+
+        const currentTime = hasLoadedSource && this.videoEl
             ? this.videoEl.currentTime
             : (queueItem.position || 0);
-        const duration = this.videoEl && isFinite(this.videoEl.duration) && this.videoEl.duration > 0
+        const duration = hasLoadedSource && this.videoEl
+            && isFinite(this.videoEl.duration)
+            && this.videoEl.duration > 0
             ? this.videoEl.duration
             : (queueItem.duration || 0);
 
@@ -3959,7 +4541,11 @@ class CrossPlayerMainView extends ItemView {
 
         const syncedItem = this.plugin.data.queue.find(item => item.id === this.currentItem?.id)
             || this.plugin.data.queue.find(item => item.path === this.currentItem?.path);
-        if (!syncedItem) return;
+        if (!syncedItem) {
+            // A peer confirmed this item deleted while we were not looking.
+            this.clearCurrentMedia();
+            return;
+        }
 
         const isActivelyPlayingLocally = !!this.videoEl && this.isCurrentPlaybackSource() && !this.videoEl.paused && !this.videoEl.ended;
         this.currentItem = syncedItem;
@@ -4061,7 +4647,7 @@ class CrossPlayerMainView extends ItemView {
 
                 // If onended fires, it's definitely completed
                 if (this.currentItem.status !== 'completed') {
-                    await this.plugin.updateStatus(this.currentItem.id, 'completed');
+                    await this.plugin.updateStatus(this.currentItem.id, 'completed', this.currentItem.path);
                 }
 
                 // End-of-file sleep timers suppress the normal autoplay-next

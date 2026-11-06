@@ -56,7 +56,7 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 1. **Setup**:
    - Go to **Settings > Cross Player**.
    - Set your **Watched Folder** (absolute path).
-   - (Optional) Configure `yt-dlp` path if you want to use the downloader.
+   - To use the downloader, install **yt-dlp** and **ffmpeg** (both are mandatory) and make sure they are on your `PATH`. You can also set custom binary paths in settings.
 2. **Queue**:
    - Open "Cross Player" from the ribbon icon or command palette.
    - Files from your watched folder appear automatically.
@@ -97,13 +97,16 @@ A powerful media player plugin for Obsidian focused on seamless playback across 
 
 ### Storage & Download Settings
 - **yt-dlp Path**: Path to the `yt-dlp` executable.
+- **FFmpeg Path**: Path to the `ffmpeg` executable. Leave empty to use the one on your `PATH`.
 - **Download Folder**: Where to save YouTube downloads (defaults to watched folder).
 - **Default Quality/Type**: Set your preferred download format.
 - **Storage Limit**: Warning threshold in GB.
 
 ## Requirements
 - **Obsidian**: Latest version recommended.
-- **yt-dlp**: Required only for YouTube downloading features. Ensure it is installed and accessible in your path or specified in settings.
+- **yt-dlp AND ffmpeg are both mandatory for YouTube downloads**. `yt-dlp` fetches the media; `ffmpeg` is required for every audio-to-mp3 conversion and for merging video + audio into a single MP4.
+- Both `yt-dlp` and `ffmpeg` must be on your `PATH`, or configured with their full executable paths in **Settings > Cross Player**. On macOS the plugin automatically adds `/usr/local/bin` and `/opt/homebrew/bin` to the `PATH` it uses.
+- **Desktop only**: YouTube downloading is not available in the mobile app. Android users can use [Seal](https://github.com/JunkFood02/Seal) instead.
 
 ---
 *Created for personal productivity and cross-device media consumption.*

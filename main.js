@@ -29,6 +29,319 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 
+// src/sync.ts
+var DEFAULT_MAX_TOMBSTONE_AGE = 30 * 24 * 60 * 60 * 1e3;
+var MAX_TOMBSTONES = 200;
+var DEFAULT_DELETED_FILE_GUARD_MS = 5 * 60 * 1e3;
+var DEFAULT_RECREATED_FILE_TOLERANCE_MS = 60 * 1e3;
+function isFileDeletionAuthoritative(deletedAt, fileModifiedAt, options = {}) {
+  var _a, _b, _c;
+  if (deletedAt === void 0)
+    return false;
+  if (fileModifiedAt === null || fileModifiedAt === void 0)
+    return true;
+  if (options.allowRecreated)
+    return false;
+  const now = (_a = options.now) != null ? _a : Date.now();
+  const guardMs = (_b = options.guardMs) != null ? _b : DEFAULT_DELETED_FILE_GUARD_MS;
+  const toleranceMs = (_c = options.recreateToleranceMs) != null ? _c : DEFAULT_RECREATED_FILE_TOLERANCE_MS;
+  if (fileModifiedAt <= deletedAt + toleranceMs)
+    return true;
+  if (now - deletedAt < guardMs)
+    return true;
+  return false;
+}
+function toFiniteNumber(value, fallback = 0) {
+  return typeof value === "number" && isFinite(value) ? value : fallback;
+}
+function toNonNegativeNumber(value, fallback = 0) {
+  const parsed = toFiniteNumber(value, fallback);
+  return parsed > 0 ? parsed : 0;
+}
+function normalizePath(path) {
+  if (typeof path !== "string")
+    return "";
+  return path.replace(/\\/g, "/").replace(/^\/+/, "");
+}
+function baseName(path) {
+  const parts = path.split("/");
+  return parts[parts.length - 1] || path;
+}
+function normalizeStatus(value) {
+  if (value === "completed" || value === "playing" || value === "pending") {
+    return value;
+  }
+  return "pending";
+}
+function stableIdForPath(path) {
+  let hash = 2166136261;
+  for (let i = 0; i < path.length; i++) {
+    hash ^= path.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `m${(hash >>> 0).toString(36)}`;
+}
+function sanitizeItem(raw) {
+  if (!raw || typeof raw !== "object")
+    return null;
+  const record = raw;
+  const path = normalizePath(record.path);
+  if (!path)
+    return null;
+  const id = typeof record.id === "string" && record.id ? record.id : stableIdForPath(path);
+  const name = typeof record.name === "string" && record.name ? record.name : baseName(path);
+  return {
+    id,
+    path,
+    name,
+    status: normalizeStatus(record.status),
+    finished: !!record.finished,
+    position: toNonNegativeNumber(record.position),
+    playbackUpdatedAt: toNonNegativeNumber(record.playbackUpdatedAt),
+    duration: toNonNegativeNumber(record.duration),
+    size: toNonNegativeNumber(record.size),
+    countedAsConsumed: !!record.countedAsConsumed,
+    consumedAt: typeof record.consumedAt === "string" ? record.consumedAt : void 0
+  };
+}
+function sanitizeStates(states) {
+  const snapshots = [];
+  for (const state of states) {
+    if (!state || typeof state !== "object")
+      continue;
+    const deviceId = typeof state.deviceId === "string" ? state.deviceId : "";
+    const queue = Array.isArray(state.queue) ? state.queue : [];
+    const items = /* @__PURE__ */ new Map();
+    const queueOrder = [];
+    const seen = /* @__PURE__ */ new Set();
+    for (const rawItem of queue) {
+      const item = sanitizeItem(rawItem);
+      if (!item)
+        continue;
+      if (seen.has(item.path))
+        continue;
+      seen.add(item.path);
+      items.set(item.path, item);
+      queueOrder.push(item.path);
+    }
+    snapshots.push({
+      state: {
+        schemaVersion: toFiniteNumber(state.schemaVersion, 1),
+        deviceId: deviceId || `unknown-${snapshots.length}`,
+        deviceName: typeof state.deviceName === "string" ? state.deviceName : void 0,
+        updatedAt: toNonNegativeNumber(state.updatedAt),
+        queueUpdatedAt: toNonNegativeNumber(state.queueUpdatedAt),
+        queue: [],
+        deletedPaths: state.deletedPaths && typeof state.deletedPaths === "object" ? state.deletedPaths : {},
+        deletedFiles: state.deletedFiles && typeof state.deletedFiles === "object" ? state.deletedFiles : {},
+        queueScrollTop: toNonNegativeNumber(state.queueScrollTop)
+      },
+      order: snapshots.length,
+      items,
+      queueOrder
+    });
+  }
+  snapshots.sort((a, b) => {
+    const queueDiff = (b.state.queueUpdatedAt || 0) - (a.state.queueUpdatedAt || 0);
+    if (queueDiff !== 0)
+      return queueDiff;
+    const updatedDiff = (b.state.updatedAt || 0) - (a.state.updatedAt || 0);
+    if (updatedDiff !== 0)
+      return updatedDiff;
+    return a.state.deviceId.localeCompare(b.state.deviceId);
+  });
+  return snapshots;
+}
+function addTombstone(target, path, timestamp) {
+  if (!path)
+    return;
+  const existing = target[path] || 0;
+  if (timestamp > existing) {
+    target[path] = timestamp;
+  } else if (existing === 0) {
+    target[path] = 0;
+  }
+}
+function pruneTombstones(deleted, now, maxAgeMs) {
+  const cutoff = now - maxAgeMs;
+  const paths = Object.keys(deleted);
+  for (const path of paths) {
+    const timestamp = toNonNegativeNumber(deleted[path]);
+    if (timestamp < cutoff) {
+      delete deleted[path];
+    }
+  }
+  const remaining = Object.keys(deleted);
+  if (remaining.length > MAX_TOMBSTONES) {
+    remaining.sort((a, b) => (deleted[a] || 0) - (deleted[b] || 0));
+    const removeCount = remaining.length - MAX_TOMBSTONES;
+    for (let i = 0; i < removeCount; i++) {
+      delete deleted[remaining[i]];
+    }
+  }
+  return deleted;
+}
+function mergeItemSnapshots(path, snapshots) {
+  const baseSnapshot = snapshots.find((snapshot) => snapshot.isBase) || snapshots[0];
+  let latest = baseSnapshot;
+  for (const snapshot of snapshots) {
+    if (snapshot === baseSnapshot)
+      continue;
+    const snapshotTime = snapshot.item.playbackUpdatedAt || 0;
+    const latestTime = latest.item.playbackUpdatedAt || 0;
+    if (snapshotTime > latestTime) {
+      latest = snapshot;
+    }
+  }
+  let duration = 0;
+  let size = 0;
+  for (const snapshot of snapshots) {
+    if (snapshot.item.duration > duration)
+      duration = snapshot.item.duration;
+    if ((snapshot.item.size || 0) > size)
+      size = snapshot.item.size || 0;
+  }
+  const id = baseSnapshot.item.id || snapshots.map((snapshot) => snapshot.item.id).find((value) => !!value) || stableIdForPath(path);
+  const name = baseSnapshot.item.name || latest.item.name || baseName(path);
+  return {
+    id,
+    path,
+    name,
+    status: latest.item.status,
+    finished: latest.item.finished,
+    position: latest.item.position,
+    playbackUpdatedAt: latest.item.playbackUpdatedAt,
+    duration,
+    size,
+    countedAsConsumed: latest.item.countedAsConsumed,
+    consumedAt: latest.item.consumedAt
+  };
+}
+function mergeDeviceStates(states, options = {}) {
+  var _a, _b, _c;
+  const now = (_a = options.now) != null ? _a : Date.now();
+  const maxTombstoneAgeMs = (_b = options.maxTombstoneAgeMs) != null ? _b : DEFAULT_MAX_TOMBSTONE_AGE;
+  const isPathPresent = options.isPathPresent;
+  const isPathAllowed = (_c = options.isPathAllowed) != null ? _c : () => true;
+  const snapshots = sanitizeStates(states);
+  const deleted = {};
+  const deletedFiles = {};
+  for (const snapshot of snapshots) {
+    const stateDeleted = snapshot.state.deletedPaths || {};
+    for (const path of Object.keys(stateDeleted)) {
+      addTombstone(deleted, normalizePath(path), toNonNegativeNumber(stateDeleted[path]));
+    }
+    const stateDeletedFiles = snapshot.state.deletedFiles || {};
+    for (const path of Object.keys(stateDeletedFiles)) {
+      addTombstone(deletedFiles, normalizePath(path), toNonNegativeNumber(stateDeletedFiles[path]));
+    }
+  }
+  if (options.legacyDeletedPaths) {
+    for (const path of Object.keys(options.legacyDeletedPaths)) {
+      addTombstone(deleted, normalizePath(path), toNonNegativeNumber(options.legacyDeletedPaths[path]));
+    }
+  }
+  pruneTombstones(deleted, now, maxTombstoneAgeMs);
+  pruneTombstones(deletedFiles, now, maxTombstoneAgeMs);
+  const shouldDropForTombstone = (path) => {
+    var _a2, _b2;
+    const pathDeletedAt = deleted[path];
+    const fileDeletedAt = deletedFiles[path];
+    if (pathDeletedAt === void 0 && fileDeletedAt === void 0)
+      return false;
+    if (!isPathPresent) {
+      return true;
+    }
+    if (!isPathPresent(path)) {
+      return true;
+    }
+    if (fileDeletedAt === void 0) {
+      return false;
+    }
+    return isFileDeletionAuthoritative(
+      fileDeletedAt,
+      (_a2 = options.getPathModifiedTime) == null ? void 0 : _a2.call(options, path),
+      {
+        now,
+        guardMs: options.tombstoneGuardMs,
+        recreateToleranceMs: options.recreateToleranceMs,
+        allowRecreated: (_b2 = options.isRecreatedPath) == null ? void 0 : _b2.call(options, path)
+      }
+    );
+  };
+  const orderedPaths = [];
+  const seenPaths = /* @__PURE__ */ new Set();
+  const snapshotsByPath = /* @__PURE__ */ new Map();
+  const addPath = (path) => {
+    if (!path || seenPaths.has(path))
+      return;
+    if (!isPathAllowed(path))
+      return;
+    if (shouldDropForTombstone(path))
+      return;
+    seenPaths.add(path);
+    orderedPaths.push(path);
+  };
+  for (let i = 0; i < snapshots.length; i++) {
+    const snapshot = snapshots[i];
+    for (const path of snapshot.queueOrder) {
+      addPath(path);
+    }
+  }
+  for (let stateOrder = 0; stateOrder < snapshots.length; stateOrder++) {
+    const snapshot = snapshots[stateOrder];
+    for (const path of snapshot.queueOrder) {
+      if (!seenPaths.has(path))
+        continue;
+      let items = snapshotsByPath.get(path);
+      if (!items) {
+        items = [];
+        snapshotsByPath.set(path, items);
+      }
+      const item = snapshot.items.get(path);
+      if (!item)
+        continue;
+      items.push({
+        item,
+        stateOrder,
+        isBase: stateOrder === 0
+      });
+    }
+  }
+  const queue = [];
+  for (const path of orderedPaths) {
+    const items = snapshotsByPath.get(path);
+    if (!items || items.length === 0)
+      continue;
+    items.sort((a, b) => a.stateOrder - b.stateOrder);
+    queue.push(mergeItemSnapshots(path, items));
+  }
+  let queueUpdatedAt = 0;
+  let queueScrollTop = 0;
+  for (const snapshot of snapshots) {
+    if ((snapshot.state.queueUpdatedAt || 0) > queueUpdatedAt) {
+      queueUpdatedAt = snapshot.state.queueUpdatedAt || 0;
+    }
+    if (options.localDeviceId && snapshot.state.deviceId === options.localDeviceId) {
+      queueScrollTop = snapshot.state.queueScrollTop || 0;
+    }
+  }
+  return {
+    queue,
+    deletedPaths: deleted,
+    deletedFiles,
+    queueUpdatedAt,
+    queueScrollTop
+  };
+}
+function buildSharedDataPayload(settings, playbackSpeed, consumptionStats) {
+  return {
+    settings,
+    playbackSpeed,
+    consumptionStats: consumptionStats || {}
+  };
+}
+
 // node_modules/sortablejs/modular/sortable.esm.js
 function ownKeys(object, enumerableOnly) {
   var keys = Object.keys(object);
@@ -2301,6 +2614,10 @@ var DEFAULT_SETTINGS = {
 };
 var LAST_WATCHED_FOLDER_KEY = "cross-player:last-good-watched-folder";
 var REQUIRED_PLUGIN_FILES = ["manifest.json", "main.js"];
+var DEVICE_STATE_DIR = "state";
+var DEVICE_STATE_SCHEMA_VERSION = 1;
+var DELETED_PATH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
+var RECENT_DOWNLOAD_OUTPUT_TTL_MS = 15 * 60 * 1e3;
 var AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "opus", "m4a", "m4b", "weba", "aac", "flac", "aif", "aiff", "caf"];
 var VIDEO_EXTENSIONS = ["mp4", "webm", "ogv", "mkv", "3gp"];
 var SUPPORTED_MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS];
@@ -2328,6 +2645,16 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.deferredMetadataTimer = null;
     this.isHydratingDeferredMetadata = false;
     this.pendingPlaybackStateKeys = /* @__PURE__ */ new Set();
+    // Per-device sync state. Every device is the only writer of its own
+    // state file, so sync tools never have to resolve concurrent writes.
+    this.deviceStateWriteChain = Promise.resolve();
+    this.deviceStateSaveInProgress = 0;
+    this.lastKnownStateFileStat = {};
+    this.lastSharedDataJson = "";
+    this.lastPersistedDeviceStateComparable = "";
+    this.sharedDataRepairPending = false;
+    this.recentDownloadOutputs = /* @__PURE__ */ new Map();
+    this.tombstoneRecheckTimers = /* @__PURE__ */ new Map();
     // Sleep timer state is intentionally in-memory only: it is device-local
     // and must not be synced through data.json.
     this.sleepTimerEndsAt = null;
@@ -2388,19 +2715,58 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     return [`id:${item.id}`, `path:${item.path}`];
   }
   markPlaybackStateChanged(item, timestamp = Date.now()) {
-    item.playbackUpdatedAt = Math.max(item.playbackUpdatedAt || 0, timestamp);
+    item.playbackUpdatedAt = Math.max(timestamp, (item.playbackUpdatedAt || 0) + 1);
     for (const key of this.getMediaItemKeys(item)) {
       this.pendingPlaybackStateKeys.add(key);
     }
   }
-  hasPendingPlaybackStateChange(item) {
-    return this.getMediaItemKeys(item).some((key) => this.pendingPlaybackStateKeys.has(key));
-  }
   findMatchingQueueItem(queue, item) {
     return (queue == null ? void 0 : queue.find((candidate) => candidate.id === item.id)) || (queue == null ? void 0 : queue.find((candidate) => candidate.path === item.path));
   }
-  hasDifferentPlaybackState(a, b) {
-    return Math.abs((a.position || 0) - (b.position || 0)) > 1 || a.status !== b.status || !!a.finished !== !!b.finished || !!a.countedAsConsumed !== !!b.countedAsConsumed || (a.consumedAt || "") !== (b.consumedAt || "");
+  findQueueItem(idOrPath, path) {
+    return this.data.queue.find((item) => item.id === idOrPath) || (path ? this.data.queue.find((item) => item.path === path) : void 0) || this.data.queue.find((item) => item.path === idOrPath);
+  }
+  getCurrentQueueIndex() {
+    var _a;
+    const currentItem = (_a = this.mainView) == null ? void 0 : _a.currentItem;
+    if (!currentItem)
+      return -1;
+    return this.data.queue.findIndex(
+      (item) => item.id === currentItem.id || item.path === currentItem.path
+    );
+  }
+  /**
+   * Two devices can end up with the same path under different item ids
+   * (an independently discovered file, or a rename arriving via sync).
+   * Keep one entry per path, preferring the newest playback snapshot, so
+   * the queue never shows duplicates and progress cannot split in two.
+   */
+  dedupeQueueByPath() {
+    const byPath = /* @__PURE__ */ new Map();
+    const deduped = [];
+    let changed = false;
+    for (const item of this.data.queue) {
+      const existing = byPath.get(item.path);
+      if (!existing) {
+        byPath.set(item.path, item);
+        deduped.push(item);
+        continue;
+      }
+      changed = true;
+      if ((item.playbackUpdatedAt || 0) > (existing.playbackUpdatedAt || 0)) {
+        this.copyPlaybackState(existing, item);
+      }
+      if ((item.duration || 0) > (existing.duration || 0)) {
+        existing.duration = item.duration;
+      }
+      if ((item.size || 0) > (existing.size || 0)) {
+        existing.size = item.size;
+      }
+    }
+    if (changed) {
+      this.data.queue = deduped;
+    }
+    return changed;
   }
   copyPlaybackState(target, source) {
     target.position = source.position || 0;
@@ -2411,7 +2777,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     target.playbackUpdatedAt = source.playbackUpdatedAt;
   }
   markQueueChanged() {
-    this.data.queueUpdatedAt = Date.now();
+    this.data.queueUpdatedAt = Math.max(Date.now(), (this.data.queueUpdatedAt || 0) + 1);
     this.pendingQueueChange = true;
   }
   hasUnsyncedChanges() {
@@ -2423,15 +2789,26 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     return this.data.deletedPaths;
   }
-  markPathDeleted(path, timestamp = Date.now()) {
-    const deleted = this.getDeletedPaths();
-    deleted[path] = Math.max(deleted[path] || 0, timestamp);
-    const keys = Object.keys(deleted);
+  getDeletedFiles() {
+    if (!this.data.deletedFiles || typeof this.data.deletedFiles !== "object") {
+      this.data.deletedFiles = {};
+    }
+    return this.data.deletedFiles;
+  }
+  setTombstone(target, path, timestamp) {
+    target[path] = Math.max(target[path] || 0, timestamp);
+    const keys = Object.keys(target);
     if (keys.length > 200) {
-      keys.sort((a, b) => (deleted[a] || 0) - (deleted[b] || 0));
+      keys.sort((a, b) => (target[a] || 0) - (target[b] || 0));
       for (let i = 0; i < keys.length - 200; i++) {
-        delete deleted[keys[i]];
+        delete target[keys[i]];
       }
+    }
+  }
+  markPathDeleted(path, timestamp = Date.now(), deleteFile = false) {
+    this.setTombstone(this.getDeletedPaths(), path, timestamp);
+    if (deleteFile) {
+      this.setTombstone(this.getDeletedFiles(), path, timestamp);
     }
   }
   clearPathDeleted(path) {
@@ -2439,108 +2816,284 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     if (deleted[path] !== void 0) {
       delete deleted[path];
     }
+    const deletedFiles = this.getDeletedFiles();
+    if (deletedFiles[path] !== void 0) {
+      delete deletedFiles[path];
+    }
   }
-  pruneDeletedPaths(maxAgeMs = 30 * 24 * 60 * 60 * 1e3) {
-    const deleted = this.getDeletedPaths();
+  pruneDeletedPaths(maxAgeMs = DELETED_PATH_MAX_AGE_MS) {
     const cutoff = Date.now() - maxAgeMs;
-    for (const path of Object.keys(deleted)) {
-      if ((deleted[path] || 0) < cutoff) {
-        delete deleted[path];
+    for (const tombstones of [this.getDeletedPaths(), this.getDeletedFiles()]) {
+      for (const path of Object.keys(tombstones)) {
+        if ((tombstones[path] || 0) < cutoff) {
+          delete tombstones[path];
+        }
       }
     }
   }
-  mergeDeletedPaths(diskDeleted) {
-    const local = this.getDeletedPaths();
+  mergeTombstoneMap(diskDeleted, localDeleted) {
     const merged = { ...diskDeleted != null ? diskDeleted : {} };
-    for (const path of Object.keys(local)) {
-      const ts = local[path] || 0;
+    for (const path of Object.keys(localDeleted)) {
+      const ts = localDeleted[path] || 0;
       merged[path] = Math.max(merged[path] || 0, ts);
     }
-    this.data.deletedPaths = merged;
+    return merged;
+  }
+  mergeDeletedPaths(diskDeleted) {
+    this.data.deletedPaths = this.mergeTombstoneMap(diskDeleted, this.getDeletedPaths());
     this.pruneDeletedPaths();
     return this.getDeletedPaths();
   }
-  isPathTombstoned(path) {
-    return this.getDeletedPaths()[path] !== void 0;
+  mergeDeletedFiles(diskDeleted) {
+    this.data.deletedFiles = this.mergeTombstoneMap(diskDeleted, this.getDeletedFiles());
+    this.pruneDeletedPaths();
+    return this.getDeletedFiles();
   }
-  async mergeFresherPlaybackStateFromDisk() {
-    var _a, _b, _c, _d, _e, _f;
-    const stat = await this.getPluginDataStat();
-    const nextMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
-    const nextSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
-    const changed = nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
-    if (!changed)
+  isPathTombstoned(path) {
+    return this.getDeletedPaths()[path] !== void 0 || this.getDeletedFiles()[path] !== void 0;
+  }
+  isRecentDownloadOutput(path) {
+    const expiresAt = this.recentDownloadOutputs.get(path);
+    if (expiresAt === void 0)
+      return false;
+    if (expiresAt < Date.now()) {
+      this.recentDownloadOutputs.delete(path);
+      return false;
+    }
+    return true;
+  }
+  rememberDownloadOutput(rawPath, cwd) {
+    let candidate = rawPath.trim().replace(/^["']+|["']+$/g, "");
+    if (!candidate)
+      return;
+    const isAbsolute = candidate.startsWith("/") || /^[A-Za-z]:[\\/]/.test(candidate);
+    if (!isAbsolute) {
+      candidate = `${cwd.replace(/[\\/]+$/, "")}/${candidate}`;
+    }
+    const relative = this.getVaultRelativePath(candidate);
+    if (!relative)
+      return;
+    const normalized = relative.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized || normalized.split("/").includes(".."))
+      return;
+    this.recentDownloadOutputs.set(normalized, Date.now() + RECENT_DOWNLOAD_OUTPUT_TTL_MS);
+    if (this.isPathTombstoned(normalized)) {
+      this.clearPathDeleted(normalized);
+      void this.saveData(false);
+    }
+  }
+  getFileDeletionDisposition(path, fileModifiedAt) {
+    const deletedAt = this.getDeletedFiles()[path];
+    if (deletedAt === void 0)
+      return "keep";
+    if (this.isRecentDownloadOutput(path))
+      return "keep";
+    const authoritative = isFileDeletionAuthoritative(deletedAt, fileModifiedAt, {
+      now: Date.now(),
+      guardMs: DEFAULT_DELETED_FILE_GUARD_MS,
+      recreateToleranceMs: DEFAULT_RECREATED_FILE_TOLERANCE_MS
+    });
+    if (!authoritative)
+      return "keep";
+    if (fileModifiedAt <= deletedAt + DEFAULT_RECREATED_FILE_TOLERANCE_MS) {
+      return "delete";
+    }
+    return "wait";
+  }
+  scheduleTombstoneRecheck(path, delayMs) {
+    if (this.tombstoneRecheckTimers.has(path))
+      return;
+    const timer = window.setTimeout(() => {
+      this.tombstoneRecheckTimers.delete(path);
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof import_obsidian.TFile) {
+        void this.handleFileChange(file);
+      }
+    }, Math.max(1e3, delayMs));
+    this.tombstoneRecheckTimers.set(path, timer);
+  }
+  getDeviceStateDirPath() {
+    return `${this.manifest.dir}/${DEVICE_STATE_DIR}`;
+  }
+  getDeviceStatePath(deviceId = this.deviceId) {
+    return `${this.getDeviceStateDirPath()}/${deviceId || "unknown-device"}.json`;
+  }
+  isDeviceStatePath(path) {
+    const dir = this.getDeviceStateDirPath();
+    return path.startsWith(dir + "/") && path.endsWith(".json") && !path.endsWith(".tmp");
+  }
+  async ensureDeviceStateDir() {
+    const dir = this.getDeviceStateDirPath();
+    const adapter = this.app.vault.adapter;
+    if (await adapter.exists(dir))
       return;
     try {
-      const dataText = await this.app.vault.adapter.read(this.getPluginDataPath());
-      const diskData = dataText.trim() ? JSON.parse(dataText) : {};
-      if (!Array.isArray(diskData.queue))
-        return;
-      const diskQueueUpdatedAt = diskData.queueUpdatedAt || 0;
-      const localQueueUpdatedAt = this.data.queueUpdatedAt || 0;
-      const diskQueueIsNewer = diskQueueUpdatedAt > localQueueUpdatedAt;
-      const mergedDeleted = this.mergeDeletedPaths(diskData.deletedPaths);
-      const isConfirmedDelete = (path) => {
-        if (mergedDeleted[path] === void 0)
-          return false;
-        return !this.app.vault.getAbstractFileByPath(path);
-      };
-      if (diskQueueIsNewer) {
-        for (const diskItem of diskData.queue) {
-          const localItem = this.findMatchingQueueItem(this.data.queue, diskItem);
-          if (!localItem)
-            continue;
-          const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
-          const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
-          const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-          const localChangedPlayback = this.hasPendingPlaybackStateChange(localItem);
-          if (!diskIsNewer && (localPlaybackUpdatedAt > diskPlaybackUpdatedAt || localChangedPlayback)) {
-            this.copyPlaybackState(diskItem, localItem);
-          }
-          if ((!diskItem.duration || diskItem.duration <= 0) && localItem.duration && localItem.duration > 0) {
-            diskItem.duration = localItem.duration;
-          }
-          if (!diskItem.size && localItem.size) {
-            diskItem.size = localItem.size;
-          }
-        }
-        this.data.queue = diskData.queue.filter(
-          (item) => !isConfirmedDelete(item.path)
-        );
-        this.data.queueUpdatedAt = diskQueueUpdatedAt;
-      } else {
-        for (const localItem of this.data.queue) {
-          const diskItem = this.findMatchingQueueItem(diskData.queue, localItem);
-          if (!diskItem)
-            continue;
-          const diskPlaybackUpdatedAt = diskItem.playbackUpdatedAt || 0;
-          const localPlaybackUpdatedAt = localItem.playbackUpdatedAt || 0;
-          const diskIsNewer = diskPlaybackUpdatedAt > localPlaybackUpdatedAt;
-          const isCurrentlyPlayingLocally = ((_d = (_c = this.mainView) == null ? void 0 : _c.currentItem) == null ? void 0 : _d.id) === localItem.id && !!((_e = this.mainView) == null ? void 0 : _e.isActivelyPlayingLocally());
-          if (!isCurrentlyPlayingLocally && diskIsNewer) {
-            this.copyPlaybackState(localItem, diskItem);
-          }
-          if ((!localItem.duration || localItem.duration <= 0) && diskItem.duration && diskItem.duration > 0) {
-            localItem.duration = diskItem.duration;
-          }
-          if (!localItem.size && diskItem.size) {
-            localItem.size = diskItem.size;
-          }
-        }
-        const beforePrune = this.data.queue.length;
-        this.data.queue = this.data.queue.filter(
-          (item) => !isConfirmedDelete(item.path)
-        );
-        if (this.data.queue.length !== beforePrune) {
-          this.pendingQueueChange = true;
-        }
-      }
-      if (diskData.consumptionStats) {
-        this.data.consumptionStats = Object.assign({}, diskData.consumptionStats, (_f = this.data.consumptionStats) != null ? _f : {});
-      }
+      await adapter.mkdir(dir);
     } catch (error) {
-      console.warn("[Cross Player] Failed to merge synced playback state before save", error);
+      if (!await adapter.exists(dir)) {
+        throw error;
+      }
     }
+  }
+  parseDeviceState(text) {
+    try {
+      const parsed = text.trim() ? JSON.parse(text) : null;
+      if (!parsed || typeof parsed !== "object")
+        return null;
+      if (typeof parsed.deviceId !== "string" || !Array.isArray(parsed.queue))
+        return null;
+      return {
+        schemaVersion: typeof parsed.schemaVersion === "number" ? parsed.schemaVersion : 1,
+        deviceId: parsed.deviceId,
+        deviceName: typeof parsed.deviceName === "string" ? parsed.deviceName : void 0,
+        updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
+        queueUpdatedAt: typeof parsed.queueUpdatedAt === "number" ? parsed.queueUpdatedAt : 0,
+        queue: parsed.queue,
+        deletedPaths: parsed.deletedPaths && typeof parsed.deletedPaths === "object" ? parsed.deletedPaths : {},
+        deletedFiles: parsed.deletedFiles && typeof parsed.deletedFiles === "object" ? parsed.deletedFiles : {},
+        queueScrollTop: typeof parsed.queueScrollTop === "number" ? parsed.queueScrollTop : 0
+      };
+    } catch (error) {
+      console.warn("[Cross Player] Could not parse a device state file", error);
+      return null;
+    }
+  }
+  async readDeviceStateFiles() {
+    const dir = this.getDeviceStateDirPath();
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(dir))
+      return [];
+    let listing;
+    try {
+      listing = await adapter.list(dir);
+    } catch (error) {
+      console.warn("[Cross Player] Could not list device state directory", error);
+      return [];
+    }
+    const states = [];
+    for (const path of listing.files) {
+      if (!this.isDeviceStatePath(path))
+        continue;
+      try {
+        const text = await adapter.read(path);
+        const state = this.parseDeviceState(text);
+        if (state)
+          states.push(state);
+      } catch (error) {
+        console.warn("[Cross Player] Could not read device state file", path, error);
+      }
+    }
+    return states;
+  }
+  async getDeviceStateFingerprints() {
+    const dir = this.getDeviceStateDirPath();
+    const adapter = this.app.vault.adapter;
+    const fingerprints = {};
+    if (!await adapter.exists(dir))
+      return fingerprints;
+    let listing;
+    try {
+      listing = await adapter.list(dir);
+    } catch (error) {
+      console.warn("[Cross Player] Could not list device state directory", error);
+      return fingerprints;
+    }
+    for (const path of listing.files) {
+      if (!this.isDeviceStatePath(path))
+        continue;
+      const stat = await adapter.stat(path);
+      if (stat) {
+        fingerprints[path] = `${stat.mtime}:${stat.size}`;
+      }
+    }
+    return fingerprints;
+  }
+  buildDeviceState() {
+    return {
+      schemaVersion: DEVICE_STATE_SCHEMA_VERSION,
+      deviceId: this.deviceId || "unknown-device",
+      deviceName: this.deviceName,
+      updatedAt: Date.now(),
+      queueUpdatedAt: this.data.queueUpdatedAt || 0,
+      queue: this.data.queue.map((item) => ({ ...item })),
+      deletedPaths: { ...this.getDeletedPaths() },
+      deletedFiles: { ...this.getDeletedFiles() },
+      queueScrollTop: this.data.queueScrollTop || 0
+    };
+  }
+  async persistDeviceState() {
+    const runWrite = async () => {
+      this.deviceStateSaveInProgress++;
+      try {
+        const state = this.buildDeviceState();
+        const comparable = JSON.stringify({ ...state, updatedAt: 0 });
+        const statePath = this.getDeviceStatePath(state.deviceId);
+        const existingStat = await this.app.vault.adapter.stat(statePath);
+        const existingFingerprint = existingStat ? `${existingStat.mtime}:${existingStat.size}` : "";
+        if (comparable === this.lastPersistedDeviceStateComparable && existingFingerprint === (this.lastKnownStateFileStat[statePath] || "") && existingFingerprint !== "") {
+          return;
+        }
+        await this.ensureDeviceStateDir();
+        const text = JSON.stringify(state, null, 2);
+        const tempPath = `${statePath}.tmp`;
+        try {
+          await this.app.vault.adapter.write(tempPath, text);
+          await this.app.vault.adapter.rename(tempPath, statePath);
+        } catch (error) {
+          await this.app.vault.adapter.write(statePath, text);
+          try {
+            await this.app.vault.adapter.remove(tempPath);
+          } catch (cleanupError) {
+          }
+        }
+        const stat = await this.app.vault.adapter.stat(statePath);
+        this.lastKnownStateFileStat[statePath] = stat ? `${stat.mtime}:${stat.size}` : "";
+        this.lastPersistedDeviceStateComparable = comparable;
+      } finally {
+        this.deviceStateSaveInProgress--;
+      }
+    };
+    const queuedWrite = this.deviceStateWriteChain.catch(() => {
+    }).then(runWrite);
+    this.deviceStateWriteChain = queuedWrite.catch(() => {
+    });
+    await queuedWrite;
+  }
+  buildSharedPayload() {
+    return buildSharedDataPayload(
+      this.data.settings,
+      this.data.playbackSpeed,
+      this.data.consumptionStats
+    );
+  }
+  async persistSharedDataIfChanged(force = false) {
+    const payload = this.buildSharedPayload();
+    const serialized = JSON.stringify(payload);
+    if (!force && serialized === this.lastSharedDataJson)
+      return;
+    await super.saveData(payload);
+    this.lastSharedDataJson = serialized;
+    await this.refreshTrackedDataFileState();
+  }
+  async haveSyncedFilesChanged() {
+    var _a, _b;
+    const dataStat = await this.getPluginDataStat();
+    const nextMtime = (_a = dataStat == null ? void 0 : dataStat.mtime) != null ? _a : 0;
+    const nextSize = (_b = dataStat == null ? void 0 : dataStat.size) != null ? _b : 0;
+    if (nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize) {
+      return true;
+    }
+    const fingerprints = await this.getDeviceStateFingerprints();
+    const oldKeys = Object.keys(this.lastKnownStateFileStat);
+    const newKeys = Object.keys(fingerprints);
+    if (oldKeys.length !== newKeys.length)
+      return true;
+    for (const path of newKeys) {
+      if (fingerprints[path] !== this.lastKnownStateFileStat[path]) {
+        return true;
+      }
+    }
+    return false;
   }
   loadDesktopModule(moduleParts) {
     const desktopRequire = this.getDesktopRequire();
@@ -2569,6 +3122,18 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const normalizedBase = basePath.replace(/[\\/]+$/, "");
     const normalizedRelative = relativePath.replace(/^[/\\]+/, "");
     return normalizedRelative ? `${normalizedBase}/${normalizedRelative}` : normalizedBase;
+  }
+  getVaultRelativePath(absolutePath) {
+    const basePath = this.getVaultBasePath();
+    if (!basePath)
+      return null;
+    const normalizedBase = basePath.replace(/\\/g, "/").replace(/\/+$/, "");
+    const normalizedAbsolute = absolutePath.replace(/\\/g, "/");
+    if (normalizedAbsolute === normalizedBase)
+      return "";
+    if (!normalizedAbsolute.startsWith(normalizedBase + "/"))
+      return null;
+    return normalizedAbsolute.slice(normalizedBase.length + 1);
   }
   getLastGoodWatchedFolder() {
     return this.getStoredString(LAST_WATCHED_FOLDER_KEY);
@@ -2639,30 +3204,89 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const stat = await this.getPluginDataStat();
     this.lastKnownDataMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
     this.lastKnownDataSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
+    this.lastKnownStateFileStat = await this.getDeviceStateFingerprints();
+  }
+  isConfirmedDeletedPath(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    const fileDeletedAt = this.getDeletedFiles()[path];
+    if (fileDeletedAt !== void 0) {
+      if (!(file instanceof import_obsidian.TFile))
+        return true;
+      return this.getFileDeletionDisposition(path, file.stat.mtime) !== "keep";
+    }
+    if (this.getDeletedPaths()[path] === void 0)
+      return false;
+    return !file;
+  }
+  pruneDeletedQueueItems() {
+    const before = this.data.queue.length;
+    this.data.queue = this.data.queue.filter((item) => !this.isConfirmedDeletedPath(item.path));
+    return this.data.queue.length !== before;
+  }
+  /**
+   * Enforce explicit file deletions on this device. A peer may have
+   * received the delete while an older copy of the file was already on
+   * disk; deleting it here stops the sync tool from offering that copy
+   * back to the device where the user pressed Delete.
+   */
+  async enforceFileDeletionTombstones() {
+    let changed = false;
+    for (const path of Object.keys(this.getDeletedFiles())) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof import_obsidian.TFile))
+        continue;
+      const disposition = this.getFileDeletionDisposition(path, file.stat.mtime);
+      if (disposition === "keep") {
+        this.clearPathDeleted(path);
+        changed = true;
+        continue;
+      }
+      if (disposition === "wait") {
+        this.scheduleTombstoneRecheck(
+          path,
+          DEFAULT_DELETED_FILE_GUARD_MS - (Date.now() - this.getDeletedFiles()[path])
+        );
+        continue;
+      }
+      try {
+        await this.permanentlyDeleteVaultFile(file);
+        changed = true;
+      } catch (error) {
+        console.error("[Cross Player] Failed to remove a resurrected file", path, error);
+      }
+    }
+    if (this.pruneDeletedQueueItems()) {
+      this.markQueueChanged();
+      changed = true;
+    }
+    return changed;
   }
   async reloadSyncedDataIfChanged(force = false) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
     if (this.isReloadingSyncedData)
       return;
-    if (this.saveInProgress > 0)
+    if (this.saveInProgress > 0 || this.deviceStateSaveInProgress > 0)
       return;
     if (!force && this.hasUnsyncedChanges())
       return;
-    const stat = await this.getPluginDataStat();
-    const nextMtime = (_a = stat == null ? void 0 : stat.mtime) != null ? _a : 0;
-    const nextSize = (_b = stat == null ? void 0 : stat.size) != null ? _b : 0;
-    const changed = force || nextMtime !== this.lastKnownDataMtime || nextSize !== this.lastKnownDataSize;
+    const changed = force || await this.haveSyncedFilesChanged();
     if (!changed)
       return;
-    const prevQueue = (_d = (_c = this.data) == null ? void 0 : _c.queue) != null ? _d : [];
-    const prevDeleted = { ...(_f = (_e = this.data) == null ? void 0 : _e.deletedPaths) != null ? _f : {} };
+    const prevQueue = (_b = (_a = this.data) == null ? void 0 : _a.queue) != null ? _b : [];
+    const prevDeleted = { ...(_d = (_c = this.data) == null ? void 0 : _c.deletedPaths) != null ? _d : {} };
+    const prevDeletedFiles = { ...(_f = (_e = this.data) == null ? void 0 : _e.deletedFiles) != null ? _f : {} };
     const prevStats = { ...(_h = (_g = this.data) == null ? void 0 : _g.consumptionStats) != null ? _h : {} };
     this.isReloadingSyncedData = true;
     try {
       await this.loadData();
       this.mergeDeletedPaths(prevDeleted);
+      this.mergeDeletedFiles(prevDeletedFiles);
       if (Object.keys(prevStats).length > 0) {
         this.data.consumptionStats = Object.assign({}, (_i = this.data.consumptionStats) != null ? _i : {}, prevStats);
+      }
+      const enforcedDeletions = await this.enforceFileDeletionTombstones();
+      if (enforcedDeletions) {
+        this.pendingQueueChange = true;
       }
       let healedPlayback = false;
       for (const newItem of this.data.queue) {
@@ -2672,7 +3296,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         const newTs = newItem.playbackUpdatedAt || 0;
         const oldTs = oldItem.playbackUpdatedAt || 0;
         if (oldTs > newTs) {
-          const isCurrentlyPlayingLocally = ((_k = (_j = this.mainView) == null ? void 0 : _j.currentItem) == null ? void 0 : _k.id) === newItem.id && !!((_l = this.mainView) == null ? void 0 : _l.isActivelyPlayingLocally());
+          const isCurrentlyPlayingLocally = !!this.mainView && !!this.mainView.currentItem && (this.mainView.currentItem.id === newItem.id || this.mainView.currentItem.path === newItem.path) && !!this.mainView.isActivelyPlayingLocally();
           if (!isCurrentlyPlayingLocally) {
             this.copyPlaybackState(newItem, oldItem);
             this.markPlaybackStateChanged(newItem, newItem.playbackUpdatedAt || Date.now());
@@ -2687,7 +3311,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         }
       }
       await this.validatePluginSyncHealth();
-      if (healedPlayback) {
+      if (healedPlayback || enforcedDeletions) {
         await this.saveData(false);
       } else {
         await this.refreshTrackedDataFileState();
@@ -2767,6 +3391,21 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async onload() {
     await this.loadData();
+    try {
+      if (await this.enforceFileDeletionTombstones()) {
+        await this.saveData(false);
+      }
+    } catch (error) {
+      console.error("[Cross Player] Failed to enforce deletion tombstones on startup", error);
+    }
+    if (this.sharedDataRepairPending) {
+      try {
+        await this.persistSharedDataIfChanged(true);
+        this.sharedDataRepairPending = false;
+      } catch (error) {
+        console.error("[Cross Player] Failed to persist repaired shared settings", error);
+      }
+    }
     await this.refreshTrackedDataFileState();
     await this.validatePluginSyncHealth();
     await this.calculateDynamicLimit();
@@ -3017,6 +3656,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.sleepTimerEndsAt = null;
     this.sleepTimerMinutes = null;
     this.sleepTimerStopAtFileEnd = false;
+    for (const timer of this.tombstoneRecheckTimers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.tombstoneRecheckTimers.clear();
   }
   async loadDeviceId() {
     let id = this.getStoredString("cross-player-device-id");
@@ -3080,34 +3723,97 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       this.listView.refresh();
   }
   async loadData() {
-    var _a;
+    var _a, _b;
+    if (!this.deviceId) {
+      await this.loadDeviceId();
+    }
     const loaded = await super.loadData();
     const settings = Object.assign({}, DEFAULT_SETTINGS, (_a = loaded == null ? void 0 : loaded.settings) != null ? _a : {});
+    const loadedWatchedFolder = typeof ((_b = loaded == null ? void 0 : loaded.settings) == null ? void 0 : _b.watchedFolder) === "string" ? loaded.settings.watchedFolder : "";
     if (!settings.watchedFolder) {
       const backupWatchedFolder = this.getLastGoodWatchedFolder();
       if (backupWatchedFolder) {
         settings.watchedFolder = backupWatchedFolder;
       }
     }
-    const baseData = {
-      settings,
-      queue: [],
-      // Initialize playbackSpeed with default if not present
-      playbackSpeed: settings.defaultPlaybackSpeed,
-      consumptionStats: {}
-    };
-    this.data = Object.assign(baseData, loaded);
-    this.data.settings = settings;
-    this.data.consumptionStats = this.data.consumptionStats || {};
-    if (!this.data.deletedPaths || typeof this.data.deletedPaths !== "object") {
-      this.data.deletedPaths = {};
+    this.sharedDataRepairPending = !loadedWatchedFolder && !!settings.watchedFolder;
+    const playbackSpeed = typeof (loaded == null ? void 0 : loaded.playbackSpeed) === "number" ? loaded.playbackSpeed : settings.defaultPlaybackSpeed;
+    const consumptionStats = (loaded == null ? void 0 : loaded.consumptionStats) && typeof loaded.consumptionStats === "object" ? loaded.consumptionStats : {};
+    const sharedPayload = buildSharedDataPayload(settings, playbackSpeed, consumptionStats);
+    this.lastSharedDataJson = loaded && !this.sharedDataRepairPending ? JSON.stringify(sharedPayload) : "";
+    const states = await this.readDeviceStateFiles();
+    const ownState = states.find((state) => state.deviceId === this.deviceId);
+    let performedLegacyMigration = false;
+    if (!ownState) {
+      const legacyQueue = Array.isArray(loaded == null ? void 0 : loaded.queue) ? loaded.queue : [];
+      const legacyDeletedPaths = (loaded == null ? void 0 : loaded.deletedPaths) && typeof loaded.deletedPaths === "object" ? loaded.deletedPaths : {};
+      const legacyDeletedFiles = (loaded == null ? void 0 : loaded.deletedFiles) && typeof loaded.deletedFiles === "object" ? loaded.deletedFiles : {};
+      const legacyQueueUpdatedAt = typeof (loaded == null ? void 0 : loaded.queueUpdatedAt) === "number" ? loaded.queueUpdatedAt : legacyQueue.length > 0 ? Date.now() : 0;
+      states.push({
+        schemaVersion: DEVICE_STATE_SCHEMA_VERSION,
+        deviceId: this.deviceId || "unknown-device",
+        deviceName: this.deviceName,
+        updatedAt: Date.now(),
+        queueUpdatedAt: legacyQueueUpdatedAt,
+        queue: legacyQueue,
+        deletedPaths: { ...legacyDeletedPaths },
+        deletedFiles: { ...legacyDeletedFiles },
+        queueScrollTop: typeof (loaded == null ? void 0 : loaded.queueScrollTop) === "number" ? loaded.queueScrollTop : 0
+      });
+      performedLegacyMigration = true;
+    } else if (Array.isArray(loaded == null ? void 0 : loaded.queue) && loaded.queue.length > 0) {
+      states.push({
+        schemaVersion: DEVICE_STATE_SCHEMA_VERSION,
+        deviceId: "__legacy_data_json__",
+        deviceName: "Legacy data.json",
+        updatedAt: 0,
+        queueUpdatedAt: typeof (loaded == null ? void 0 : loaded.queueUpdatedAt) === "number" ? loaded.queueUpdatedAt : 0,
+        queue: loaded.queue,
+        deletedPaths: {},
+        deletedFiles: (loaded == null ? void 0 : loaded.deletedFiles) && typeof loaded.deletedFiles === "object" ? loaded.deletedFiles : {},
+        queueScrollTop: 0
+      });
     }
+    const merged = mergeDeviceStates(states, {
+      isPathPresent: (path) => !!this.app.vault.getAbstractFileByPath(path),
+      isPathAllowed: (path) => !settings.watchedFolder || this.isPathInsideWatchedFolder(path, settings.watchedFolder),
+      getPathModifiedTime: (path) => {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        return file instanceof import_obsidian.TFile ? file.stat.mtime : null;
+      },
+      isRecreatedPath: (path) => this.isRecentDownloadOutput(path),
+      localDeviceId: this.deviceId,
+      legacyDeletedPaths: loaded == null ? void 0 : loaded.deletedPaths,
+      now: Date.now(),
+      maxTombstoneAgeMs: DELETED_PATH_MAX_AGE_MS,
+      tombstoneGuardMs: DEFAULT_DELETED_FILE_GUARD_MS,
+      recreateToleranceMs: DEFAULT_RECREATED_FILE_TOLERANCE_MS
+    });
+    this.data = {
+      settings,
+      queue: merged.queue,
+      queueUpdatedAt: merged.queueUpdatedAt,
+      deletedPaths: merged.deletedPaths,
+      deletedFiles: merged.deletedFiles,
+      playbackSpeed,
+      queueScrollTop: merged.queueScrollTop,
+      consumptionStats
+    };
     this.pendingPlaybackStateKeys.clear();
     this.pendingQueueChange = false;
     if (settings.watchedFolder) {
       this.setLastGoodWatchedFolder(settings.watchedFolder);
     }
     await this.refreshTrackedDataFileState();
+    if (performedLegacyMigration) {
+      this.lastPersistedDeviceStateComparable = "";
+      try {
+        await this.persistDeviceState();
+      } catch (error) {
+        this.sharedDataRepairPending = false;
+        console.error("[Cross Player] Failed to write initial device state", error);
+      }
+    }
   }
   getTodayStatKey() {
     return new Date().toISOString().slice(0, 10);
@@ -3173,10 +3879,21 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.rememberQueueScrollPosition();
     const runSave = async () => {
       this.saveInProgress++;
+      let usedFallback = false;
       try {
-        await this.mergeFresherPlaybackStateFromDisk();
-        await super.saveData(this.data);
-        await this.refreshTrackedDataFileState();
+        try {
+          await this.persistDeviceState();
+        } catch (error) {
+          console.error("[Cross Player] Failed to write device state; falling back to data.json", error);
+          await super.saveData(this.data);
+          usedFallback = true;
+          this.lastSharedDataJson = JSON.stringify(this.buildSharedPayload());
+        }
+        if (usedFallback) {
+          await this.refreshTrackedDataFileState();
+        } else {
+          await this.persistSharedDataIfChanged();
+        }
         this.pendingPlaybackStateKeys.clear();
         this.pendingQueueChange = false;
       } finally {
@@ -3194,23 +3911,39 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   registerWatchers() {
     this.registerEvent(
       this.app.vault.on("create", (file) => {
+        if (this.isDeviceStatePath(file.path) || file.path === this.getPluginDataPath()) {
+          this.debouncedReload();
+          return;
+        }
         void this.handleFileChange(file);
         this.debouncedUpdateDeviceStatus();
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        if (this.isDeviceStatePath(file.path) || this.isDeviceStatePath(oldPath) || file.path === this.getPluginDataPath() || oldPath === this.getPluginDataPath()) {
+          this.debouncedReload();
+          return;
+        }
         void this.handleRename(file, oldPath);
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
+        if (this.isDeviceStatePath(file.path) || file.path === this.getPluginDataPath()) {
+          this.debouncedReload();
+          return;
+        }
         void this.handleDelete(file);
         this.debouncedUpdateDeviceStatus();
       })
     );
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
+        if (this.isDeviceStatePath(file.path) || file.path === this.getPluginDataPath()) {
+          this.debouncedReload();
+          return;
+        }
         const watchedFolder = this.data.settings.watchedFolder;
         if (watchedFolder && file.path.startsWith(watchedFolder + "/.cross-player-devices/")) {
           void this.calculateDynamicLimit();
@@ -3228,7 +3961,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     this.data.settings.watchedFolder = normalizedPath;
     this.setLastGoodWatchedFolder(normalizedPath);
-    this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, normalizedPath));
+    const removedItems = this.data.queue.filter((item) => !this.isPathInsideWatchedFolder(item.path, normalizedPath));
+    if (removedItems.length > 0) {
+      this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, normalizedPath));
+      for (const item of removedItems) {
+        this.markPathDeleted(item.path);
+      }
+      this.markQueueChanged();
+    }
     if (((_a = this.mainView) == null ? void 0 : _a.currentItem) && !this.isPathInsideWatchedFolder(this.mainView.currentItem.path, normalizedPath)) {
       this.mainView.clearCurrentMedia();
     }
@@ -3388,6 +4128,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const itemsToUpdate = queue.filter((item) => item.path === oldPath || item.path.startsWith(oldPath + "/"));
     if (itemsToUpdate.length > 0) {
       for (const item of itemsToUpdate) {
+        this.markPathDeleted(item.path);
         const newPath = item.path.replace(oldPath, file.path);
         item.path = newPath;
         const watchedFolder2 = this.data.settings.watchedFolder;
@@ -3397,12 +4138,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
       const watchedFolder = this.data.settings.watchedFolder;
       if (watchedFolder) {
-        const initialLength = this.data.queue.length;
         this.data.queue = this.data.queue.filter((item) => this.isPathInsideWatchedFolder(item.path, watchedFolder));
-        if (this.data.queue.length !== initialLength) {
-          this.markQueueChanged();
-        }
       }
+      this.dedupeQueueByPath();
+      this.markQueueChanged();
       await this.saveData();
     }
     void this.handleFileChange(file);
@@ -3447,8 +4186,39 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const ext = file.extension.toLowerCase();
     if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext))
       return false;
-    if (this.isPathTombstoned(file.path)) {
+    let clearedTombstone = false;
+    if (this.getDeletedFiles()[file.path] !== void 0) {
+      const disposition = this.getFileDeletionDisposition(file.path, file.stat.mtime);
+      if (disposition !== "keep") {
+        if (disposition === "delete") {
+          try {
+            await this.permanentlyDeleteVaultFile(file);
+          } catch (error) {
+            console.error("[Cross Player] Failed to delete a resurrected file", file.path, error);
+          }
+        } else {
+          const deletedAt = this.getDeletedFiles()[file.path] || Date.now();
+          this.scheduleTombstoneRecheck(
+            file.path,
+            DEFAULT_DELETED_FILE_GUARD_MS - (Date.now() - deletedAt)
+          );
+        }
+        const before = this.data.queue.length;
+        this.data.queue = this.data.queue.filter((item) => item.path !== file.path);
+        const removedFromQueue = this.data.queue.length !== before;
+        if (removedFromQueue) {
+          this.markQueueChanged();
+        }
+        if (shouldSave && (disposition === "delete" || removedFromQueue)) {
+          await this.saveData(false);
+        }
+        return false;
+      }
       this.clearPathDeleted(file.path);
+      clearedTombstone = true;
+    } else if (this.getDeletedPaths()[file.path] !== void 0) {
+      this.clearPathDeleted(file.path);
+      clearedTombstone = true;
     }
     let existing = this.data.queue.find((item) => item.path === file.path);
     if (!existing) {
@@ -3501,9 +4271,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         existing.size = file.stat.size;
         changed = true;
       }
-      if (changed && shouldSave)
+      if ((changed || clearedTombstone) && shouldSave)
         await this.saveData();
-      return changed;
+      return changed || clearedTombstone;
     }
   }
   async activateListView() {
@@ -3576,13 +4346,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async playNextUnread() {
     this.rememberQueueScrollPosition();
-    let currentIndex = -1;
-    if (this.mainView && this.mainView.currentItem) {
-      currentIndex = this.data.queue.findIndex((i) => {
-        var _a;
-        return i.id === ((_a = this.mainView.currentItem) == null ? void 0 : _a.id);
-      });
-    }
+    let currentIndex = this.getCurrentQueueIndex();
     if (currentIndex === -1) {
       currentIndex = this.data.queue.findIndex((i) => i.status === "playing");
     }
@@ -3596,13 +4360,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async playNextItem() {
     this.rememberQueueScrollPosition();
-    let currentIndex = -1;
-    if (this.mainView && this.mainView.currentItem) {
-      currentIndex = this.data.queue.findIndex((i) => {
-        var _a;
-        return i.id === ((_a = this.mainView.currentItem) == null ? void 0 : _a.id);
-      });
-    }
+    const currentIndex = this.getCurrentQueueIndex();
     const nextIndex = currentIndex + 1;
     if (nextIndex < this.data.queue.length) {
       await this.playMedia(this.data.queue[nextIndex], true);
@@ -3610,13 +4368,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   }
   async playPreviousItem() {
     this.rememberQueueScrollPosition();
-    let currentIndex = -1;
-    if (this.mainView && this.mainView.currentItem) {
-      currentIndex = this.data.queue.findIndex((i) => {
-        var _a;
-        return i.id === ((_a = this.mainView.currentItem) == null ? void 0 : _a.id);
-      });
-    }
+    const currentIndex = this.getCurrentQueueIndex();
     if (currentIndex === -1)
       return;
     const prevIndex = currentIndex - 1;
@@ -3775,8 +4527,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       }
     }
   }
-  async updateStatus(id, status) {
-    const item = this.data.queue.find((i) => i.id === id);
+  async updateStatus(id, status, path) {
+    const item = this.findQueueItem(id, path);
     if (item && item.status !== status) {
       const previousStatus = item.status;
       item.status = status;
@@ -3789,8 +4541,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       await this.saveData();
     }
   }
-  async updatePosition(id, position, force = false) {
-    const item = this.data.queue.find((i) => i.id === id);
+  async updatePosition(id, position, force = false, path) {
+    const item = this.findQueueItem(id, path);
     if (item && (force || Math.abs(item.position - position) > 1)) {
       item.position = position;
       this.markPlaybackStateChanged(item);
@@ -3840,7 +4592,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.saveData();
   }
   async cleanConsumedMedia() {
-    var _a, _b;
+    var _a;
     this.rememberQueueScrollPosition();
     const toRemove = this.data.queue.filter((item) => item.status === "completed");
     if (toRemove.length === 0) {
@@ -3852,7 +4604,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     let failedCount = 0;
     for (const item of toRemove) {
       try {
-        if (((_b = (_a = this.mainView) == null ? void 0 : _a.currentItem) == null ? void 0 : _b.id) === item.id) {
+        if (((_a = this.mainView) == null ? void 0 : _a.currentItem) && (this.mainView.currentItem.id === item.id || this.mainView.currentItem.path === item.path)) {
           this.mainView.clearCurrentMedia();
         }
         const file = this.app.vault.getAbstractFileByPath(item.path);
@@ -3871,7 +4623,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.data.queue = this.data.queue.filter((item) => item.status !== "completed" || !removedIds.has(item.id));
     for (const item of toRemove) {
       if (removedIds.has(item.id)) {
-        this.markPathDeleted(item.path);
+        this.markPathDeleted(item.path, Date.now(), true);
       }
     }
     this.markQueueChanged();
@@ -3883,14 +4635,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     new import_obsidian.Notice(`Permanently deleted ${count} media file(s).`);
   }
   async deleteMediaItem(item) {
-    var _a;
+    var _a, _b;
     this.rememberQueueScrollPosition();
-    const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
+    const isCurrent = !!((_a = this.mainView) == null ? void 0 : _a.currentItem) && (this.mainView.currentItem.id === item.id || this.mainView.currentItem.path === item.path);
     let nextItem;
     if (isCurrent) {
-      const currentIndex = this.data.queue.findIndex((i) => i.id === item.id);
+      const currentIndex = this.data.queue.findIndex((i) => i.id === item.id || i.path === item.path);
       nextItem = this.data.queue.find((i, index2) => index2 > currentIndex && i.status === "pending");
-      (_a = this.mainView) == null ? void 0 : _a.clearCurrentMedia();
+      (_b = this.mainView) == null ? void 0 : _b.clearCurrentMedia();
     }
     let deletedFromDisk = false;
     try {
@@ -3908,8 +4660,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice("Could not permanently delete the file. It was left in the queue.");
       return;
     }
-    this.data.queue = this.data.queue.filter((i) => i.id !== item.id);
-    this.markPathDeleted(item.path);
+    this.data.queue = this.data.queue.filter((i) => i.id !== item.id && i.path !== item.path);
+    this.markPathDeleted(item.path, Date.now(), true);
     this.markQueueChanged();
     await this.saveData();
     new import_obsidian.Notice(`Permanently deleted: ${item.name}`);
@@ -3929,13 +4681,14 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.deleteMediaItem(this.mainView.currentItem);
   }
   async setMediaItemAsUnread(item) {
+    var _a;
     this.rememberQueueScrollPosition();
-    const queueItem = this.data.queue.find((i) => i.id === item.id);
+    const queueItem = this.findQueueItem(item.id, item.path);
     if (!queueItem) {
       new import_obsidian.Notice("Item not found in queue.");
       return;
     }
-    const isCurrent = this.mainView && this.mainView.currentItem && this.mainView.currentItem.id === item.id;
+    const isCurrent = !!((_a = this.mainView) == null ? void 0 : _a.currentItem) && (this.mainView.currentItem.id === item.id || this.mainView.currentItem.path === item.path);
     if (isCurrent && this.mainView) {
       this.mainView.clearCurrentMedia();
       void this.activateListView();
@@ -4023,8 +4776,6 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       "--newline",
       "--restrict-filenames",
       "--no-mtime",
-      "--extractor-args",
-      "youtube:player_client=android_vr",
       "--js-runtimes",
       jsRuntimePath ? `node:${jsRuntimePath}` : "node",
       "--format-sort",
@@ -4069,6 +4820,10 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         const lines = data.toString().split("\n");
         for (const line of lines) {
           const trimmedLine = line.trim();
+          const outputMatch = line.match(/(?:Destination:|Merging formats into)\s+"?([^"]+?)"?\s*$/);
+          if (outputMatch && outputMatch[1]) {
+            this.rememberDownloadOutput(outputMatch[1], cwd);
+          }
           if (trimmedLine && !trimmedLine.startsWith("[") && downloadStatus.name === link) {
             downloadStatus.name = trimmedLine;
             (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
@@ -4576,7 +5331,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
     this.wireUsageSummaryRow(new import_obsidian.Setting(containerEl).setName("Usage Summary").setDesc(`${this.plugin.formatDuration(allTime.seconds)} watched across ${allTime.completedCount} completed item(s).`));
     new import_obsidian.Setting(containerEl).setName("Downloads & Storage").setHeading();
     this.wireYtDlpPathRow(new import_obsidian.Setting(containerEl).setName("yt-dlp Binary Path").setDesc('Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).'));
-    this.wireFfmpegPathRow(new import_obsidian.Setting(containerEl).setName("FFmpeg Binary Path").setDesc("Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed."));
+    this.wireFfmpegPathRow(new import_obsidian.Setting(containerEl).setName("FFmpeg Binary Path").setDesc("Absolute path to ffmpeg executable (required for mp3 conversion and video merging). Leave empty if ffmpeg is on your PATH."));
     this.wireJsRuntimeRow(new import_obsidian.Setting(containerEl).setName("JS Runtime Path").setDesc("Absolute path to node, deno or bun (required for YouTube signature extraction)."));
     this.wireDownloadFolderRow(new import_obsidian.Setting(containerEl).setName("Download Folder").setDesc("Folder to save downloads (relative to vault). Leave empty to use Watched Folder."));
     this.wireStorageLimitRow(new import_obsidian.Setting(containerEl).setName("Storage Limit (GB)").setDesc("Manual storage limit in Gigabytes."));
@@ -4625,7 +5380,7 @@ var CrossPlayerSettingTab = class extends import_obsidian.PluginSettingTab {
         heading: "Downloads & Storage",
         items: [
           { name: "yt-dlp Binary Path", desc: 'Absolute path to yt-dlp executable (or just "yt-dlp" if in PATH).', render: (setting) => this.wireYtDlpPathRow(setting) },
-          { name: "FFmpeg Binary Path", desc: "Absolute path to ffmpeg executable (optional, if not in PATH). Auto-detected if ffmpeg-static is installed.", render: (setting) => this.wireFfmpegPathRow(setting) },
+          { name: "FFmpeg Binary Path", desc: "Absolute path to ffmpeg executable (required for mp3 conversion and video merging). Leave empty if ffmpeg is on your PATH.", render: (setting) => this.wireFfmpegPathRow(setting) },
           { name: "JS Runtime Path", desc: "Absolute path to node, deno or bun (required for YouTube signature extraction).", render: (setting) => this.wireJsRuntimeRow(setting) },
           { name: "Download Folder", desc: "Folder to save downloads (relative to vault). Leave empty to use Watched Folder.", render: (setting) => this.wireDownloadFolderRow(setting) },
           { name: "Storage Limit (GB)", desc: "Manual storage limit in Gigabytes.", render: (setting) => this.wireStorageLimitRow(setting) }
@@ -4893,10 +5648,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       this.plugin.data.queueScrollTop = this.savedScrollTop;
     });
     this.plugin.data.queue.forEach((item) => {
-      var _a2;
+      var _a2, _b2;
       const itemEl = list.createDiv({ cls: "cross-player-item" });
       itemEl.dataset.id = item.id;
-      const isPlaying = item.status === "playing" || this.plugin.mainView && this.plugin.mainView.currentItem && this.plugin.mainView.currentItem.id === item.id;
+      const isPlaying = item.status === "playing" || !!((_a2 = this.plugin.mainView) == null ? void 0 : _a2.currentItem) && (this.plugin.mainView.currentItem.id === item.id || this.plugin.mainView.currentItem.path === item.path);
       if (isPlaying) {
         itemEl.addClass("is-playing");
       }
@@ -4917,7 +5672,7 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
       statusIcon.addClass("cross-player-status-icon-compact");
       if (this.plugin.data.settings.showMediaIndicator) {
         const typeIcon = itemEl.createDiv({ cls: "cross-player-type-icon" });
-        const ext = (_a2 = item.path.split(".").pop()) == null ? void 0 : _a2.toLowerCase();
+        const ext = (_b2 = item.path.split(".").pop()) == null ? void 0 : _b2.toLowerCase();
         const isAudio = AUDIO_EXTENSIONS.includes(ext || "");
         (0, import_obsidian.setIcon)(typeIcon, isAudio ? "headphones" : "film");
         typeIcon.addClass("cross-player-type-icon-muted");
@@ -5219,7 +5974,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || !isFinite(this.videoEl.currentTime)) {
       return false;
     }
-    return this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force);
+    if (this.videoEl.readyState < 1 || this.videoEl.seeking) {
+      return false;
+    }
+    return this.plugin.updatePosition(this.currentItem.id, this.videoEl.currentTime, force, this.currentItem.path);
   }
   async syncCompletionStatusFromPlayback() {
     if (!this.videoEl || !this.currentItem || !this.isCurrentPlaybackSource() || this.currentItem.status === "completed" || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
@@ -5227,7 +5985,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     }
     const progress = this.videoEl.currentTime / this.videoEl.duration;
     if (progress > 0.95) {
-      await this.plugin.updateStatus(this.currentItem.id, "completed");
+      await this.plugin.updateStatus(this.currentItem.id, "completed", this.currentItem.path);
     }
   }
   async persistPlaybackSnapshotOnClose() {
@@ -5242,8 +6000,9 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     });
     if (!queueItem)
       return;
-    const currentTime = this.videoEl && isFinite(this.videoEl.currentTime) ? this.videoEl.currentTime : queueItem.position || 0;
-    const duration = this.videoEl && isFinite(this.videoEl.duration) && this.videoEl.duration > 0 ? this.videoEl.duration : queueItem.duration || 0;
+    const hasLoadedSource = !!this.videoEl && this.videoEl.readyState >= 1 && !this.videoEl.seeking && isFinite(this.videoEl.currentTime);
+    const currentTime = hasLoadedSource && this.videoEl ? this.videoEl.currentTime : queueItem.position || 0;
+    const duration = hasLoadedSource && this.videoEl && isFinite(this.videoEl.duration) && this.videoEl.duration > 0 ? this.videoEl.duration : queueItem.duration || 0;
     queueItem.position = currentTime;
     this.currentItem.position = currentTime;
     this.plugin.markPlaybackStateChanged(queueItem);
@@ -5276,8 +6035,10 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       var _a;
       return item.path === ((_a = this.currentItem) == null ? void 0 : _a.path);
     });
-    if (!syncedItem)
+    if (!syncedItem) {
+      this.clearCurrentMedia();
       return;
+    }
     const isActivelyPlayingLocally = !!this.videoEl && this.isCurrentPlaybackSource() && !this.videoEl.paused && !this.videoEl.ended;
     this.currentItem = syncedItem;
     if (this.videoEl && !isActivelyPlayingLocally && isFinite(this.videoEl.duration) && this.videoEl.duration > 0) {
@@ -5355,7 +6116,7 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
         await this.persistCurrentPlaybackPosition(true);
         await this.syncCompletionStatusFromPlayback();
         if (this.currentItem.status !== "completed") {
-          await this.plugin.updateStatus(this.currentItem.id, "completed");
+          await this.plugin.updateStatus(this.currentItem.id, "completed", this.currentItem.path);
         }
         const stoppedBySleepTimer = this.plugin.handleSleepTimerFileEnded();
         if (!stoppedBySleepTimer && this.plugin.data.settings.autoplayNext) {
@@ -5924,11 +6685,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
     while (this.videoEl.firstChild) {
       this.videoEl.removeChild(this.videoEl.firstChild);
     }
-    const baseName = item.path.substring(0, item.path.lastIndexOf("."));
+    const baseName2 = item.path.substring(0, item.path.lastIndexOf("."));
     const subtitleExtensions = ["vtt", "srt"];
     let sidecarFound = false;
     for (const subExt of subtitleExtensions) {
-      const subPath = `${baseName}.${subExt}`;
+      const subPath = `${baseName2}.${subExt}`;
       const subFile = this.plugin.app.vault.getAbstractFileByPath(subPath);
       if (subFile instanceof import_obsidian.TFile) {
         this.videoEl.createEl("track", {
