@@ -2727,6 +2727,24 @@ export default class CrossPlayerPlugin extends Plugin {
     }
 
     /**
+     * Download rows used to show the absolute path yt-dlp printed, with its
+     * extension stripped. Show the media file name instead, so a user can tell
+     * downloads apart when deciding what to pause, retry or cancel.
+     */
+    private setDownloadNameFromPath(download: ActiveDownload, rawPath: string) {
+        const trimmed = rawPath.trim().replace(/^["']+|["']+$/g, '');
+        if (!trimmed) return;
+
+        const baseName = trimmed.split(/[\\/]/).pop() ?? '';
+        const name = baseName
+            .replace(/\.part$/i, '')
+            .replace(/\.f[0-9a-z-]+(?=\.[a-z0-9]+$)/i, '')
+            .trim();
+
+        if (name) download.name = name;
+    }
+
+    /**
      * yt-dlp writes every stream to a temporary fragment first
      * (`Title.f137.mp4`, `Title.part`, ...). Those are not user media: queuing
      * them produced duplicate entries, notice spam and a queue that kept
@@ -2960,6 +2978,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
                     const outputMatch = line.match(/(?:Destination:|Merging formats into)\s+"?([^"]+?)"?\s*$/);
                     if (outputMatch && outputMatch[1]) {
+                        this.setDownloadNameFromPath(downloadStatus, outputMatch[1]);
                         const outputPath = this.rememberDownloadOutput(outputMatch[1], cwd);
                         const outputName = outputPath?.split('/').pop() ?? '';
                         if (outputPath && !this.isDownloadIntermediaryFile(outputName)) {
@@ -3010,13 +3029,7 @@ export default class CrossPlayerPlugin extends Plugin {
                         }
                     }
                     if (line.includes('[download] Destination:')) {
-                        const name = line.split('Destination:')[1].trim();
-                        // Only update if it's not a generic name
-                        if (name) {
-                            // Remove extension if possible
-                            const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
-                            downloadStatus.name = nameWithoutExt;
-                        }
+                        this.setDownloadNameFromPath(downloadStatus, line.split('Destination:')[1]);
                         this.listView?.updateDownloadProgress();
                     }
                     // Conversion / Post-processing detection
@@ -3026,8 +3039,7 @@ export default class CrossPlayerPlugin extends Plugin {
 
                         const destMatch = line.match(/(?:into|to)\s+"(.*)"/);
                         if (destMatch && destMatch[1]) {
-                            const nameWithoutExt = destMatch[1].replace(/\.[^/.]+$/, "");
-                            downloadStatus.name = nameWithoutExt;
+                            this.setDownloadNameFromPath(downloadStatus, destMatch[1]);
                         }
 
                         this.listView?.updateDownloadProgress();
@@ -5101,14 +5113,20 @@ class CrossPlayerMainView extends ItemView {
         };
 
         const handlePlayerTap = (target: Element | null, event: Event) => {
+            const tapTogglesPlayback = this.plugin.data.settings.pauseOnMobileTap;
+
             if (!isOverlayVisible()) {
                 event.preventDefault();
                 event.stopPropagation();
                 suppressControlTapUntil = Date.now() + 400;
-                if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
-                    this.videoEl.pause();
-                    const playBtn = overlay.querySelector<HTMLElement>('.play-btn');
-                    if (playBtn) setIcon(playBtn, "play");
+                if (tapTogglesPlayback) {
+                    // Tap on the picture toggles playback, exactly like the
+                    // play/pause button: pausing and resuming both work.
+                    if (this.videoEl.paused) {
+                        void this.videoEl.play();
+                    } else {
+                        this.videoEl.pause();
+                    }
                 }
                 showOverlay();
                 return;
@@ -5120,6 +5138,16 @@ class CrossPlayerMainView extends ItemView {
 
             event.preventDefault();
             event.stopPropagation();
+
+            // Controls already showing: a tap on a paused video resumes it
+            // instead of only hiding the controls. Keep them up briefly so the
+            // new play state is visible.
+            if (tapTogglesPlayback && this.videoEl.paused) {
+                void this.videoEl.play();
+                showOverlay();
+                return;
+            }
+
             hideOverlay();
         };
 

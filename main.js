@@ -4730,6 +4730,21 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     await this.setMediaItemAsUnread(this.mainView.currentItem);
   }
   /**
+   * Download rows used to show the absolute path yt-dlp printed, with its
+   * extension stripped. Show the media file name instead, so a user can tell
+   * downloads apart when deciding what to pause, retry or cancel.
+   */
+  setDownloadNameFromPath(download, rawPath) {
+    var _a;
+    const trimmed = rawPath.trim().replace(/^["']+|["']+$/g, "");
+    if (!trimmed)
+      return;
+    const baseName2 = (_a = trimmed.split(/[\\/]/).pop()) != null ? _a : "";
+    const name = baseName2.replace(/\.part$/i, "").replace(/\.f[0-9a-z-]+(?=\.[a-z0-9]+$)/i, "").trim();
+    if (name)
+      download.name = name;
+  }
+  /**
    * yt-dlp writes every stream to a temporary fragment first
    * (`Title.f137.mp4`, `Title.part`, ...). Those are not user media: queuing
    * them produced duplicate entries, notice spam and a queue that kept
@@ -4931,6 +4946,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
           const trimmedLine = line.trim();
           const outputMatch = line.match(/(?:Destination:|Merging formats into)\s+"?([^"]+?)"?\s*$/);
           if (outputMatch && outputMatch[1]) {
+            this.setDownloadNameFromPath(downloadStatus, outputMatch[1]);
             const outputPath = this.rememberDownloadOutput(outputMatch[1], cwd);
             const outputName = (_a2 = outputPath == null ? void 0 : outputPath.split("/").pop()) != null ? _a2 : "";
             if (outputPath && !this.isDownloadIntermediaryFile(outputName)) {
@@ -4973,11 +4989,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             }
           }
           if (line.includes("[download] Destination:")) {
-            const name = line.split("Destination:")[1].trim();
-            if (name) {
-              const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
-              downloadStatus.name = nameWithoutExt;
-            }
+            this.setDownloadNameFromPath(downloadStatus, line.split("Destination:")[1]);
             (_d2 = this.listView) == null ? void 0 : _d2.updateDownloadProgress();
           }
           if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
@@ -4985,8 +4997,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             this.setDownloadProgress(downloadStatus, 95);
             const destMatch = line.match(/(?:into|to)\s+"(.*)"/);
             if (destMatch && destMatch[1]) {
-              const nameWithoutExt = destMatch[1].replace(/\.[^/.]+$/, "");
-              downloadStatus.name = nameWithoutExt;
+              this.setDownloadNameFromPath(downloadStatus, destMatch[1]);
             }
             (_e2 = this.listView) == null ? void 0 : _e2.updateDownloadProgress();
           }
@@ -6495,15 +6506,17 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       );
     };
     const handlePlayerTap = (target, event) => {
+      const tapTogglesPlayback = this.plugin.data.settings.pauseOnMobileTap;
       if (!isOverlayVisible()) {
         event.preventDefault();
         event.stopPropagation();
         suppressControlTapUntil = Date.now() + 400;
-        if (this.plugin.data.settings.pauseOnMobileTap && !this.videoEl.paused) {
-          this.videoEl.pause();
-          const playBtn = overlay.querySelector(".play-btn");
-          if (playBtn)
-            (0, import_obsidian.setIcon)(playBtn, "play");
+        if (tapTogglesPlayback) {
+          if (this.videoEl.paused) {
+            void this.videoEl.play();
+          } else {
+            this.videoEl.pause();
+          }
         }
         showOverlay();
         return;
@@ -6513,6 +6526,11 @@ var CrossPlayerMainView = class extends import_obsidian.ItemView {
       }
       event.preventDefault();
       event.stopPropagation();
+      if (tapTogglesPlayback && this.videoEl.paused) {
+        void this.videoEl.play();
+        showOverlay();
+        return;
+      }
       hideOverlay();
     };
     const onPointerDown = (e) => {
