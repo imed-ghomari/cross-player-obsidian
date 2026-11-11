@@ -6,6 +6,10 @@ import Sortable from 'sortablejs';
 
 interface ActiveDownload extends DownloadStatus {
     childProcess?: SpawnedProcess;
+    /** Numeric, monotonic progress used by the download panel. */
+    progressValue?: number;
+    /** Vault-relative files this download produced (from yt-dlp output). */
+    outputPaths?: string[];
 }
 
 interface DeviceStatus {
@@ -14,6 +18,16 @@ interface DeviceStatus {
     freeSpace: number; // in bytes
     timestamp: number;
 }
+
+type DownloadRowRefs = {
+    root: HTMLElement;
+    nameEl: HTMLElement;
+    percentEl: HTMLElement;
+    fillEl: HTMLElement;
+    metaEl: HTMLElement;
+    actionsEl: HTMLElement;
+    status: string;
+};
 
 interface StoredManifestData {
     id?: string;
@@ -87,6 +101,7 @@ const DEVICE_STATE_DIR = 'state';
 const DEVICE_STATE_SCHEMA_VERSION = 1;
 const DELETED_PATH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const RECENT_DOWNLOAD_OUTPUT_TTL_MS = 15 * 60 * 1000;
+const ADDED_NOTICE_DEDUPE_MS = 60 * 1000;
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'opus', 'm4a', 'm4b', 'weba', 'aac', 'flac', 'aif', 'aiff', 'caf'];
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogv', 'mkv', '3gp'];
 const SUPPORTED_MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS];
@@ -98,6 +113,13 @@ export default class CrossPlayerPlugin extends Plugin {
     listView: CrossPlayerListView | null = null;
     mainView: CrossPlayerMainView | null = null;
     activeDownloads: ActiveDownload[] = [];
+    // Monotonic total progress for the current download batch: adding a new
+    // download or dropping a finished one must never rewind the total bar.
+    private aggregateDownloadProgress: number = 0;
+    // One "added to queue" notice per path, even when several vault events
+    // report the same file while a download or sync settles.
+    private notifiedAdditions: Map<string, number> = new Map();
+    private isBulkScanInProgress: boolean = false;
     debouncedReload: () => void = () => undefined;
 
     deviceId: string = '';
@@ -380,9 +402,9 @@ export default class CrossPlayerPlugin extends Plugin {
         return true;
     }
 
-    private rememberDownloadOutput(rawPath: string, cwd: string) {
+    private rememberDownloadOutput(rawPath: string, cwd: string): string | null {
         let candidate = rawPath.trim().replace(/^["']+|["']+$/g, '');
-        if (!candidate) return;
+        if (!candidate) return null;
 
         const isAbsolute = candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate);
         if (!isAbsolute) {
@@ -390,10 +412,10 @@ export default class CrossPlayerPlugin extends Plugin {
         }
 
         const relative = this.getVaultRelativePath(candidate);
-        if (!relative) return;
+        if (!relative) return null;
 
         const normalized = relative.replace(/\\/g, '/').replace(/^\/+/, '');
-        if (!normalized || normalized.split('/').includes('..')) return;
+        if (!normalized || normalized.split('/').includes('..')) return null;
 
         this.recentDownloadOutputs.set(normalized, Date.now() + RECENT_DOWNLOAD_OUTPUT_TTL_MS);
 
@@ -404,6 +426,8 @@ export default class CrossPlayerPlugin extends Plugin {
             this.clearPathDeleted(normalized);
             void this.saveData(false);
         }
+
+        return normalized;
     }
 
     private getFileDeletionDisposition(path: string, fileModifiedAt: number): FileDeletionDisposition {
@@ -1787,13 +1811,19 @@ export default class CrossPlayerPlugin extends Plugin {
         if (folder instanceof TFolder) {
             const filesInFolder = this.collectMediaFiles(folder);
 
-            // Process all files without saving individually.
-            const promises = filesInFolder.map(file => this.handleFileChange(file, false));
-            const changedItems = await Promise.all(promises);
+            // A scan is bulk work: adding 50 files must not fire 50 notices.
+            this.isBulkScanInProgress = true;
+            try {
+                // Process all files without saving individually.
+                const promises = filesInFolder.map(file => this.handleFileChange(file, false));
+                const changedItems = await Promise.all(promises);
 
-            // Save once at the end, and only when the scan actually changed queue data.
-            if (changedItems.some(Boolean)) {
-                await this.saveData();
+                // Save once at the end, and only when the scan actually changed queue data.
+                if (changedItems.some(Boolean)) {
+                    await this.saveData();
+                }
+            } finally {
+                this.isBulkScanInProgress = false;
             }
         } else {
             console.warn("Watched path is not a folder:", folderPath);
@@ -2062,6 +2092,9 @@ export default class CrossPlayerPlugin extends Plugin {
         const ext = file.extension.toLowerCase();
         if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext)) return false;
 
+        // Skip yt-dlp's per-stream fragments while a download is in flight.
+        if (this.isDownloadIntermediaryFile(file.name)) return false;
+
         // An explicit file deletion wins over a stale copy that a sync tool
         // restored at the same path. Queue-only tombstones (renames, watched
         // folder changes) still let an existing file queue normally.
@@ -2138,7 +2171,9 @@ export default class CrossPlayerPlugin extends Plugin {
             this.markQueueChanged();
             if (shouldSave) {
                 await this.saveData();
-                new Notice(`Added ${file.name} to queue`);
+            }
+            if (!this.isBulkScanInProgress) {
+                this.notifyFileAdded(newItem.path, newItem.name);
             }
             return true;
         } else {
@@ -2691,6 +2726,91 @@ export default class CrossPlayerPlugin extends Plugin {
         await this.setMediaItemAsUnread(this.mainView.currentItem);
     }
 
+    /**
+     * yt-dlp writes every stream to a temporary fragment first
+     * (`Title.f137.mp4`, `Title.part`, ...). Those are not user media: queuing
+     * them produced duplicate entries, notice spam and a queue that kept
+     * re-rendering while a download was still running.
+     */
+    private isDownloadIntermediaryFile(name: string): boolean {
+        const lower = name.toLowerCase();
+        if (lower.endsWith('.part') || lower.endsWith('.ytdl') || lower.endsWith('.temp')) {
+            return true;
+        }
+        return /\.f[0-9a-z-]+\.[a-z0-9]+$/.test(lower);
+    }
+
+    /** One notice per file, and only once the queue actually holds it. */
+    private notifyFileAdded(path: string, name: string) {
+        const now = Date.now();
+        const lastNotified = this.notifiedAdditions.get(path) ?? 0;
+        if (now - lastNotified < ADDED_NOTICE_DEDUPE_MS) return;
+
+        if (this.notifiedAdditions.size > 200) {
+            const cutoff = now - ADDED_NOTICE_DEDUPE_MS;
+            for (const [key, timestamp] of this.notifiedAdditions) {
+                if (timestamp < cutoff) this.notifiedAdditions.delete(key);
+            }
+        }
+
+        this.notifiedAdditions.set(path, now);
+        new Notice(`Added to queue: ${name}`);
+    }
+
+    getDownloadProgressValue(download: ActiveDownload): number {
+        if (download.status === 'completed') return 100;
+        const value = download.progressValue ?? 0;
+        if (!isFinite(value)) return 0;
+        return Math.min(100, Math.max(0, value));
+    }
+
+    private setDownloadProgress(download: ActiveDownload, percent: number) {
+        const clamped = Math.min(100, Math.max(0, isFinite(percent) ? percent : 0));
+        // Progress only ever advances: yt-dlp reports per-stream percentages
+        // and audio is scaled to leave room for conversion, so raw values can
+        // jump backwards between lines.
+        if (clamped <= (download.progressValue ?? 0)) return;
+        download.progressValue = clamped;
+        download.progress = `${clamped.toFixed(1)}%`;
+    }
+
+    getAggregateDownloadProgress(): number {
+        const downloads = this.activeDownloads;
+        if (downloads.length === 0) {
+            this.aggregateDownloadProgress = 0;
+            return 0;
+        }
+
+        let total = 0;
+        for (const download of downloads) {
+            total += this.getDownloadProgressValue(download);
+        }
+        const average = total / downloads.length;
+
+        // Monotonic within a batch: a download joining at 0% or a completed
+        // one leaving the list must not drag the total backwards.
+        if (average > this.aggregateDownloadProgress) {
+            this.aggregateDownloadProgress = average;
+        }
+        return this.aggregateDownloadProgress;
+    }
+
+    private resetAggregateDownloadProgress() {
+        this.aggregateDownloadProgress = 0;
+    }
+
+    private async finalizeCompletedDownload(outputPaths: string[], watchedFolder: string) {
+        if (watchedFolder) {
+            await this.scanFolder(watchedFolder);
+        }
+
+        // The scan is silent by design; announce each finished file once here.
+        for (const path of outputPaths) {
+            const item = this.data.queue.find(queueItem => queueItem.path === path);
+            if (item) this.notifyFileAdded(item.path, item.name);
+        }
+    }
+
     async downloadVideos(links: string[], quality: string, type: 'video' | 'audio') {
         if (!Platform.isDesktop) {
             new Notice("Downloading is only supported on Desktop.");
@@ -2739,6 +2859,12 @@ export default class CrossPlayerPlugin extends Plugin {
             const existing = this.activeDownloads.find(d => d.id === existingId);
             if (existing) {
                 downloadStatus = existing;
+                if (downloadStatus.status === 'error') {
+                    // A retry starts from scratch, so let its bar fill again.
+                    downloadStatus.progressValue = 0;
+                    downloadStatus.progress = '0%';
+                    downloadStatus.outputPaths = [];
+                }
                 downloadStatus.status = 'downloading';
                 downloadStatus.error = undefined;
             } else {
@@ -2750,15 +2876,27 @@ export default class CrossPlayerPlugin extends Plugin {
                 id: downloadId,
                 name: link,
                 progress: '0%',
+                progressValue: 0,
                 speed: '0',
                 eta: '?',
                 status: 'downloading',
-                params: { url: link, quality, type }
+                params: { url: link, quality, type },
+                outputPaths: []
             };
+            if (this.activeDownloads.length === 0) {
+                this.resetAggregateDownloadProgress();
+            }
             this.activeDownloads.push(downloadStatus);
         }
 
         this.listView?.updateDownloadProgress();
+
+        // Keep yt-dlp's fragments and .part files out of the vault: otherwise
+        // every partial stream lands in the watched folder as its own media.
+        const tempBase = this.loadDesktopModule<{ tmpdir(): string }>(['o', 's'])?.tmpdir?.();
+        const downloadTempPath = tempBase
+            ? `temp:${tempBase.replace(/[\\/]+$/, '')}/cross-player-downloads`
+            : null;
 
         const args = [
             link,
@@ -2770,6 +2908,10 @@ export default class CrossPlayerPlugin extends Plugin {
             '--js-runtimes', jsRuntimePath ? `node:${jsRuntimePath}` : 'node',
             '--format-sort', 'ext:mp4:m4a'
         ];
+
+        if (downloadTempPath) {
+            args.push('--paths', downloadTempPath);
+        }
 
         if (ffmpegPath) {
             args.push('--ffmpeg-location', ffmpegPath);
@@ -2818,7 +2960,14 @@ export default class CrossPlayerPlugin extends Plugin {
 
                     const outputMatch = line.match(/(?:Destination:|Merging formats into)\s+"?([^"]+?)"?\s*$/);
                     if (outputMatch && outputMatch[1]) {
-                        this.rememberDownloadOutput(outputMatch[1], cwd);
+                        const outputPath = this.rememberDownloadOutput(outputMatch[1], cwd);
+                        const outputName = outputPath?.split('/').pop() ?? '';
+                        if (outputPath && !this.isDownloadIntermediaryFile(outputName)) {
+                            if (!downloadStatus.outputPaths) downloadStatus.outputPaths = [];
+                            if (!downloadStatus.outputPaths.includes(outputPath)) {
+                                downloadStatus.outputPaths.push(outputPath);
+                            }
+                        }
                     }
 
                     // The first line might be the title due to --get-title
@@ -2838,7 +2987,7 @@ export default class CrossPlayerPlugin extends Plugin {
                             if (type === 'audio') {
                                 percent = percent * 0.9;
                             }
-                            downloadStatus.progress = percent.toFixed(1) + '%';
+                            this.setDownloadProgress(downloadStatus, percent);
                         }
                         if (speedMatch) {
                             downloadStatus.speed = speedMatch[1];
@@ -2873,7 +3022,7 @@ export default class CrossPlayerPlugin extends Plugin {
                     // Conversion / Post-processing detection
                     if (line.includes('[ExtractAudio]') || line.includes('[ffmpeg]') || line.includes('[Merger]')) {
                         downloadStatus.status = 'converting';
-                        downloadStatus.progress = '95%'; // Jump to 95% during conversion
+                        this.setDownloadProgress(downloadStatus, 95); // Hold at 95% while post-processing
 
                         const destMatch = line.match(/(?:into|to)\s+"(.*)"/);
                         if (destMatch && destMatch[1]) {
@@ -2912,15 +3061,15 @@ export default class CrossPlayerPlugin extends Plugin {
                 // If code is null/signal, it might be killed manually
                 if (code === 0) {
                     downloadStatus.status = 'completed';
-                    downloadStatus.progress = '100%';
+                    this.setDownloadProgress(downloadStatus, 100);
 
-                    // Refresh watched folder after a slight delay to let Obsidian see the file
+                    // Only queue the file once it is fully written, then send
+                    // exactly one notice for it.
                     const { watchedFolder } = this.data.settings;
-                    if (watchedFolder) {
-                        window.setTimeout(() => {
-                            void this.scanFolder(watchedFolder);
-                        }, 2000);
-                    }
+                    const outputPaths = [...(downloadStatus.outputPaths ?? [])];
+                    window.setTimeout(() => {
+                        void this.finalizeCompletedDownload(outputPaths, watchedFolder ?? '');
+                    }, 2000);
                 } else if (downloadStatus.status !== 'paused' && code !== null) {
                     // Only mark error if not paused and not manually killed (though killed usually gives null code or signal)
                     // If we killed it for pause, we set status to 'paused' BEFORE calling kill, so we check that.
@@ -2934,6 +3083,9 @@ export default class CrossPlayerPlugin extends Plugin {
                 if (downloadStatus.status === 'completed') {
                     window.setTimeout(() => {
                         this.activeDownloads = this.activeDownloads.filter(d => d.id !== downloadId);
+                        if (this.activeDownloads.length === 0) {
+                            this.resetAggregateDownloadProgress();
+                        }
                         this.listView?.updateDownloadProgress();
                     }, 5000);
                 }
@@ -2955,6 +3107,9 @@ export default class CrossPlayerPlugin extends Plugin {
                 dl.childProcess.kill();
             }
             this.activeDownloads = this.activeDownloads.filter(d => d.id !== id);
+            if (this.activeDownloads.length === 0) {
+                this.resetAggregateDownloadProgress();
+            }
             this.listView?.updateDownloadProgress();
             new Notice("Download cancelled");
         }
@@ -3663,6 +3818,16 @@ class CrossPlayerSettingTab extends PluginSettingTab {
 class CrossPlayerListView extends ItemView {
     plugin: CrossPlayerPlugin;
     private savedScrollTop: number = 0;
+    private downloadSectionEl: HTMLElement | null = null;
+    private downloadContentEl: HTMLElement | null = null;
+    private downloadListEl: HTMLElement | null = null;
+    private downloadTitleEl: HTMLElement | null = null;
+    private downloadSummaryEl: HTMLElement | null = null;
+    private downloadSummaryPercentEl: HTMLElement | null = null;
+    private downloadSummaryFillEl: HTMLElement | null = null;
+    private downloadChevronEl: HTMLElement | null = null;
+    private downloadRows: Map<string, DownloadRowRefs> = new Map();
+    private downloadRenderFrame: number | null = null;
     private sleepTimerButtonEl: HTMLElement | null = null;
     private sleepTimerIconEl: HTMLElement | null = null;
     private sleepTimerLabelEl: HTMLElement | null = null;
@@ -3693,6 +3858,10 @@ class CrossPlayerListView extends ItemView {
     }
 
     async onClose() {
+        if (this.downloadRenderFrame !== null) {
+            window.cancelAnimationFrame(this.downloadRenderFrame);
+            this.downloadRenderFrame = null;
+        }
         if (this.plugin.listView === this) {
             this.plugin.listView = null;
         }
@@ -4195,141 +4364,232 @@ class CrossPlayerListView extends ItemView {
     }
 
     updateDownloadProgress(parentContainer?: HTMLElement) {
-        // If parentContainer is provided, we are in initial render. 
-        // If not, we need to find existing container.
-
-        let container = parentContainer;
-        if (!container) {
-            container = this.contentEl.querySelector<HTMLElement>('.cross-player-download-container') ?? undefined;
-        }
-
-        if (!container) return; // Should exist if view is open
-
-        container.empty();
-
-        const activeDownloads = this.plugin.activeDownloads;
-        if (activeDownloads.length === 0) {
-            // Collapsed or hidden state? 
-            // If empty, maybe just hide content but keep header? 
-            // Or hide completely? User said "collapsible towards the bottom". 
-            // If no downloads, usually hidden.
-            container.addClass('is-hidden');
+        // Called for every yt-dlp output line. Render at most once per frame
+        // and update existing nodes in place: rebuilding the whole panel made
+        // the queue jump and the scrollbar flicker while downloads ran.
+        if (parentContainer) {
+            if (this.downloadRenderFrame !== null) {
+                window.cancelAnimationFrame(this.downloadRenderFrame);
+                this.downloadRenderFrame = null;
+            }
+            this.renderDownloadProgress(parentContainer);
             return;
-        } else {
-            container.removeClass('is-hidden');
         }
 
-        // Header / Toggle
-        const header = container.createDiv({ cls: 'download-header' });
-
-        header.createSpan({ text: `Downloads (${activeDownloads.length})`, attr: { style: "font-weight: bold; font-size: 0.9em;" } });
-        const toggleIcon = header.createDiv();
-        // We can use state to track collapsed. For now, let's default to expanded if active.
-        // Actually user wants it collapsible.
-        // Let's store collapsed state in class property (not persistent).
-        // But refreshing wipes class property if not careful. 
-        // Let's check dataset or assume expanded.
-
-        const isCollapsed = container.dataset.collapsed === 'true';
-        setIcon(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
-
-        const content = container.createDiv({ cls: 'download-content' });
-        content.toggleClass('is-collapsed', isCollapsed);
-
-        header.onclick = () => {
-            const collapsed = container.dataset.collapsed === 'true';
-            container.dataset.collapsed = String(!collapsed);
-            content.toggleClass('is-collapsed', !collapsed);
-            setIcon(toggleIcon, collapsed ? "chevron-down" : "chevron-up");
-        };
-
-        // Global Progress Bar
-        if (activeDownloads.length > 0) {
-            let totalProgress = 0;
-            let count = 0;
-            activeDownloads.forEach(d => {
-                if (d.status === 'completed') {
-                    totalProgress += 100;
-                    count++;
-                } else if (d.progress.includes('%')) {
-                    totalProgress += parseFloat(d.progress) || 0;
-                    count++;
-                } else if (d.status === 'downloading' || d.status === 'paused') {
-                    // if progress not yet parsed, assume 0
-                    count++;
-                }
-            });
-            const avgProgress = count > 0 ? totalProgress / count : 0;
-
-            const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
-            globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
-            const globalBar = globalProgressContainer.createEl("progress");
-            globalBar.addClass('cross-player-global-progress');
-            globalBar.value = avgProgress;
-            globalBar.max = 100;
-        }
-
-        activeDownloads.forEach(dl => {
-            const dlItem = content.createDiv({ cls: 'download-item' });
-
-            // 1. Name
-            const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
-            nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
-
-            let statusText = dl.progress;
-            if (dl.status === 'error') statusText = 'Error';
-            else if (dl.status === 'paused') statusText = 'Paused';
-            else if (dl.status === 'converting') statusText = 'Converting...';
-
-            nameRow.createSpan({ text: statusText });
-
-            // 2. Progress Bar
-            const progressBar = dlItem.createEl("progress");
-            progressBar.addClass('cross-player-download-progress');
-            if (dl.progress.includes('%')) {
-                progressBar.value = parseFloat(dl.progress) || 0;
-            } else {
-                progressBar.value = 0;
-            }
-            progressBar.max = 100;
-
-            // 3. Info & Controls
-            const controlsRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; align-items: center; margin-top: 2px;" } });
-
-            const info = controlsRow.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
-            if (dl.status === 'downloading') {
-                info.setText(`${dl.speed} - ETA: ${dl.eta}`);
-            } else if (dl.status === 'converting') {
-                info.setText('Processing media...');
-            } else if (dl.status === 'error') {
-                info.setText(dl.error || "Unknown Error");
-                info.addClass('cross-player-download-error');
-            }
-
-            const btnGroup = controlsRow.createDiv({ attr: { style: "display: flex; gap: 5px;" } });
-
-            // Pause/Resume Button
-            if (dl.status === 'downloading') {
-                const pauseBtn = btnGroup.createEl("button", { text: "Pause" });
-                pauseBtn.addClass('cross-player-download-button');
-                pauseBtn.onclick = () => this.plugin.pauseDownload(dl.id);
-            } else if (dl.status === 'paused') {
-                const resumeBtn = btnGroup.createEl("button", { text: "Resume" });
-                resumeBtn.addClass('cross-player-download-button');
-                resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
-            } else if (dl.status === 'error') {
-                const retryBtn = btnGroup.createEl("button", { text: "Retry" });
-                retryBtn.addClass('cross-player-download-button');
-                retryBtn.onclick = () => this.plugin.retryDownload(dl.id);
-            }
-
-            // Cancel Button
-            const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
-            cancelBtn.addClass('cross-player-download-button');
-            cancelBtn.onclick = () => this.plugin.cancelDownload(dl.id);
+        if (this.downloadRenderFrame !== null) return;
+        this.downloadRenderFrame = window.requestAnimationFrame(() => {
+            this.downloadRenderFrame = null;
+            const container = this.contentEl.querySelector<HTMLElement>('.cross-player-download-container');
+            if (!container) return;
+            this.renderDownloadProgress(container);
         });
     }
 
+    private ensureDownloadSection(container: HTMLElement) {
+        if (this.downloadSectionEl && this.downloadSectionEl.parentElement === container) {
+            return;
+        }
+
+        container.empty();
+        this.downloadRows.clear();
+
+        const section = container.createDiv({ cls: 'cross-player-download-section' });
+
+        const header = section.createDiv({ cls: 'cross-player-download-header' });
+        header.ariaLabel = 'Toggle downloads';
+        const label = header.createDiv({ cls: 'cross-player-download-header-label' });
+        const headerIcon = label.createSpan({ cls: 'cross-player-download-header-icon' });
+        setIcon(headerIcon, 'download');
+        this.downloadTitleEl = label.createSpan({ cls: 'cross-player-download-header-text' });
+        this.downloadChevronEl = header.createDiv({ cls: 'clickable-icon cross-player-download-chevron' });
+        setIcon(this.downloadChevronEl, 'chevron-down');
+
+        const content = section.createDiv({ cls: 'cross-player-download-content' });
+        const summary = content.createDiv({ cls: 'cross-player-download-summary' });
+        const summaryRow = summary.createDiv({ cls: 'cross-player-download-summary-row' });
+        this.downloadSummaryEl = summaryRow.createSpan({ cls: 'cross-player-download-summary-text' });
+        this.downloadSummaryPercentEl = summaryRow.createSpan({ cls: 'cross-player-download-summary-percent' });
+        const summaryTrack = summary.createDiv({ cls: 'cross-player-download-bar' });
+        this.downloadSummaryFillEl = summaryTrack.createDiv({ cls: 'cross-player-download-bar-fill' });
+
+        this.downloadListEl = content.createDiv({ cls: 'cross-player-download-list' });
+
+        header.onclick = () => {
+            container.dataset.collapsed = container.dataset.collapsed === 'true' ? 'false' : 'true';
+            this.applyDownloadCollapsedState(container);
+        };
+
+        this.downloadSectionEl = section;
+        this.downloadContentEl = content;
+        if (container.dataset.collapsed === undefined) {
+            container.dataset.collapsed = 'false';
+        }
+        this.applyDownloadCollapsedState(container);
+    }
+
+    private applyDownloadCollapsedState(container: HTMLElement) {
+        const collapsed = container.dataset.collapsed === 'true';
+        this.downloadContentEl?.toggleClass('is-collapsed', collapsed);
+        if (this.downloadChevronEl) {
+            setIcon(this.downloadChevronEl, collapsed ? 'chevron-up' : 'chevron-down');
+        }
+    }
+
+    private clearDownloadSection(container: HTMLElement) {
+        this.downloadSectionEl?.remove();
+        this.downloadSectionEl = null;
+        this.downloadContentEl = null;
+        this.downloadListEl = null;
+        this.downloadTitleEl = null;
+        this.downloadSummaryEl = null;
+        this.downloadSummaryPercentEl = null;
+        this.downloadSummaryFillEl = null;
+        this.downloadChevronEl = null;
+        this.downloadRows.clear();
+        container.addClass('is-hidden');
+    }
+
+    private renderDownloadProgress(container: HTMLElement) {
+        const downloads = this.plugin.activeDownloads;
+        if (downloads.length === 0) {
+            this.clearDownloadSection(container);
+            return;
+        }
+
+        container.removeClass('is-hidden');
+        this.ensureDownloadSection(container);
+        if (!this.downloadListEl) return;
+
+        const total = downloads.length;
+        const completed = downloads.filter(download => download.status === 'completed').length;
+        const running = downloads.filter(download =>
+            download.status === 'downloading' || download.status === 'converting'
+        ).length;
+        const aggregate = this.plugin.getAggregateDownloadProgress();
+
+        if (this.downloadTitleEl) {
+            this.downloadTitleEl.setText(`Downloads · ${total}`);
+        }
+        if (this.downloadSummaryEl) {
+            this.downloadSummaryEl.setText(
+                completed === total
+                    ? 'Finishing up…'
+                    : running > 0
+                        ? `Downloading ${running} of ${total}`
+                        : `${completed} of ${total} complete`
+            );
+        }
+        if (this.downloadSummaryPercentEl) {
+            this.downloadSummaryPercentEl.setText(`${Math.round(aggregate)}%`);
+        }
+        this.downloadSummaryFillEl?.setCssProps({ width: `${aggregate}%` });
+
+        const seen = new Set<string>();
+        for (const download of downloads) {
+            seen.add(download.id);
+            let row: DownloadRowRefs | null | undefined = this.downloadRows.get(download.id);
+            if (!row) {
+                row = this.createDownloadRow();
+                if (!row) return;
+                this.downloadRows.set(download.id, row);
+            }
+            this.updateDownloadRow(row, download);
+        }
+
+        for (const [id, row] of this.downloadRows) {
+            if (!seen.has(id)) {
+                row.root.remove();
+                this.downloadRows.delete(id);
+            }
+        }
+    }
+
+    private createDownloadRow(): DownloadRowRefs | null {
+        const list = this.downloadListEl;
+        if (!list) return null;
+
+        const root = list.createDiv({ cls: 'cross-player-download-item' });
+        const top = root.createDiv({ cls: 'cross-player-download-item-top' });
+        const nameEl = top.createSpan({ cls: 'cross-player-download-item-name' });
+        const percentEl = top.createSpan({ cls: 'cross-player-download-item-percent' });
+        const track = root.createDiv({ cls: 'cross-player-download-bar cross-player-download-item-bar' });
+        const fillEl = track.createDiv({ cls: 'cross-player-download-bar-fill' });
+        const bottom = root.createDiv({ cls: 'cross-player-download-item-bottom' });
+        const metaEl = bottom.createSpan({ cls: 'cross-player-download-item-meta' });
+        const actionsEl = bottom.createDiv({ cls: 'cross-player-download-item-actions' });
+
+        return { root, nameEl, percentEl, fillEl, metaEl, actionsEl, status: '' };
+    }
+
+    private updateDownloadRow(row: DownloadRowRefs, download: ActiveDownload) {
+        if (row.nameEl.textContent !== download.name) {
+            row.nameEl.setText(download.name);
+            row.nameEl.title = download.name;
+        }
+
+        const value = this.plugin.getDownloadProgressValue(download);
+        row.fillEl.setCssProps({ width: `${value}%` });
+
+        const percentText = `${Math.round(value)}%`;
+        let metaText = '';
+        if (download.status === 'downloading') {
+            const speed = download.speed && download.speed !== '0' && download.speed !== '?' ? download.speed : '';
+            const eta = download.eta && download.eta !== '?' ? download.eta : '';
+            metaText = speed || eta
+                ? [speed, eta ? `ETA ${eta}` : ''].filter(Boolean).join(' · ')
+                : 'Starting…';
+        } else if (download.status === 'converting') {
+            metaText = 'Processing media…';
+        } else if (download.status === 'paused') {
+            metaText = 'Paused';
+        } else if (download.status === 'completed') {
+            metaText = 'Completed';
+        } else {
+            metaText = download.error || 'Download failed';
+        }
+
+        if (row.percentEl.textContent !== percentText) {
+            row.percentEl.setText(percentText);
+        }
+        if (row.metaEl.textContent !== metaText) {
+            row.metaEl.setText(metaText);
+        }
+
+        row.root.toggleClass('is-error', download.status === 'error');
+        row.root.toggleClass('is-paused', download.status === 'paused');
+        row.root.toggleClass('is-completed', download.status === 'completed');
+
+        if (row.status !== download.status) {
+            row.status = download.status;
+            this.buildDownloadActions(row, download);
+        }
+    }
+
+    private buildDownloadActions(row: DownloadRowRefs, download: ActiveDownload) {
+        row.actionsEl.empty();
+
+        const addAction = (icon: string, label: string, onClick: () => void) => {
+            const button = row.actionsEl.createDiv({ cls: 'clickable-icon cross-player-download-action' });
+            setIcon(button, icon);
+            button.ariaLabel = label;
+            button.onclick = (event) => {
+                event.stopPropagation();
+                onClick();
+            };
+        };
+
+        if (download.status === 'downloading') {
+            addAction('pause', 'Pause download', () => this.plugin.pauseDownload(download.id));
+        } else if (download.status === 'paused') {
+            addAction('play', 'Resume download', () => this.plugin.resumeDownload(download.id));
+        } else if (download.status === 'error') {
+            addAction('rotate-ccw', 'Retry download', () => this.plugin.retryDownload(download.id));
+        }
+
+        if (download.status !== 'completed') {
+            addAction('x', 'Cancel download', () => this.plugin.cancelDownload(download.id));
+        }
+    }
     updateSpeedDisplay() {
         const speedEl = this.contentEl.querySelector<HTMLElement>(".cross-player-speed-display");
         if (speedEl) {

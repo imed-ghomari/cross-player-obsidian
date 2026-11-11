@@ -2618,6 +2618,7 @@ var DEVICE_STATE_DIR = "state";
 var DEVICE_STATE_SCHEMA_VERSION = 1;
 var DELETED_PATH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
 var RECENT_DOWNLOAD_OUTPUT_TTL_MS = 15 * 60 * 1e3;
+var ADDED_NOTICE_DEDUPE_MS = 60 * 1e3;
 var AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "opus", "m4a", "m4b", "weba", "aac", "flac", "aif", "aiff", "caf"];
 var VIDEO_EXTENSIONS = ["mp4", "webm", "ogv", "mkv", "3gp"];
 var SUPPORTED_MEDIA_EXTENSIONS = [...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS];
@@ -2627,6 +2628,13 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     this.listView = null;
     this.mainView = null;
     this.activeDownloads = [];
+    // Monotonic total progress for the current download batch: adding a new
+    // download or dropping a finished one must never rewind the total bar.
+    this.aggregateDownloadProgress = 0;
+    // One "added to queue" notice per path, even when several vault events
+    // report the same file while a download or sync settles.
+    this.notifiedAdditions = /* @__PURE__ */ new Map();
+    this.isBulkScanInProgress = false;
     this.debouncedReload = () => void 0;
     this.deviceId = "";
     this.deviceName = "";
@@ -2865,22 +2873,23 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
   rememberDownloadOutput(rawPath, cwd) {
     let candidate = rawPath.trim().replace(/^["']+|["']+$/g, "");
     if (!candidate)
-      return;
+      return null;
     const isAbsolute = candidate.startsWith("/") || /^[A-Za-z]:[\\/]/.test(candidate);
     if (!isAbsolute) {
       candidate = `${cwd.replace(/[\\/]+$/, "")}/${candidate}`;
     }
     const relative = this.getVaultRelativePath(candidate);
     if (!relative)
-      return;
+      return null;
     const normalized = relative.replace(/\\/g, "/").replace(/^\/+/, "");
     if (!normalized || normalized.split("/").includes(".."))
-      return;
+      return null;
     this.recentDownloadOutputs.set(normalized, Date.now() + RECENT_DOWNLOAD_OUTPUT_TTL_MS);
     if (this.isPathTombstoned(normalized)) {
       this.clearPathDeleted(normalized);
       void this.saveData(false);
     }
+    return normalized;
   }
   getFileDeletionDisposition(path, fileModifiedAt) {
     const deletedAt = this.getDeletedFiles()[path];
@@ -3990,10 +3999,15 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const folder = this.app.vault.getAbstractFileByPath(folderPath === "" ? "/" : folderPath);
     if (folder instanceof import_obsidian.TFolder) {
       const filesInFolder = this.collectMediaFiles(folder);
-      const promises = filesInFolder.map((file) => this.handleFileChange(file, false));
-      const changedItems = await Promise.all(promises);
-      if (changedItems.some(Boolean)) {
-        await this.saveData();
+      this.isBulkScanInProgress = true;
+      try {
+        const promises = filesInFolder.map((file) => this.handleFileChange(file, false));
+        const changedItems = await Promise.all(promises);
+        if (changedItems.some(Boolean)) {
+          await this.saveData();
+        }
+      } finally {
+        this.isBulkScanInProgress = false;
       }
     } else {
       console.warn("Watched path is not a folder:", folderPath);
@@ -4186,6 +4200,8 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     const ext = file.extension.toLowerCase();
     if (!SUPPORTED_MEDIA_EXTENSIONS.includes(ext))
       return false;
+    if (this.isDownloadIntermediaryFile(file.name))
+      return false;
     let clearedTombstone = false;
     if (this.getDeletedFiles()[file.path] !== void 0) {
       const disposition = this.getFileDeletionDisposition(file.path, file.stat.mtime);
@@ -4251,7 +4267,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       this.markQueueChanged();
       if (shouldSave) {
         await this.saveData();
-        new import_obsidian.Notice(`Added ${file.name} to queue`);
+      }
+      if (!this.isBulkScanInProgress) {
+        this.notifyFileAdded(newItem.path, newItem.name);
       }
       return true;
     } else {
@@ -4711,6 +4729,82 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
     await this.setMediaItemAsUnread(this.mainView.currentItem);
   }
+  /**
+   * yt-dlp writes every stream to a temporary fragment first
+   * (`Title.f137.mp4`, `Title.part`, ...). Those are not user media: queuing
+   * them produced duplicate entries, notice spam and a queue that kept
+   * re-rendering while a download was still running.
+   */
+  isDownloadIntermediaryFile(name) {
+    const lower = name.toLowerCase();
+    if (lower.endsWith(".part") || lower.endsWith(".ytdl") || lower.endsWith(".temp")) {
+      return true;
+    }
+    return /\.f[0-9a-z-]+\.[a-z0-9]+$/.test(lower);
+  }
+  /** One notice per file, and only once the queue actually holds it. */
+  notifyFileAdded(path, name) {
+    var _a;
+    const now = Date.now();
+    const lastNotified = (_a = this.notifiedAdditions.get(path)) != null ? _a : 0;
+    if (now - lastNotified < ADDED_NOTICE_DEDUPE_MS)
+      return;
+    if (this.notifiedAdditions.size > 200) {
+      const cutoff = now - ADDED_NOTICE_DEDUPE_MS;
+      for (const [key, timestamp] of this.notifiedAdditions) {
+        if (timestamp < cutoff)
+          this.notifiedAdditions.delete(key);
+      }
+    }
+    this.notifiedAdditions.set(path, now);
+    new import_obsidian.Notice(`Added to queue: ${name}`);
+  }
+  getDownloadProgressValue(download) {
+    var _a;
+    if (download.status === "completed")
+      return 100;
+    const value = (_a = download.progressValue) != null ? _a : 0;
+    if (!isFinite(value))
+      return 0;
+    return Math.min(100, Math.max(0, value));
+  }
+  setDownloadProgress(download, percent) {
+    var _a;
+    const clamped = Math.min(100, Math.max(0, isFinite(percent) ? percent : 0));
+    if (clamped <= ((_a = download.progressValue) != null ? _a : 0))
+      return;
+    download.progressValue = clamped;
+    download.progress = `${clamped.toFixed(1)}%`;
+  }
+  getAggregateDownloadProgress() {
+    const downloads = this.activeDownloads;
+    if (downloads.length === 0) {
+      this.aggregateDownloadProgress = 0;
+      return 0;
+    }
+    let total = 0;
+    for (const download of downloads) {
+      total += this.getDownloadProgressValue(download);
+    }
+    const average = total / downloads.length;
+    if (average > this.aggregateDownloadProgress) {
+      this.aggregateDownloadProgress = average;
+    }
+    return this.aggregateDownloadProgress;
+  }
+  resetAggregateDownloadProgress() {
+    this.aggregateDownloadProgress = 0;
+  }
+  async finalizeCompletedDownload(outputPaths, watchedFolder) {
+    if (watchedFolder) {
+      await this.scanFolder(watchedFolder);
+    }
+    for (const path of outputPaths) {
+      const item = this.data.queue.find((queueItem) => queueItem.path === path);
+      if (item)
+        this.notifyFileAdded(item.path, item.name);
+    }
+  }
   async downloadVideos(links, quality, type) {
     if (!import_obsidian.Platform.isDesktop) {
       new import_obsidian.Notice("Downloading is only supported on Desktop.");
@@ -4739,7 +4833,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
     }
   }
   async startDownload(link, quality, type, cwd, existingId) {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     if (!import_obsidian.Platform.isDesktop)
       return;
     const { youtubeDlpPath, ffmpegPath, jsRuntimePath } = this.data.settings;
@@ -4750,6 +4844,11 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       const existing = this.activeDownloads.find((d) => d.id === existingId);
       if (existing) {
         downloadStatus = existing;
+        if (downloadStatus.status === "error") {
+          downloadStatus.progressValue = 0;
+          downloadStatus.progress = "0%";
+          downloadStatus.outputPaths = [];
+        }
         downloadStatus.status = "downloading";
         downloadStatus.error = void 0;
       } else {
@@ -4760,14 +4859,21 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         id: downloadId,
         name: link,
         progress: "0%",
+        progressValue: 0,
         speed: "0",
         eta: "?",
         status: "downloading",
-        params: { url: link, quality, type }
+        params: { url: link, quality, type },
+        outputPaths: []
       };
+      if (this.activeDownloads.length === 0) {
+        this.resetAggregateDownloadProgress();
+      }
       this.activeDownloads.push(downloadStatus);
     }
     (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
+    const tempBase = (_c = (_b = this.loadDesktopModule(["o", "s"])) == null ? void 0 : _b.tmpdir) == null ? void 0 : _c.call(_b);
+    const downloadTempPath = tempBase ? `temp:${tempBase.replace(/[\\/]+$/, "")}/cross-player-downloads` : null;
     const args = [
       link,
       "-o",
@@ -4781,6 +4887,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       "--format-sort",
       "ext:mp4:m4a"
     ];
+    if (downloadTempPath) {
+      args.push("--paths", downloadTempPath);
+    }
     if (ffmpegPath) {
       args.push("--ffmpeg-location", ffmpegPath);
     }
@@ -4804,29 +4913,37 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         new import_obsidian.Notice("Desktop process access is unavailable in this build.");
         downloadStatus.status = "error";
         downloadStatus.error = "Desktop process access unavailable";
-        (_b = this.listView) == null ? void 0 : _b.updateDownloadProgress();
+        (_d = this.listView) == null ? void 0 : _d.updateDownloadProgress();
         return;
       }
       const nodeProcess = this.getNodeProcess();
-      const env = { ...(_c = nodeProcess == null ? void 0 : nodeProcess.env) != null ? _c : {} };
+      const env = { ...(_e = nodeProcess == null ? void 0 : nodeProcess.env) != null ? _e : {} };
       if (import_obsidian.Platform.isDesktop && (nodeProcess == null ? void 0 : nodeProcess.platform) === "darwin") {
         const extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
         env["PATH"] = extraPaths.join(":") + (env["PATH"] ? ":" + env["PATH"] : "");
       }
       const child = spawn(ytPath, args, { cwd, env });
       downloadStatus.childProcess = child;
-      (_d = child.stdout) == null ? void 0 : _d.on("data", (data) => {
-        var _a2, _b2, _c2, _d2;
+      (_f = child.stdout) == null ? void 0 : _f.on("data", (data) => {
+        var _a2, _b2, _c2, _d2, _e2;
         const lines = data.toString().split("\n");
         for (const line of lines) {
           const trimmedLine = line.trim();
           const outputMatch = line.match(/(?:Destination:|Merging formats into)\s+"?([^"]+?)"?\s*$/);
           if (outputMatch && outputMatch[1]) {
-            this.rememberDownloadOutput(outputMatch[1], cwd);
+            const outputPath = this.rememberDownloadOutput(outputMatch[1], cwd);
+            const outputName = (_a2 = outputPath == null ? void 0 : outputPath.split("/").pop()) != null ? _a2 : "";
+            if (outputPath && !this.isDownloadIntermediaryFile(outputName)) {
+              if (!downloadStatus.outputPaths)
+                downloadStatus.outputPaths = [];
+              if (!downloadStatus.outputPaths.includes(outputPath)) {
+                downloadStatus.outputPaths.push(outputPath);
+              }
+            }
           }
           if (trimmedLine && !trimmedLine.startsWith("[") && downloadStatus.name === link) {
             downloadStatus.name = trimmedLine;
-            (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
+            (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
           }
           if (line.includes("[download]")) {
             const percentMatch = line.match(/(\d+\.\d+)%/);
@@ -4837,7 +4954,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
               if (type === "audio") {
                 percent = percent * 0.9;
               }
-              downloadStatus.progress = percent.toFixed(1) + "%";
+              this.setDownloadProgress(downloadStatus, percent);
             }
             if (speedMatch) {
               downloadStatus.speed = speedMatch[1];
@@ -4845,7 +4962,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
             if (etaMatch) {
               downloadStatus.eta = etaMatch[1];
             }
-            (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
+            (_c2 = this.listView) == null ? void 0 : _c2.updateDownloadProgress();
           }
           if (line.includes("[youtube]")) {
           }
@@ -4861,21 +4978,21 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
               const nameWithoutExt = name.replace(/\.[^/.]+$/, "");
               downloadStatus.name = nameWithoutExt;
             }
-            (_c2 = this.listView) == null ? void 0 : _c2.updateDownloadProgress();
+            (_d2 = this.listView) == null ? void 0 : _d2.updateDownloadProgress();
           }
           if (line.includes("[ExtractAudio]") || line.includes("[ffmpeg]") || line.includes("[Merger]")) {
             downloadStatus.status = "converting";
-            downloadStatus.progress = "95%";
+            this.setDownloadProgress(downloadStatus, 95);
             const destMatch = line.match(/(?:into|to)\s+"(.*)"/);
             if (destMatch && destMatch[1]) {
               const nameWithoutExt = destMatch[1].replace(/\.[^/.]+$/, "");
               downloadStatus.name = nameWithoutExt;
             }
-            (_d2 = this.listView) == null ? void 0 : _d2.updateDownloadProgress();
+            (_e2 = this.listView) == null ? void 0 : _e2.updateDownloadProgress();
           }
         }
       });
-      (_e = child.stderr) == null ? void 0 : _e.on("data", (data) => {
+      (_g = child.stderr) == null ? void 0 : _g.on("data", (data) => {
         var _a2;
         const errorMsg = data.toString();
         console.error(`yt-dlp stderr: ${errorMsg}`);
@@ -4895,26 +5012,28 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
       });
       child.on("close", (code) => {
-        var _a2;
+        var _a2, _b2;
         if (code === 0) {
           downloadStatus.status = "completed";
-          downloadStatus.progress = "100%";
+          this.setDownloadProgress(downloadStatus, 100);
           const { watchedFolder } = this.data.settings;
-          if (watchedFolder) {
-            window.setTimeout(() => {
-              void this.scanFolder(watchedFolder);
-            }, 2e3);
-          }
+          const outputPaths = [...(_a2 = downloadStatus.outputPaths) != null ? _a2 : []];
+          window.setTimeout(() => {
+            void this.finalizeCompletedDownload(outputPaths, watchedFolder != null ? watchedFolder : "");
+          }, 2e3);
         } else if (downloadStatus.status !== "paused" && code !== null) {
           downloadStatus.status = "error";
           downloadStatus.error = `Exit code ${code}`;
         }
         downloadStatus.childProcess = void 0;
-        (_a2 = this.listView) == null ? void 0 : _a2.updateDownloadProgress();
+        (_b2 = this.listView) == null ? void 0 : _b2.updateDownloadProgress();
         if (downloadStatus.status === "completed") {
           window.setTimeout(() => {
             var _a3;
             this.activeDownloads = this.activeDownloads.filter((d) => d.id !== downloadId);
+            if (this.activeDownloads.length === 0) {
+              this.resetAggregateDownloadProgress();
+            }
             (_a3 = this.listView) == null ? void 0 : _a3.updateDownloadProgress();
           }, 5e3);
         }
@@ -4924,7 +5043,7 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(`Failed to download: ${link}`);
       downloadStatus.status = "error";
       downloadStatus.error = "Failed to start";
-      (_f = this.listView) == null ? void 0 : _f.updateDownloadProgress();
+      (_h = this.listView) == null ? void 0 : _h.updateDownloadProgress();
     }
   }
   cancelDownload(id) {
@@ -4935,6 +5054,9 @@ var CrossPlayerPlugin = class extends import_obsidian.Plugin {
         dl.childProcess.kill();
       }
       this.activeDownloads = this.activeDownloads.filter((d) => d.id !== id);
+      if (this.activeDownloads.length === 0) {
+        this.resetAggregateDownloadProgress();
+      }
       (_a = this.listView) == null ? void 0 : _a.updateDownloadProgress();
       new import_obsidian.Notice("Download cancelled");
     }
@@ -5393,6 +5515,16 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.savedScrollTop = 0;
+    this.downloadSectionEl = null;
+    this.downloadContentEl = null;
+    this.downloadListEl = null;
+    this.downloadTitleEl = null;
+    this.downloadSummaryEl = null;
+    this.downloadSummaryPercentEl = null;
+    this.downloadSummaryFillEl = null;
+    this.downloadChevronEl = null;
+    this.downloadRows = /* @__PURE__ */ new Map();
+    this.downloadRenderFrame = null;
     this.sleepTimerButtonEl = null;
     this.sleepTimerIconEl = null;
     this.sleepTimerLabelEl = null;
@@ -5415,6 +5547,10 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     this.refresh();
   }
   async onClose() {
+    if (this.downloadRenderFrame !== null) {
+      window.cancelAnimationFrame(this.downloadRenderFrame);
+      this.downloadRenderFrame = null;
+    }
     if (this.plugin.listView === this) {
       this.plugin.listView = null;
     }
@@ -5771,104 +5907,200 @@ var CrossPlayerListView = class extends import_obsidian.ItemView {
     }
   }
   updateDownloadProgress(parentContainer) {
-    var _a;
-    let container = parentContainer;
-    if (!container) {
-      container = (_a = this.contentEl.querySelector(".cross-player-download-container")) != null ? _a : void 0;
-    }
-    if (!container)
+    if (parentContainer) {
+      if (this.downloadRenderFrame !== null) {
+        window.cancelAnimationFrame(this.downloadRenderFrame);
+        this.downloadRenderFrame = null;
+      }
+      this.renderDownloadProgress(parentContainer);
       return;
-    container.empty();
-    const activeDownloads = this.plugin.activeDownloads;
-    if (activeDownloads.length === 0) {
-      container.addClass("is-hidden");
+    }
+    if (this.downloadRenderFrame !== null)
       return;
-    } else {
-      container.removeClass("is-hidden");
-    }
-    const header = container.createDiv({ cls: "download-header" });
-    header.createSpan({ text: `Downloads (${activeDownloads.length})`, attr: { style: "font-weight: bold; font-size: 0.9em;" } });
-    const toggleIcon = header.createDiv();
-    const isCollapsed = container.dataset.collapsed === "true";
-    (0, import_obsidian.setIcon)(toggleIcon, isCollapsed ? "chevron-up" : "chevron-down");
-    const content = container.createDiv({ cls: "download-content" });
-    content.toggleClass("is-collapsed", isCollapsed);
-    header.onclick = () => {
-      const collapsed = container.dataset.collapsed === "true";
-      container.dataset.collapsed = String(!collapsed);
-      content.toggleClass("is-collapsed", !collapsed);
-      (0, import_obsidian.setIcon)(toggleIcon, collapsed ? "chevron-down" : "chevron-up");
-    };
-    if (activeDownloads.length > 0) {
-      let totalProgress = 0;
-      let count = 0;
-      activeDownloads.forEach((d) => {
-        if (d.status === "completed") {
-          totalProgress += 100;
-          count++;
-        } else if (d.progress.includes("%")) {
-          totalProgress += parseFloat(d.progress) || 0;
-          count++;
-        } else if (d.status === "downloading" || d.status === "paused") {
-          count++;
-        }
-      });
-      const avgProgress = count > 0 ? totalProgress / count : 0;
-      const globalProgressContainer = content.createDiv({ attr: { style: "margin-bottom: 10px;" } });
-      globalProgressContainer.createDiv({ text: `Total Progress: ${avgProgress.toFixed(1)}%`, attr: { style: "font-size: 0.8em; margin-bottom: 2px; color: var(--text-muted);" } });
-      const globalBar = globalProgressContainer.createEl("progress");
-      globalBar.addClass("cross-player-global-progress");
-      globalBar.value = avgProgress;
-      globalBar.max = 100;
-    }
-    activeDownloads.forEach((dl) => {
-      const dlItem = content.createDiv({ cls: "download-item" });
-      const nameRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; margin-bottom: 2px;" } });
-      nameRow.createSpan({ text: dl.name, attr: { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; font-weight: bold;" } });
-      let statusText = dl.progress;
-      if (dl.status === "error")
-        statusText = "Error";
-      else if (dl.status === "paused")
-        statusText = "Paused";
-      else if (dl.status === "converting")
-        statusText = "Converting...";
-      nameRow.createSpan({ text: statusText });
-      const progressBar = dlItem.createEl("progress");
-      progressBar.addClass("cross-player-download-progress");
-      if (dl.progress.includes("%")) {
-        progressBar.value = parseFloat(dl.progress) || 0;
-      } else {
-        progressBar.value = 0;
-      }
-      progressBar.max = 100;
-      const controlsRow = dlItem.createDiv({ attr: { style: "display: flex; justify-content: space-between; align-items: center; margin-top: 2px;" } });
-      const info = controlsRow.createDiv({ attr: { style: "color: var(--text-muted); font-size: 0.9em;" } });
-      if (dl.status === "downloading") {
-        info.setText(`${dl.speed} - ETA: ${dl.eta}`);
-      } else if (dl.status === "converting") {
-        info.setText("Processing media...");
-      } else if (dl.status === "error") {
-        info.setText(dl.error || "Unknown Error");
-        info.addClass("cross-player-download-error");
-      }
-      const btnGroup = controlsRow.createDiv({ attr: { style: "display: flex; gap: 5px;" } });
-      if (dl.status === "downloading") {
-        const pauseBtn = btnGroup.createEl("button", { text: "Pause" });
-        pauseBtn.addClass("cross-player-download-button");
-        pauseBtn.onclick = () => this.plugin.pauseDownload(dl.id);
-      } else if (dl.status === "paused") {
-        const resumeBtn = btnGroup.createEl("button", { text: "Resume" });
-        resumeBtn.addClass("cross-player-download-button");
-        resumeBtn.onclick = () => this.plugin.resumeDownload(dl.id);
-      } else if (dl.status === "error") {
-        const retryBtn = btnGroup.createEl("button", { text: "Retry" });
-        retryBtn.addClass("cross-player-download-button");
-        retryBtn.onclick = () => this.plugin.retryDownload(dl.id);
-      }
-      const cancelBtn = btnGroup.createEl("button", { text: "Cancel" });
-      cancelBtn.addClass("cross-player-download-button");
-      cancelBtn.onclick = () => this.plugin.cancelDownload(dl.id);
+    this.downloadRenderFrame = window.requestAnimationFrame(() => {
+      this.downloadRenderFrame = null;
+      const container = this.contentEl.querySelector(".cross-player-download-container");
+      if (!container)
+        return;
+      this.renderDownloadProgress(container);
     });
+  }
+  ensureDownloadSection(container) {
+    if (this.downloadSectionEl && this.downloadSectionEl.parentElement === container) {
+      return;
+    }
+    container.empty();
+    this.downloadRows.clear();
+    const section = container.createDiv({ cls: "cross-player-download-section" });
+    const header = section.createDiv({ cls: "cross-player-download-header" });
+    header.ariaLabel = "Toggle downloads";
+    const label = header.createDiv({ cls: "cross-player-download-header-label" });
+    const headerIcon = label.createSpan({ cls: "cross-player-download-header-icon" });
+    (0, import_obsidian.setIcon)(headerIcon, "download");
+    this.downloadTitleEl = label.createSpan({ cls: "cross-player-download-header-text" });
+    this.downloadChevronEl = header.createDiv({ cls: "clickable-icon cross-player-download-chevron" });
+    (0, import_obsidian.setIcon)(this.downloadChevronEl, "chevron-down");
+    const content = section.createDiv({ cls: "cross-player-download-content" });
+    const summary = content.createDiv({ cls: "cross-player-download-summary" });
+    const summaryRow = summary.createDiv({ cls: "cross-player-download-summary-row" });
+    this.downloadSummaryEl = summaryRow.createSpan({ cls: "cross-player-download-summary-text" });
+    this.downloadSummaryPercentEl = summaryRow.createSpan({ cls: "cross-player-download-summary-percent" });
+    const summaryTrack = summary.createDiv({ cls: "cross-player-download-bar" });
+    this.downloadSummaryFillEl = summaryTrack.createDiv({ cls: "cross-player-download-bar-fill" });
+    this.downloadListEl = content.createDiv({ cls: "cross-player-download-list" });
+    header.onclick = () => {
+      container.dataset.collapsed = container.dataset.collapsed === "true" ? "false" : "true";
+      this.applyDownloadCollapsedState(container);
+    };
+    this.downloadSectionEl = section;
+    this.downloadContentEl = content;
+    if (container.dataset.collapsed === void 0) {
+      container.dataset.collapsed = "false";
+    }
+    this.applyDownloadCollapsedState(container);
+  }
+  applyDownloadCollapsedState(container) {
+    var _a;
+    const collapsed = container.dataset.collapsed === "true";
+    (_a = this.downloadContentEl) == null ? void 0 : _a.toggleClass("is-collapsed", collapsed);
+    if (this.downloadChevronEl) {
+      (0, import_obsidian.setIcon)(this.downloadChevronEl, collapsed ? "chevron-up" : "chevron-down");
+    }
+  }
+  clearDownloadSection(container) {
+    var _a;
+    (_a = this.downloadSectionEl) == null ? void 0 : _a.remove();
+    this.downloadSectionEl = null;
+    this.downloadContentEl = null;
+    this.downloadListEl = null;
+    this.downloadTitleEl = null;
+    this.downloadSummaryEl = null;
+    this.downloadSummaryPercentEl = null;
+    this.downloadSummaryFillEl = null;
+    this.downloadChevronEl = null;
+    this.downloadRows.clear();
+    container.addClass("is-hidden");
+  }
+  renderDownloadProgress(container) {
+    var _a;
+    const downloads = this.plugin.activeDownloads;
+    if (downloads.length === 0) {
+      this.clearDownloadSection(container);
+      return;
+    }
+    container.removeClass("is-hidden");
+    this.ensureDownloadSection(container);
+    if (!this.downloadListEl)
+      return;
+    const total = downloads.length;
+    const completed = downloads.filter((download) => download.status === "completed").length;
+    const running = downloads.filter(
+      (download) => download.status === "downloading" || download.status === "converting"
+    ).length;
+    const aggregate = this.plugin.getAggregateDownloadProgress();
+    if (this.downloadTitleEl) {
+      this.downloadTitleEl.setText(`Downloads \xB7 ${total}`);
+    }
+    if (this.downloadSummaryEl) {
+      this.downloadSummaryEl.setText(
+        completed === total ? "Finishing up\u2026" : running > 0 ? `Downloading ${running} of ${total}` : `${completed} of ${total} complete`
+      );
+    }
+    if (this.downloadSummaryPercentEl) {
+      this.downloadSummaryPercentEl.setText(`${Math.round(aggregate)}%`);
+    }
+    (_a = this.downloadSummaryFillEl) == null ? void 0 : _a.setCssProps({ width: `${aggregate}%` });
+    const seen = /* @__PURE__ */ new Set();
+    for (const download of downloads) {
+      seen.add(download.id);
+      let row = this.downloadRows.get(download.id);
+      if (!row) {
+        row = this.createDownloadRow();
+        if (!row)
+          return;
+        this.downloadRows.set(download.id, row);
+      }
+      this.updateDownloadRow(row, download);
+    }
+    for (const [id, row] of this.downloadRows) {
+      if (!seen.has(id)) {
+        row.root.remove();
+        this.downloadRows.delete(id);
+      }
+    }
+  }
+  createDownloadRow() {
+    const list = this.downloadListEl;
+    if (!list)
+      return null;
+    const root = list.createDiv({ cls: "cross-player-download-item" });
+    const top = root.createDiv({ cls: "cross-player-download-item-top" });
+    const nameEl = top.createSpan({ cls: "cross-player-download-item-name" });
+    const percentEl = top.createSpan({ cls: "cross-player-download-item-percent" });
+    const track = root.createDiv({ cls: "cross-player-download-bar cross-player-download-item-bar" });
+    const fillEl = track.createDiv({ cls: "cross-player-download-bar-fill" });
+    const bottom = root.createDiv({ cls: "cross-player-download-item-bottom" });
+    const metaEl = bottom.createSpan({ cls: "cross-player-download-item-meta" });
+    const actionsEl = bottom.createDiv({ cls: "cross-player-download-item-actions" });
+    return { root, nameEl, percentEl, fillEl, metaEl, actionsEl, status: "" };
+  }
+  updateDownloadRow(row, download) {
+    if (row.nameEl.textContent !== download.name) {
+      row.nameEl.setText(download.name);
+      row.nameEl.title = download.name;
+    }
+    const value = this.plugin.getDownloadProgressValue(download);
+    row.fillEl.setCssProps({ width: `${value}%` });
+    const percentText = `${Math.round(value)}%`;
+    let metaText = "";
+    if (download.status === "downloading") {
+      const speed = download.speed && download.speed !== "0" && download.speed !== "?" ? download.speed : "";
+      const eta = download.eta && download.eta !== "?" ? download.eta : "";
+      metaText = speed || eta ? [speed, eta ? `ETA ${eta}` : ""].filter(Boolean).join(" \xB7 ") : "Starting\u2026";
+    } else if (download.status === "converting") {
+      metaText = "Processing media\u2026";
+    } else if (download.status === "paused") {
+      metaText = "Paused";
+    } else if (download.status === "completed") {
+      metaText = "Completed";
+    } else {
+      metaText = download.error || "Download failed";
+    }
+    if (row.percentEl.textContent !== percentText) {
+      row.percentEl.setText(percentText);
+    }
+    if (row.metaEl.textContent !== metaText) {
+      row.metaEl.setText(metaText);
+    }
+    row.root.toggleClass("is-error", download.status === "error");
+    row.root.toggleClass("is-paused", download.status === "paused");
+    row.root.toggleClass("is-completed", download.status === "completed");
+    if (row.status !== download.status) {
+      row.status = download.status;
+      this.buildDownloadActions(row, download);
+    }
+  }
+  buildDownloadActions(row, download) {
+    row.actionsEl.empty();
+    const addAction = (icon, label, onClick) => {
+      const button = row.actionsEl.createDiv({ cls: "clickable-icon cross-player-download-action" });
+      (0, import_obsidian.setIcon)(button, icon);
+      button.ariaLabel = label;
+      button.onclick = (event) => {
+        event.stopPropagation();
+        onClick();
+      };
+    };
+    if (download.status === "downloading") {
+      addAction("pause", "Pause download", () => this.plugin.pauseDownload(download.id));
+    } else if (download.status === "paused") {
+      addAction("play", "Resume download", () => this.plugin.resumeDownload(download.id));
+    } else if (download.status === "error") {
+      addAction("rotate-ccw", "Retry download", () => this.plugin.retryDownload(download.id));
+    }
+    if (download.status !== "completed") {
+      addAction("x", "Cancel download", () => this.plugin.cancelDownload(download.id));
+    }
   }
   updateSpeedDisplay() {
     const speedEl = this.contentEl.querySelector(".cross-player-speed-display");
